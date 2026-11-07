@@ -1,0 +1,11 @@
+bin/
+obj/
+dist/
+node_modules/
+tests/.install-guide-scratch-*/
+*.png
+!src/AdoPrView/wwwroot/icon.png
+*.user
+.vs/
+settings*.json
+*.dpapi
