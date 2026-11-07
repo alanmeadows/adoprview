@@ -1,0 +1,31 @@
+name: Bug report
+description: Something in ADO PR View does not work as expected.
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Do not paste tokens, PATs, cookies, or private organization, project, repository, or PR details. Replace them with placeholders.
+  - type: input
+    id: version
+    attributes:
+      label: Version
+      description: Release version or commit, and whether you used the installer, the ZIP, or a source build.
+    validations:
+      required: true
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened?
+      description: What you did, what you expected, and what happened instead.
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+  - type: input
+    id: environment
+    attributes:
+      label: Environment
+      description: Windows version and, if relevant, WebView2 Runtime version and WSL distribution.

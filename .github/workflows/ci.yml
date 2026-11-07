@@ -1,0 +1,59 @@
+name: CI
+
+on:
+  push:
+    branches: [main, "dependabot/**"]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-test:
+    name: Build, test and package (Windows x64)
+    runs-on: windows-2025
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-dotnet@v6.1.0
+        with:
+          dotnet-version: 10.0.x
+
+      - uses: actions/setup-node@v7.1.0
+        with:
+          node-version: lts/*
+
+      - name: Native tests
+        run: dotnet run --project tests/AdoPrView.Tests -c Release
+
+      - name: Frontend tests
+        run: node --test tests/approval-ui.test.cjs tests/row-actions.browser.test.cjs
+
+      - name: Install guide tests
+        run: ./tests/install-guide.tests.ps1
+
+      - name: Package
+        id: package
+        run: ./.github/scripts/New-ReleasePackage.ps1 -OutputDirectory artifacts
+
+      - name: Smoke-test installer and package
+        run: ./.github/scripts/Test-ReleasePackage.ps1 -ArtifactDirectory artifacts -Version ${{ steps.package.outputs.version }}
+
+      - uses: actions/upload-artifact@v7.0.2
+        with:
+          name: ${{ steps.package.outputs.name }}
+          path: |
+            artifacts/*.zip
+            artifacts/*-setup.exe
+            artifacts/*-checksums.txt
+          if-no-files-found: error
+          retention-days: 7

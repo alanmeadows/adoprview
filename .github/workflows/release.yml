@@ -1,0 +1,139 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing release tag to build and publish (for example v0.1.1)
+        required: true
+
+permissions:
+  contents: read
+
+env:
+  TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
+
+jobs:
+  build:
+    name: Validate, test and package
+    runs-on: windows-2025
+    timeout-minutes: 30
+    outputs:
+      name: ${{ steps.package.outputs.name }}
+    steps:
+      - uses: actions/checkout@v7.0.1
+        with:
+          ref: refs/tags/${{ env.TAG }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Validate tag
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if ($env:TAG -notmatch '^v(\d+\.\d+\.\d+)$') { throw "Tag '$env:TAG' is not vMAJOR.MINOR.PATCH." }
+          $version = $Matches[1]
+          $project = ([xml](Get-Content src/AdoPrView/AdoPrView.csproj -Raw)).Project.PropertyGroup | ForEach-Object { $_.SelectSingleNode('Version') } | Where-Object { $_ }
+          if (@($project)[0].InnerText -ne $version) { throw "Tag $env:TAG does not match project version $(@($project)[0].InnerText)." }
+          $tagCommit = git rev-list -n 1 "refs/tags/$env:TAG"
+          if ($tagCommit -ne (git rev-parse HEAD)) { throw 'Checked-out commit is not the tag commit.' }
+          git merge-base --is-ancestor $tagCommit origin/main
+          if ($LASTEXITCODE) { throw "Tag commit $tagCommit is not on main." }
+          gh release view $env:TAG --repo $env:GITHUB_REPOSITORY *> $null
+          if (-not $LASTEXITCODE) { throw "Release $env:TAG already exists; published releases are never overwritten." }
+          $global:LASTEXITCODE = 0
+
+      - uses: actions/setup-dotnet@v6.1.0
+        with:
+          dotnet-version: 10.0.x
+
+      - uses: actions/setup-node@v7.1.0
+        with:
+          node-version: lts/*
+
+      - name: Native tests
+        run: dotnet run --project tests/AdoPrView.Tests -c Release
+
+      - name: Frontend tests
+        run: node --test tests/approval-ui.test.cjs tests/row-actions.browser.test.cjs
+
+      - name: Install guide tests
+        run: ./tests/install-guide.tests.ps1
+
+      - name: Package
+        id: package
+        run: ./.github/scripts/New-ReleasePackage.ps1 -OutputDirectory artifacts
+
+      - name: Smoke-test installer and package
+        run: ./.github/scripts/Test-ReleasePackage.ps1 -ArtifactDirectory artifacts -Version ${{ steps.package.outputs.version }}
+
+      - uses: actions/upload-artifact@v7.0.2
+        with:
+          name: release-assets
+          path: |
+            artifacts/*.zip
+            artifacts/*-setup.exe
+            artifacts/*-checksums.txt
+          if-no-files-found: error
+          retention-days: 7
+
+  publish:
+    name: Publish GitHub release
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: write
+    concurrency:
+      group: release-${{ inputs.tag || github.ref_name }}
+      cancel-in-progress: false
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+      NAME: ${{ needs.build.outputs.name }}
+    steps:
+      - uses: actions/download-artifact@v8.0.2
+        with:
+          name: release-assets
+          path: assets
+
+      - name: Verify checksums
+        working-directory: assets
+        run: |
+          ls -l
+          test "$(ls | wc -l)" -eq 3
+          sha256sum -c ./*-checksums.txt
+
+      - name: Create draft release
+        run: |
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            echo "::error::Release $TAG already exists (possibly a draft); delete a stale draft manually. Releases are never overwritten."
+            exit 1
+          fi
+          cat > notes.md <<EOF
+          Windows x64 build of ADO PR View ${TAG#v}. Both downloads contain the same self-contained app; no .NET runtime install is needed.
+
+          - **\`$NAME-setup.exe\`**: per-user installer (no administrator rights). Installs to \`%LOCALAPPDATA%\\Programs\\ADO PR View\` and adds an **ADO PR View** Start Menu entry. Close every running dashboard first; setup refuses to run while one is open and never touches \`%LOCALAPPDATA%\\AdoPrView\` (settings, token, browser profiles and Copilot run history).
+          - **\`$NAME.zip\`**: portable folder; extract anywhere and run \`AdoPrView.exe\`.
+
+          Requires 64-bit Windows 10 or later with the Microsoft Edge WebView2 Evergreen Runtime (present on current Windows; otherwise install it from Microsoft). The files are not code-signed, so SmartScreen may warn before first launch. Verify downloads against \`AdoPrView-$TAG-checksums.txt\`. See INSTALL.md for configuration.
+          EOF
+          gh release create "$TAG" --verify-tag --draft --title "ADO PR View $TAG" --notes-file notes.md assets/*
+
+      - name: Verify uploaded assets
+        run: |
+          mkdir readback
+          gh release download "$TAG" --dir readback
+          cd readback
+          test "$(ls | wc -l)" -eq 3
+          sha256sum -c ./*-checksums.txt
+          gh api "repos/$GH_REPO/releases?per_page=100" --jq ".[] | select(.tag_name == \"$TAG\") | .assets[] | \"\(.digest) \(.name)\"" > digests.txt
+          cat digests.txt
+          while read -r hash file; do
+            grep -qx "sha256:$hash $file" digests.txt || { echo "::error::Uploaded digest mismatch for $file"; exit 1; }
+          done < ./*-checksums.txt
+
+      - name: Publish release
+        run: gh release edit "$TAG" --draft=false --latest

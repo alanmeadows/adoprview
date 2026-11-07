@@ -12,9 +12,19 @@ one configured dashboard. It asks you only what it cannot determine.
 
 See [docs/DESIGN.md](docs/DESIGN.md) for architecture, lanes and the ADO calls used.
 
+## Download
+
+[Releases](../../releases/latest) provide a per-user installer
+(`AdoPrView-v<version>-win-x64-setup.exe`, no administrator rights), a portable
+ZIP of the same self-contained app, and SHA-256 checksums. It needs no .NET
+install, only Windows 10/11 x64 with the Microsoft Edge WebView2 Evergreen
+Runtime. The files are not code-signed, so SmartScreen may warn. Close any running
+dashboard before installing, upgrading or uninstalling; setup refuses to run
+while one is open and never touches `%LOCALAPPDATA%\AdoPrView`.
+
 ## Run
 
-- Start Menu → **ADO PR View**, or the `AdoPrView.exe` in your publish folder.
+- Start Menu → **ADO PR View**, or the `AdoPrView.exe` in your install or publish folder.
 - Auth: Windows `az login` (the app uses `az account get-access-token`), or set
   `AZURE_DEVOPS_EXT_PAT` / `AZURE_DEVOPS_PAT`.
 - Settings (repos, watched authors, hidden PRs, polling, auto-complete options,
@@ -102,6 +112,11 @@ cd src\AdoPrView
 dotnet build                     # dev
 dotnet publish -c Release -r win-x64 --self-contained false -o <publish-folder>
 ```
+
+`.github/scripts/New-ReleasePackage.ps1` builds the self-contained release ZIP,
+installer (needs Inno Setup 6) and checksums. CI runs the native, frontend and
+install-guide tests on every push and pull request; pushing a `v<version>` tag
+that matches the project version and is on `main` publishes a release.
 
 Dev flags: `--mock` (fixture data), `--screenshot out.png [--size WxH] [--eval js] [--eval-wait ms]`.
 

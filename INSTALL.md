@@ -42,9 +42,12 @@ unconditional unattended authentication.
 - Reuse a compatible installed build or a user-supplied **complete** trusted
   publish tree. Otherwise build the selected source on Windows. This folder
   need not be a Git checkout; do not assume `git pull` is applicable.
-- There is no setup script and no published release download. The supported
-  route is building this source on Windows (section 6). Do not invent a release
-  URL or command-line flags; the app's only flags are developer `--mock`,
+- Tagged versions are published on the repository's GitHub **Releases** page as
+  a self-contained `win-x64` per-user installer (`AdoPrView-v<version>-win-x64-setup.exe`),
+  a portable ZIP of the same files, and a SHA-256 checksums file (section 6).
+  Building this source on Windows remains supported. The files are not
+  code-signed, so SmartScreen may warn. Do not invent a release URL or app
+  command-line flags; the app's only flags are developer `--mock`,
   `--screenshot`, `--size`, `--eval` and `--eval-wait`, none of which are for
   installation.
 - Do not read, copy, import or decrypt any credential or token file as part of
@@ -148,6 +151,9 @@ $LocalDotnet = Join-Path $env:LOCALAPPDATA 'Microsoft\dotnet\dotnet.exe'
 & $Dotnet --list-runtimes
 ```
 
+Release downloads are self-contained: they need no .NET runtime or SDK, only
+64-bit Windows 10 or later with the Microsoft Edge **WebView2 Evergreen
+Runtime**, which every build requires and current Windows normally includes.
 Source builds need a .NET 10 SDK. A complete framework-dependent publish only
 needs the matching **x64 .NET 10 Desktop Runtime** (`Microsoft.WindowsDesktop.App`
 and `Microsoft.NETCore.App`), not Visual Studio, Node, Git, an SDK or WSL.
@@ -475,7 +481,22 @@ Missing optional tools/auth can remain a clearly reported optional blocker.
 
 ## 6. Publish/copy, shortcut and one real launch
 
-For a source build, set `$SourceRoot` to the verified Windows source directory
+**Release installer.** Download the setup EXE and checksums file of the
+selected release, then compare `(Get-FileHash <file> -Algorithm SHA256).Hash`
+with its checksums line before running it. After the section 2 safe-exit gate,
+run setup interactively or with Inno Setup's standard `/VERYSILENT
+/SUPPRESSMSGBOXES /NORESTART` and check its exit code. Setup installs per user
+(no administrator rights) to `%LOCALAPPDATA%\Programs\ADO PR View` and creates
+or repoints the per-user Start Menu shortcut **ADO PR View**, the same shortcut
+the manual route below uses. It refuses to run, changing nothing, while any
+`AdoPrView.exe` is running, and it never installs, changes or removes
+`%LOCALAPPDATA%\AdoPrView` (settings, token, browser profiles, Copilot run
+history); uninstalling from Windows Settings leaves that data too. Then run the
+section 5 settings merge with every dashboard still closed and launch from the
+shortcut as below; skip the publish/copy and shortcut steps. The portable ZIP
+holds the same files and can be used as a complete publish directory.
+
+**Source build.** For a source build, set `$SourceRoot` to the verified Windows source directory
 and `$Dotnet` to the chosen Windows SDK executable. Publish to a **new staging
 directory**, not over a running app. Use the agent's normal supervised build
 runner if available; check the actual publish exit code.
