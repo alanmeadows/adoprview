@@ -6,6 +6,7 @@ node_modules/
 tests/.install-guide-scratch-*/
 *.png
 !src/AdoPrView/wwwroot/icon.png
+!docs/images/*.png
 *.user
 .vs/
 settings*.json

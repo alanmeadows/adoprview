@@ -618,3 +618,18 @@ paths; configured org/project/repo scope and preserved watched-author choices;
 actual running PID/path and live refresh or verified no-PR outcome; optional WSL
 status; and any remaining blocker or specific human interaction. Report actual
 side effects, not imagined tests or capabilities.
+
+## After setup: what the human still does
+
+Tell the user what remains for them, and only what actually applies:
+
+- any sign-in, MFA, SSO, consent, security-key or Windows Hello step the agent
+  could not complete;
+- a choice of repositories, watched authors or WSL checkout, only if discovery
+  was ambiguous;
+- Copilot CLI sign-in in WSL, only if they want inline Copilot Fix;
+- the PR work itself: reviews, approvals, Proof of Presence, auto-complete and
+  publishing stay deliberate human actions.
+
+Viewing PRs needs neither WSL nor Copilot. Point the user to
+[docs/usage.md](docs/usage.md) for how to use the dashboard.
