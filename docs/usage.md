@@ -45,13 +45,14 @@ each lane. Click a counter to filter by it.
 
 - **Needs Human** means only reviewer approval (+1), Proof of Presence,
   auto-complete or publishing a draft remains, in any combination. In practice
-  that is two kinds of work:
+  that is two kinds of work, which can appear together on one PR:
   - **A reviewer's approval is still needed.** The enlarged **+1** button marks
     the PR. Any approver can provide it, so it applies to watched PRs too;
     the +1 is amber only on your own PRs.
-  - **Only finishing actions remain:** **PoP** (Proof of Presence), **Auto**
-    (set auto-complete) and/or **Publish** (a draft). These are amber on your
-    own PRs; on watched PRs the same buttons appear without amber.
+  - **Your finishing actions:** **PoP** (Proof of Presence), **Auto**
+    (set auto-complete) and/or **Publish** (a draft), alone or alongside +1
+    when a review is also still needed. These are amber on your own PRs; on
+    watched PRs the same buttons appear without amber.
 - **Blocked** — failures and required fixes: merge conflicts, a failed build or
   check, unresolved comments, open review-bot findings, a rejecting vote, and so
   on. These are what the inline Copilot Fix is for.

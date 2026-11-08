@@ -28,20 +28,22 @@ table sorted by what they are waiting on: **Needs Human**, **Blocked**,
 
 ### Needs Human: a reviewer still has to approve
 
-![Two PRs where only reviewer approval remains, each with an enlarged +1 button](docs/images/needs-human-review.png)
+![Two PRs needing reviewer approval, each with an enlarged +1 button; one also needs PoP](docs/images/needs-human-review.png)
 
-Everything automated is done and the PR is waiting for reviewer approval. The
-**+1** button is enlarged on these rows. Any approver can give it, so watched
-PRs show it too; it is amber only on your own PRs.
+The app found no remaining automated work it could see, and the PR still needs
+reviewer approval. The **+1** button is enlarged on these rows. Any approver can
+give it, so watched PRs show it too; it is amber only on your own PRs. The +1
+can appear alongside finishing steps, like PoP on the second row.
 
-### Needs Human: only your finishing steps remain
+### Needs Human: your finishing steps
 
-![Three PRs with finishing actions: PoP and Auto on your PR, PoP on a watched PR, and Publish on a draft](docs/images/needs-human-finish.png)
+![Three PRs with finishing actions: PoP and Auto on your PR, PoP on a watched PR, and a draft needing +1, Publish and Auto](docs/images/needs-human-finish.png)
 
-Reviews are in, and only finishing steps remain: **PoP** (Proof of Presence with
-a security key), **Auto** (set auto-complete) or **Publish** (a draft). They can
-appear in any combination. They are amber on your PRs; a watched PR shows the
-same steps without amber.
+The finishing actions are **PoP** (Proof of Presence with a security key),
+**Auto** (set auto-complete) and **Publish** (a draft). They can appear alone,
+in any combination, or alongside +1 when a review is also still needed, as on
+the draft. They are amber on your PRs; a watched PR shows the same steps without
+amber.
 
 Needs Human is the app's verified, human-only state for what it read from ADO;
 it is not a guarantee that every policy is known or green.
