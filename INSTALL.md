@@ -472,7 +472,11 @@ Check Git, Copilot, `bgtask`, `flock`, `setsid` and `python3`, plus current
 `copilot --help` / `bgtask --help`, using the same owned
 `~/.config/bash/environment`/existing BASH_ENV as the runner. Do not overwrite
 those files, global model/MCP configuration, `triageInstructions`, `fixSkill` or
-`fixReviewerModels`. If `fixSkill` or `fixReviewerModels` are set, check that the
+`fixReviewerModels`. Inline-run compatibility checks the advertised option names
+(`--no-ask-user`, `--stream`, `--no-color`, `--deny-tool`, `--yolo`, `--session-id`,
+`--resume`), not exact sentences in the help text. A failure names the missing
+options; inspect the CLI in the configured WSL distribution, not the Windows CLI.
+If `fixSkill` or `fixReviewerModels` are set, check that the
 named skill is present and tell the user the reviewer models must be available
 to their Copilot CLI; do not substitute models or edit global preferences.
 If CLI authentication needs interaction, let the user complete it in the actual

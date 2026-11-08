@@ -10,7 +10,7 @@
     <AssemblyName>AdoPrView</AssemblyName>
     <RootNamespace>AdoPrView</RootNamespace>
     <ApplicationIcon>app.ico</ApplicationIcon>
-    <Version>0.1.1</Version>
+    <Version>0.1.2</Version>
     <SatelliteResourceLanguages>en</SatelliteResourceLanguages>
   </PropertyGroup>
 
