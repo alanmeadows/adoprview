@@ -545,12 +545,12 @@ public sealed partial class CopilotRunService : IAsyncDisposable
 
     static void CheckCli(string help)
     {
-        if (!help.Contains("--no-ask-user", StringComparison.Ordinal) || !help.Contains("--stream", StringComparison.Ordinal) ||
-            !help.Contains("--deny-tool", StringComparison.Ordinal) || !help.Contains("--yolo", StringComparison.Ordinal) ||
-            !help.Contains("--session-id", StringComparison.Ordinal) || !help.Contains("--resume", StringComparison.Ordinal) ||
-            !help.Contains("piped stdin", StringComparison.Ordinal) ||
-            !help.Contains("non-interactive mode cannot ask", StringComparison.OrdinalIgnoreCase))
-            throw new RunSetupException("The installed WSL Copilot CLI does not advertise the required stdin/streaming/headless/--yolo contract. Update it in WSL before using inline runs.");
+        var required = new[] { "--no-ask-user", "--stream", "--no-color", "--deny-tool", "--yolo", "--session-id", "--resume" };
+        var missing = required.Where(option =>
+            !Regex.IsMatch(help, @"(?<![\w-])" + Regex.Escape(option) + @"(?![\w-])", RegexOptions.CultureInvariant)).ToArray();
+        if (missing.Length != 0)
+            throw new RunSetupException("The installed WSL Copilot CLI does not advertise required headless inline-run options: " +
+                string.Join(", ", missing) + ". Check 'copilot --help' in the configured WSL distribution and update that CLI if needed.");
     }
 
     static int ReadExitCode(CopilotProcessResult result)

@@ -7,7 +7,7 @@ using AdoPrView;
 static class CopilotRunTests
 {
     const string Commit = "1111111111111111111111111111111111111111";
-    const string Help = "--no-ask-user --stream --deny-tool --yolo --session-id --resume; piped stdin; non-interactive mode cannot ask";
+    const string Help = "--no-ask-user --stream --no-color --deny-tool --yolo --session-id --resume";
 
     static void Check(bool condition, string message)
     {
@@ -205,6 +205,49 @@ static class CopilotRunTests
                 await Wait(service, run.RunId, s => !s.IsActive);
             }
         });
+
+        foreach (var (name, help) in new[]
+        {
+            ("option names only", Help),
+            ("current CLI wording", """
+                -r, --resume [<value>]
+                    Resume a session
+                    --session-id <id>
+                    --stream <mode>
+                    --deny-tool [<tools>...]
+                    --yolo
+                    --no-ask-user
+                        Disable the ask_user tool (agent works autonomously without
+                        asking questions)
+                    --no-color
+                        Disable all color output
+                """),
+        })
+            await test("Copilot advertised CLI options tolerate changed help wording: " + name, async () =>
+            {
+                var fake = new FakeTransport { CliHelp = help };
+                await using var service = new CopilotRunService(fake);
+                var run = await service.StartAsync(Request());
+                await Wait(service, run.RunId, s => s.Status == "running");
+                Check(fake.Calls.Any(c => c.Operation == "launch"), "Advertised options were rejected because of help prose");
+                fake.Finish(0);
+                await Wait(service, run.RunId, s => !s.IsActive);
+            });
+
+        foreach (var option in new[] { "--no-ask-user", "--stream", "--no-color", "--deny-tool", "--yolo", "--session-id", "--resume" })
+            foreach (var replacement in new[] { "", option + "-other", "--other-" + option[2..] })
+                await test($"Copilot missing CLI option {option} is named and blocks launch (replacement='{replacement}')", async () =>
+                {
+                    var fake = new FakeTransport { CliHelp = Help.Replace(option, replacement) };
+                    await using var service = new CopilotRunService(fake);
+                    var run = await service.StartAsync(Request());
+                    var done = await Wait(service, run.RunId, s => !s.IsActive);
+                    Check(done.Status == "failed" && done.Message.Contains("options: " + option + "."),
+                        "Missing option was not identified precisely");
+                    Check(done.Message.Contains("configured WSL distribution"), "Diagnostic does not identify which CLI to inspect");
+                    Check(!fake.Calls.Any(c => c.Operation is "prepare" or "stage-prompt" or "launch"),
+                        "Missing option created a worktree or launched a task");
+                });
 
         await test("Copilot missing mapping/source/tool contract errors never launch a real task", async () =>
         {
@@ -791,7 +834,7 @@ static class CopilotRunTests
             #!/usr/bin/python3
             import json,os,pathlib,re,shlex,shutil,socket,subprocess,sys
             if "--help" in sys.argv:
-                print("--no-ask-user --stream --deny-tool --yolo --session-id --resume; piped stdin; non-interactive mode cannot ask")
+                print("--no-ask-user --stream --no-color --deny-tool --yolo --session-id --resume")
                 sys.exit(0)
             prompt=sys.stdin.read()
             resumed="--resume" in sys.argv

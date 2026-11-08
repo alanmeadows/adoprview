@@ -249,6 +249,11 @@ organization/project/repository remote before launching. WSL needs Git,
 authenticated Copilot CLI and the managed task runner `bgtask`. The shared
 `~/.config/bash/environment` supplies PATH/BASH_ENV.
 
+Inline-run compatibility checks advertised CLI option names, not exact help
+sentences. If a required option is absent, the error lists it. Check
+`copilot --help` in the configured WSL distribution; updating the Windows CLI
+does not change that installation.
+
 Each run gets a unique, isolated worktree/branch at the freshly verified PR source
 commit, not your current/default branch. Main-checkout files, index and branch
 are not switched, reset or stashed. Different PRs can run concurrently from one

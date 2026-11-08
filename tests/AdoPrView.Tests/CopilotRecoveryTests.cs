@@ -5,7 +5,7 @@ using AdoPrView;
 
 static class CopilotRecoveryTests
 {
-    const string Help = "--no-ask-user --stream --deny-tool --yolo --session-id --resume; piped stdin; non-interactive mode cannot ask";
+    const string Help = "--no-ask-user --stream --no-color --deny-tool --yolo --session-id --resume";
     static void Check(bool condition, string message) { if (!condition) throw new Exception(message); }
     static CopilotRunRequest Request() => new("repo-id:12", 12, "Saved offline PR", "offline-org", "offline-project",
         "offline-repo", "repo-id", "refs/heads/topic", new string('1', 40), "ORIGINAL PRIVATE PROMPT",
