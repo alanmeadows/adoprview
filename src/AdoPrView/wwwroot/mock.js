@@ -140,13 +140,40 @@ Fixes AB#1234`;
   const snapshot = { prs, lastRefresh: iso(0.4), refreshing: false, error: null, repoErrors: [], me: 'Sam Example',
     approvalProvider: { name: 'Sample approval', linkUrl: null, linkLabel: null }, approvalProviderError: null };
   const runs = new Map();
+  const explanations = new Map();
+  let explanationSequence = 0;
 
   window.MockHost = {
     onEvent: null,
     async rpc(method, p) {
       await new Promise((r) => setTimeout(r, 150));
       switch (method) {
-        case 'init': return { settings, snapshot, runs: [...runs.values()], version: 'mock' };
+        case 'init': return { settings, snapshot, runs: [...runs.values()], explanations: [...explanations.values()], version: 'mock' };
+        case 'explainPr': {
+          const pr = prs.find(x => x.key === p.key);
+          if (!pr) throw new Error('Mock PR not found.');
+          const state = { key: pr.key, requestId: 'mock-' + (++explanationSequence), sequence: explanationSequence,
+            status: 'running', message: 'UI preview only: no Copilot model or ADO request is running.',
+            output: '', revision: { iteration: 4, sourceCommit: '1111111111111111111111111111111111111111',
+              baseCommit: '2222222222222222222222222222222222222222' }, coverage: [] };
+          explanations.set(p.key, state);
+          setTimeout(() => {
+            if (explanations.get(p.key)?.requestId !== state.requestId || explanations.get(p.key)?.status !== 'running') return;
+            const done = { ...state, sequence: ++explanationSequence, status: 'completed',
+              message: 'Mock explanation: interaction preview only, not a live model result.',
+              output: 'UI preview only. A real summary identifies the affected component, its role in the repository and the meaningful change.',
+              coverage: ['No real PR content was inspected in this mock preview.'] };
+            explanations.set(p.key, done); this.onEvent?.({ event: 'explanation', data: done });
+          }, 1200);
+          return state;
+        }
+        case 'cancelExplanation': {
+          const state = explanations.get(p.key);
+          if (!state || state.requestId !== p.requestId) throw new Error('This mock explanation is no longer current.');
+          const cancelled = { ...state, sequence: ++explanationSequence, status: 'cancelled', message: 'Mock explanation cancelled.' };
+          explanations.set(p.key, cancelled); this.onEvent?.({ event: 'explanation', data: cancelled });
+          return cancelled;
+        }
         case 'logTail': return logText;
         case 'triage': case 'copyPrompt': return { prompt: 'mock' };
         case 'openPop': return { message: `Mock inline PoP for ${p.key}; no browser, sign-in or approval was started. The installed app uses a separate native Edge WebView2 pane.` };
