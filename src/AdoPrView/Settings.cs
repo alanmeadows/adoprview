@@ -74,6 +74,7 @@ public sealed class AppSettings
     public int RefreshSeconds { get; set; } = 120;
     public int MergeCheckMinutes { get; set; } = 10;
     public bool Notifications { get; set; } = true;
+    public bool IgnoreDrafts { get; set; }
     public AutoCompleteOptions AutoComplete { get; set; } = new();
     public string? TriageInstructions { get; set; }
     public string? WslDistro { get; set; }

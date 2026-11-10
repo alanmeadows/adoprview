@@ -119,6 +119,20 @@ static class CopilotSourceTests
 
     public static async Task Run(Func<string, Func<Task>, Task> test)
     {
+        foreach (var draft in new bool?[] { null, true, false })
+            await test($"Copilot preflight verifies fresh draft status when ignoring drafts: {draft}", async () =>
+            {
+                using var f = new Fixture();
+                f.Store.Current.IgnoreDrafts = true;
+                f.Fresh["isDraft"] = draft is null ? null : JsonValue.Create(draft.Value);
+                if (draft == false)
+                    Check((await f.Service.GetCopilotSourceAsync(f.Pr.Key)).SourceCommit == Sha, "Published PR was blocked");
+                else
+                {
+                    await Reject(() => f.Service.GetCopilotSourceAsync(f.Pr.Key));
+                    Check(f.Reads == 1, "Ignored or unverified draft read its source");
+                }
+            });
         await test("Copilot source is the exact captured active ADO PR ref and commit, not the dashboard's old branch", async () =>
         {
             using var f = new Fixture();

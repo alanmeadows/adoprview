@@ -34,6 +34,11 @@ sweeps, retries, in-flight deduplication and fresh result handling. The install
 guide check parses every PowerShell block in INSTALL.md and runs its settings
 merge against a disposable folder.
 
+Draft-monitoring regressions use fake HTTP responses to cover opt-in persistence,
+skipped detail reads and writes, publication/back-to-draft transitions, and stale
+notification delivery. Frontend checks cover the Ignored drafts filter, deferred
+snapshots and retained Fix controls without starting a live Fix.
+
 `src\AdoPrView\wwwroot\index.html?mock=1` runs the UI in a browser against
 synthetic fixtures. The screenshots in [images](images) were captured from that
 mock UI with synthetic data.

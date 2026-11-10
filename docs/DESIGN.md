@@ -42,6 +42,13 @@ enough detail inline that you rarely need to click into ADO.
   core loads only from an explicitly configured local assembly; it is not a
   sandbox or plugin marketplace. See [Approval provider contract](#approval-provider-contract).
 
+Draft exclusion is opt-in through the persisted `IgnoreDrafts` setting
+(default `false`). Ignored drafts retain list metadata for the dedicated filter,
+but skip policy/thread/build reads, classification and automatic merge writes.
+Fresh native action preflights reject a newly ignored draft. Notification queues
+store PR keys and lanes, then revalidate against visible current rows and settings
+before delivery. Publishing restores detailed monitoring on the next refresh.
+
 ## Approval provider contract
 
 The public dashboard contains no approval-service integration. `ApprovalProvider.cs`
