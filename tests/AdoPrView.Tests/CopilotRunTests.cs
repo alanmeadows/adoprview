@@ -330,6 +330,20 @@ static class CopilotRunTests
                 !CopilotRunService.CleanupScript.Contains("--force"), "Main checkout or forced removal mutation");
         });
 
+        await test("Copilot preflight stage and exit reach failed run state without starting preparation", async () =>
+        {
+            var fake = new FakeTransport { FailOperation = "preflight",
+                FailureError = "private URL/token\nADOPRVIEW_PREFLIGHT:copilot:1\n" };
+            await using var service = new CopilotRunService(fake);
+            var run = await service.StartAsync(Request());
+            var done = await Wait(service, run.RunId, s => !s.IsActive);
+            Check(done.Message.Contains("~/.local/bin/copilot") && done.Message.Contains("exit 1") &&
+                !done.Message.Contains("private") && !done.Output.Contains("private") &&
+                fake.Calls.Count == 1, "Preflight failure lost safe diagnostic or continued into preparation");
+            Check(fake.Calls.Single().Script.StartsWith(CopilotRunService.PreflightDiagnosticsScript),
+                "Stage diagnostics were not installed before environment initialization");
+        });
+
         if (Environment.GetEnvironmentVariable("ADOPRVIEW_TEST_WSL") == "1")
             await test("Copilot disposable WSL repos verify final --yolo argv, generated review/description prompt/CWD, isolation and dirty/unpushed retention with fake CLI", RunWslWorktrees);
     }
@@ -342,6 +356,7 @@ static class CopilotRunTests
         public const string PushHash = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
         public string CliHelp = Help;
         public string? FailOperation, ThrowOperation;
+        public string FailureError = "offline-secret";
         public TaskCompletionSource Started = NewSignal();
         TaskCompletionSource<int> completion = NewCompletion();
         Action<string>? stdout, stderr;
@@ -358,7 +373,7 @@ static class CopilotRunTests
             Calls.Enqueue(request);
             token.ThrowIfCancellationRequested();
             if (ThrowOperation == request.Operation) throw new InvalidOperationException("offline-secret");
-            if (FailOperation == request.Operation) return new(1, "", "offline-secret");
+            if (FailOperation == request.Operation) return new(1, "", FailureError);
             string Protocol(params string[] values) => "ADOPRVIEW1\0" + string.Join('\0', values) + "\0";
             switch (request.Operation)
             {

@@ -376,6 +376,7 @@ await ReviewBotScopeTests.Run(Test);
 await BuildCacheScopeTests.Run(Test);
 await CopilotSourceTests.Run(Test);
 await CopilotRunTests.Run(Test);
+await CopilotPreflightTests.Run(Test);
 await CopilotRecoveryTests.Run(Test);
 await PopPaneTests.Run(Test);
 await AutoCompleteTests.Run(Test);

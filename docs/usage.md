@@ -247,7 +247,13 @@ default) and each repository's source directory. Blank directories try
 `~/clones/<repo>`. The app verifies the directory and its exact Azure DevOps
 organization/project/repository remote before launching. WSL needs Git,
 authenticated Copilot CLI and the managed task runner `bgtask`. The shared
-`~/.config/bash/environment` supplies PATH/BASH_ENV.
+`~/.config/bash/environment` supplies PATH/BASH_ENV. The non-login runner keeps
+existing PATH resolution first, then tries nvm's default and executable
+`~/.local/bin/copilot` if Copilot is still missing. This PATH adjustment is
+inherited by runner children only; no shell configuration is edited.
+`bgtask` also supports the existing `~/go/bin/bgtask` fallback. Preflight errors
+identify the failed dependency or inspection stage and exit code without
+displaying environment values, remote URLs or raw tool errors.
 
 Inline-run compatibility checks advertised CLI option names, not exact help
 sentences. If a required option is absent, the error lists it. Check

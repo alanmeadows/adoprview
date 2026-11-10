@@ -331,7 +331,7 @@ public sealed partial class CopilotRunService : IAsyncDisposable
         {
             var probe = await Invoke("preflight", r.WslDistribution, PreflightScript,
                 [r.WslPath ?? "", r.Repository], token: token).ConfigureAwait(false);
-            RequireSuccess(probe, "WSL preflight failed. Check the configured distro/path, Git, Copilot CLI and bgtask installation.");
+            RequirePreflightSuccess(probe);
             env = ParseEnvironment(probe.StandardOutput, r);
             e.Environment = env;
             e.RunDirectory = env.Home + "/.local/state/ado-prview/runs/" + e.State.RunId;
@@ -480,7 +480,38 @@ public sealed partial class CopilotRunService : IAsyncDisposable
     Task<CopilotProcessResult> Invoke(string operation, string? distribution, string script, IReadOnlyList<string> arguments,
         string? input = null, Action<string>? stdout = null, Action<string>? stderr = null, CancellationToken token = default) =>
         transport.ExecuteAsync(new(operation, string.IsNullOrWhiteSpace(distribution) ? null : distribution,
+            (operation == "preflight" ? PreflightDiagnosticsScript + "\n" : "") +
             EnvironmentScript + "\n" + script, arguments, input), stdout, stderr, token);
+
+    internal static void RequirePreflightSuccess(CopilotProcessResult result)
+    {
+        if (result.ExitCode == 0) return;
+        var stage = "WSL/environment initialization; check the configured distribution and owned environment files";
+        foreach (var line in result.StandardError.Split('\n'))
+        {
+            var fields = line.TrimEnd('\r').Split(':');
+            if (fields.Length != 3 || fields[0] != "ADOPRVIEW_PREFLIGHT" ||
+                !int.TryParse(fields[2], out var code) || code != result.ExitCode) continue;
+            stage = fields[1] switch
+            {
+                "checkout" => "checkout lookup; check the configured absolute WSL repository directory",
+                "git" => "Git checkout inspection; check Git and the configured repository",
+                "copilot" => "Copilot executable lookup; check WSL PATH or executable ~/.local/bin/copilot",
+                "bgtask" => "bgtask executable lookup; check WSL PATH or executable ~/go/bin/bgtask",
+                "flock" => "flock executable lookup; check the WSL util-linux installation",
+                "setsid" => "setsid executable lookup; check the WSL util-linux installation",
+                "python3" => "python3 executable lookup; check the WSL Python installation",
+                "copilot-help" => "copilot --help; check that the WSL CLI and its runtime dependencies execute",
+                "bgtask-help" => "bgtask --help; check that the WSL task runner executes",
+                "copilot-home" => "Copilot home validation; COPILOT_HOME must be an absolute WSL path",
+                "distribution" => "WSL distribution identification; WSL_DISTRO_NAME is required",
+                "remotes" => "Git remote inspection; check the checkout's remote configuration",
+                _ => stage
+            };
+        }
+        // Only host-owned stage names and the exit code cross the diagnostic boundary, never raw stderr or URLs.
+        throw new RunSetupException($"WSL preflight failed at {stage} (exit {result.ExitCode}). This preflight did not start a Fix task.");
+    }
 
     static void RequireSuccess(CopilotProcessResult result, string message)
     {
@@ -676,35 +707,65 @@ public sealed partial class CopilotRunService : IAsyncDisposable
           source "$HOME/.nvm/nvm.sh" >/dev/null
           nvm use default --silent >/dev/null
         fi
+        if ! command -v copilot >/dev/null 2>&1 && [[ -x "$HOME/.local/bin/copilot" ]]; then
+          export PATH="$PATH:$HOME/.local/bin"
+        fi
         export NO_COLOR=1 TERM=dumb GIT_TERMINAL_PROMPT=0 GCM_INTERACTIVE=never
         """;
 
+    internal const string PreflightDiagnosticsScript = """
+        set -Eeuo pipefail
+        preflight_stage=environment
+        preflight_fail() {
+          printf 'ADOPRVIEW_PREFLIGHT:%s:%s\n' "$preflight_stage" "$1" >&2
+          exit "$1"
+        }
+        trap 'preflight_fail "$?"' ERR
+        """;
+
     internal const string PreflightScript = """
+        preflight_stage=checkout
         cwd="$1"; repo="$2"
         if [[ -z "$cwd" ]]; then cwd="$HOME/clones/$repo"; fi
         if [[ "$cwd" == "~" ]]; then cwd="$HOME"; elif [[ "$cwd" == "~/"* ]]; then cwd="$HOME/${cwd:2}"; fi
-        [[ "$cwd" == /* && -d "$cwd" ]] || exit 72
+        [[ "$cwd" == /* && -d "$cwd" ]] || preflight_fail 72
         cd -- "$cwd"
+        preflight_stage=git
         root="$(git rev-parse --show-toplevel 2>/dev/null)"
         cd -- "$root"; root="$(pwd -P)"
         common="$(git rev-parse --git-common-dir)"
         common="$(cd -- "$common" && pwd -P)"
-        cli="$(command -v copilot)"
+        preflight_stage=copilot
+        cli="$(command -v copilot || true)"
+        [[ "$cli" == /* && -x "$cli" ]] || preflight_fail 73
+        preflight_stage=bgtask
         bg="$(command -v bgtask || true)"
         if [[ -z "$bg" && -x "$HOME/go/bin/bgtask" ]]; then bg="$HOME/go/bin/bgtask"; fi
-        [[ "$cli" == /* && -x "$cli" && "$bg" == /* && -x "$bg" ]] || exit 73
-        command -v flock setsid python3 >/dev/null
+        [[ "$bg" == /* && -x "$bg" ]] || preflight_fail 73
+        for dependency in flock setsid python3; do
+          preflight_stage="$dependency"
+          command -v "$dependency" >/dev/null
+        done
+        preflight_stage=copilot-help
         help="$("$cli" --help)"
+        preflight_stage=bgtask-help
         "$bg" --help >/dev/null
+        preflight_stage=copilot-home
         copilot_home="${COPILOT_HOME:-$HOME/.copilot}"
-        [[ "$copilot_home" == /* ]] || exit 73
+        [[ "$copilot_home" == /* ]] || preflight_fail 73
+        preflight_stage=distribution
+        [[ -n "${WSL_DISTRO_NAME-}" ]] || preflight_fail 73
         printf 'ADOPRVIEW1\0%s\0%s\0%s\0%s\0%s\0%s\0%s\0%s\0%s\0' "${WSL_DISTRO_NAME:?}" "$(id -un)" "$HOME" "$root" "$common" "$cli" "$bg" "$help" "$copilot_home"
+        preflight_stage=remotes
+        remotes="$(git remote)"
         while IFS= read -r remote; do
+          [[ -n "$remote" ]] || continue
           url="$(git remote get-url "$remote")"
           push="$(git remote get-url --push --all "$remote")"
           pushhash="$(git remote get-url --push --all "$remote" | sha256sum)"
           printf '%s\0%s\0%s\0%s\0' "$remote" "$url" "$push" "${pushhash%% *}"
-        done < <(git remote)
+        done <<< "$remotes"
+        trap - ERR
         """;
 
     internal const string PrepareScript = """
