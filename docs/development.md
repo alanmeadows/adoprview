@@ -34,6 +34,21 @@ sweeps, retries, in-flight deduplication and fresh result handling. The install
 guide check parses every PowerShell block in INSTALL.md and runs its settings
 merge against a disposable folder.
 
+Direct reviewer approval has a focused offline native suite:
+
+```powershell
+$env:ADOPRVIEW_TEST_FILTER = 'Reviewer vote'
+dotnet run --project tests\AdoPrView.Tests -c Release
+Remove-Item Env:\ADOPRVIEW_TEST_FILTER
+```
+
+Its fake HTTP transport checks the authenticated reviewer-only payload, captured
+source/target revisions, latest iteration, monitoring eligibility, duplicate
+requests, nonretrying writes and explicit ambiguity on post-write races or
+read-back failure. The frontend and browser suites exercise one-click row and
+expanded actions, busy/error/confirmed states, provider coexistence and stable
+neighboring action targets. All approval writes in these checks are intercepted.
+
 `src\AdoPrView\wwwroot\index.html?mock=1` runs the UI in a browser against
 synthetic fixtures. The screenshots in [images](images) were captured from that
 mock UI with synthetic data.

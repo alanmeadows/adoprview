@@ -25,8 +25,8 @@
   --warn-bg: rgba(240, 140, 60, .13);
 
   --mono: "Cascadia Mono", "Cascadia Code", Consolas, monospace;
-  --action-cols: 54px 78px 58px 66px 30px 30px;
-  --cols: minmax(320px, 1fr) repeat(5, 90px) 76px 352px;
+  --action-cols: 90px 78px 58px 66px 30px 30px;
+  --cols: minmax(320px, 1fr) repeat(5, 90px) 76px 388px;
   color-scheme: dark;
 }
 

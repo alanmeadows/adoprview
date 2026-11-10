@@ -21,6 +21,10 @@ public sealed record ThreadView(
 
 public sealed record ReviewerView(string Name, int Vote, bool IsRequired, bool IsContainer, string? Id = null);
 
+public sealed record ReviewVoteTarget(string ReviewerId, string SourceCommit, string TargetCommit, string SourceRef, string TargetRef, int IterationId, int Vote);
+public sealed record ReviewVoteState(string ReviewerId, string ReviewerName, int? Vote, bool CanApprove, string Detail, ReviewVoteTarget? Target);
+public sealed record ReviewVoteResult(bool Confirmed, bool AlreadyApproved, string Message, PrView Pr);
+
 public sealed record AgencyView(string State, int? Iteration, int? CurrentIteration, string Detail);
 
 public sealed class PrView
@@ -41,6 +45,7 @@ public sealed class PrView
     public bool IsHidden { get; init; }
     public bool IsActive { get; set; } = true;
     public ApprovalOffer? Approval { get; set; }
+    public ReviewVoteState? ReviewVote { get; set; }
     public bool IsDraft { get; init; }
     public DateTimeOffset Created { get; init; }
     public DateTimeOffset Updated { get; set; }

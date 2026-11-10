@@ -370,6 +370,7 @@ await Test("custom chime is an original, non-clipping mono PCM wave under one se
 });
 
 await MergeChecksTests.Run(Test);
+await ReviewerVoteTests.Run(Test);
 await ApprovalProviderTests.Run(Test);
 await SettingsTests.Run(Test);
 await ReviewBotScopeTests.Run(Test);

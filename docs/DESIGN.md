@@ -37,8 +37,21 @@ enough detail inline that you rarely need to click into ADO.
   invalid file stops startup with a message and is never overwritten. Every
   settings object keeps unrecognized JSON members and writes them back; saves
   are atomic (temporary file, then replace).
-* **Approval provider (optional):** the **+1** slot opens the PR in ADO unless an
-  approval provider is loaded. A provider is trusted native .NET code that the
+* **Reviewer approval:** `Bridge -> PrService.ReviewerVotes -> AdoClient`.
+  `ReviewVoteTarget` captures the signed-in reviewer, source and target commits,
+  branch refs, latest iteration and previous vote. One click submits only the
+  authenticated user's ordinary vote (`10`). Native checks reject inactive,
+  hidden, unwatched or unmonitored PRs, identity changes and stale revisions.
+  A per-PR duplicate guard and the shared refresh gate serialize requests.
+  `PutOnceAsync` never retries; authoritative reviewer, PR, iteration and ref
+  reads must confirm the vote and revision before publishing success.
+  ADO has no atomic revision-conditioned vote: post-write races or failed reads
+  explicitly report an unconfirmed, possibly recorded vote, without retry or
+  rollback. Policy classification comes from refreshed ADO state, not the vote.
+* **Approval provider (optional):** the provider's **+1** action occupies the
+  Review slot when offered; otherwise it shows ordinary **Approve**. Ordinary
+  approval is also available in expanded **Your ADO review** details.
+  A provider is trusted native .NET code that the
   core loads only from an explicitly configured local assembly; it is not a
   sandbox or plugin marketplace. See [Approval provider contract](#approval-provider-contract).
 
@@ -87,6 +100,7 @@ real launch.
 | Failed-gate log tail | `GET build/builds/{id}/timeline` → failed Task `log.id`; `GET build/builds/{id}/logs` (lineCount); `GET …/logs/{logId}?startLine=&endLine=` |
 | Merge re-check | Shared exact-target `GET git/repositories/{repo}/refs?filter=heads/{target}`; scheduled stale checks or a target-change/forced sweep issue fresh PR GET + `PATCH pullrequests/{id} {mergeOptions}` (ADO "Restart merge"); skip `queued`/`notSet`, and skip `conflicts` for automatic requests |
 | Auto-complete | `PATCH pullrequests/{id} {autoCompleteSetBy:{id:me}, completionOptions:{mergeStrategy:squash, deleteSourceBranch:true, transitionWorkItems:true}}` |
+| Ordinary reviewer approval | Fresh identity/PR/latest iteration/source and target ref GETs; one nonretrying `PUT …/pullrequests/{id}/reviewers/{authenticatedUserId} {id:authenticatedUserId, vote:10}`; reviewer GET plus fresh PR/iteration/ref read-back |
 | Cancel auto-complete | `PATCH … {autoCompleteSetBy:{id:"00000000-…"}}` |
 | Publish draft | `PATCH … {isDraft:false}` |
 | Re-queue build policy | `PATCH policy/evaluations/{evaluationId}` |

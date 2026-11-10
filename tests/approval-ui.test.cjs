@@ -40,6 +40,166 @@ function setup() {
   return { hooks, pr, window, elements, dialogs };
 }
 
+function addReviewVote(pr) {
+  pr.isActive = true;
+  pr.repoId = 'repository-id';
+  pr.reviewers = [];
+  pr.sourceBranch = 'feature';
+  pr.targetBranch = 'main';
+  pr.reviewVote = {
+    reviewerId: 'signed-in-user', reviewerName: 'Signed-in Reviewer', vote: 0, canApprove: true,
+    detail: 'Only your ordinary vote. Required reviews and PoP remain separate.',
+    target: { reviewerId: 'signed-in-user', sourceCommit: 'a'.repeat(40), targetCommit: 'b'.repeat(40),
+      sourceRef: 'refs/heads/feature', targetRef: 'refs/heads/main', iterationId: 4, vote: 0 },
+  };
+}
+
+function approvedResult(pr) {
+  return { confirmed: true, message: 'Your ordinary ADO vote is Approved. Other reviewers remain required.',
+    pr: { ...pr, reviewVote: { ...pr.reviewVote, vote: 10, canApprove: false, target: { ...pr.reviewVote.target, vote: 10 } },
+      reviewers: [{ name: 'Signed-in Reviewer', id: 'signed-in-user', vote: 10 }] } };
+}
+
+test('ordinary Approve submits once without confirmation and preserves provider and captured identity/revisions', async () => {
+  const { hooks, pr, window, dialogs } = setup();
+  addReviewVote(pr);
+  assert.match(hooks.actionButtons(pr), /data-act="generateApproval"/);
+  const detail = hooks.renderDetail(pr);
+  assert.match(detail, /Your ADO review/);
+  assert.match(detail, /data-act="approve"/);
+  assert.match(detail, /data-act="generateApproval"/);
+  delete pr.approval;
+  assert.match(hooks.actionButtons(pr), /data-act="approve"/);
+  assert.match(hooks.actionButtons(pr), /<span>Approve<\/span>/);
+  window.confirm = () => { throw new Error('Ordinary approval must not open a confirmation dialog'); };
+  let calls = 0;
+  window.MockHost.rpc = async (method, p) => {
+    calls++;
+    assert.equal(method, 'approve');
+    assert.equal(p.key, pr.key);
+    assert.deepEqual(Object.keys(p), ['key', 'expected']);
+    assert.equal(p.expected.reviewerId, 'signed-in-user');
+    assert.equal(p.expected.sourceCommit, 'a'.repeat(40));
+    assert.equal(p.expected.targetCommit, 'b'.repeat(40));
+    assert.equal(p.expected.iterationId, 4);
+    assert.equal(p.expected.vote, 0);
+    return approvedResult(pr);
+  };
+  await hooks.onAction('approve', {}, pr.key);
+  assert.equal(calls, 1);
+  assert.equal(dialogs.length, 0);
+  assert.equal(hooks.S.snap.prs[0].reviewVote.vote, 10);
+  assert.match(hooks.actionButtons(hooks.S.snap.prs[0]), /disabled/);
+});
+
+test('ordinary approval locks row and expanded controls, suppresses duplicate clicks and retains required-review gates', async () => {
+  const { hooks, pr, window, dialogs } = setup();
+  addReviewVote(pr);
+  delete pr.approval;
+  pr.humanActions = ['reviews', 'pop'];
+  pr.gates.reviews = { state: 'human', label: 'More required' };
+  let resolve, calls = 0;
+  window.MockHost.rpc = () => { calls++; return new Promise(r => { resolve = r; }); };
+  const pending = hooks.onAction('approve', {}, pr.key);
+  await hooks.onAction('approve', {}, pr.key);
+  assert.equal(calls, 1);
+  assert.match(hooks.actionButtons(pr), /data-act="approve"[\s\S]*?disabled aria-busy="true"/);
+  assert.match(hooks.renderDetail(pr), /data-act="approve"[\s\S]*?disabled aria-busy="true"/);
+  resolve(approvedResult(pr));
+  await pending;
+  assert.equal(hooks.S.snap.prs[0].gates.reviews.state, 'human');
+  assert.deepEqual(hooks.S.snap.prs[0].humanActions, ['reviews', 'pop']);
+  await hooks.onAction('approve', {}, pr.key);
+  assert.equal(calls, 1);
+  assert.equal(dialogs.length, 0);
+  assert.match(hooks.renderDetail(hooks.S.snap.prs[0]), /Your ordinary ADO vote is Approved/);
+});
+
+test('ordinary approval never turns malformed, wrong-identity, changed-revision or failed read-back into success', async () => {
+  for (const kind of ['empty', 'wrong-pr', 'wrong-user', 'changed-source', 'changed-target', 'unconfirmed', 'transport']) {
+    const { hooks, pr, window, dialogs } = setup();
+    addReviewVote(pr);
+    let calls = 0;
+    window.MockHost.rpc = async () => {
+      calls++;
+      if (kind === 'transport') throw new Error('<denied> Approval not confirmed; refresh before retrying.');
+      if (kind === 'empty') return {};
+      const result = approvedResult(pr);
+      if (kind === 'wrong-pr') result.pr.key = 'other:456';
+      if (kind === 'wrong-user') result.pr.reviewVote.target.reviewerId = 'someone-else';
+      if (kind === 'changed-source') result.pr.reviewVote.target.sourceCommit = 'c'.repeat(40);
+      if (kind === 'changed-target') result.pr.reviewVote.target.targetCommit = 'c'.repeat(40);
+      if (kind === 'unconfirmed') result.confirmed = false;
+      return result;
+    };
+    await hooks.onAction('approve', {}, pr.key);
+    assert.equal(calls, 1, kind);
+    assert.equal(dialogs.length, 0, kind);
+    assert.equal(hooks.S.snap.prs[0].reviewVote.vote, 0, kind);
+    assert.equal(hooks.S.reviewVotes.get(pr.key).kind, 'error', kind);
+    assert.equal(hooks.S.busy.size, 0, kind);
+    if (kind === 'transport') assert.match(hooks.renderDetail(pr), /&lt;denied&gt;/);
+    else assert.match(hooks.S.reviewVotes.get(pr.key).message, /may have recorded your vote/);
+  }
+});
+
+test('ordinary approval refuses inactive, hidden and pending changed-revision rows before submitting', async () => {
+  for (const kind of ['inactive', 'hidden', 'pending', 'removed', 'error']) {
+    const { hooks, pr, window, dialogs } = setup();
+    addReviewVote(pr);
+    let calls = 0;
+    window.MockHost.rpc = async () => { calls++; };
+    if (kind === 'inactive') pr.isActive = false;
+    if (kind === 'hidden') hooks.S.settings.hidden.push(pr.key.toUpperCase());
+    if (kind === 'pending') hooks.S.pendingSnapshot = { prs: [{ ...pr, reviewVote: { ...pr.reviewVote, target: { ...pr.reviewVote.target, iterationId: 5 } } }] };
+    if (kind === 'removed') hooks.S.pendingSnapshot = { prs: [] };
+    if (kind === 'error') pr.error = 'Could not refresh';
+    await hooks.onAction('approve', {}, pr.key);
+    assert.equal(calls, 0, kind);
+    assert.equal(dialogs.length, 0, kind);
+  }
+});
+
+test('ordinary approval supports monitored drafts without publishing', async () => {
+  const { hooks, pr, window } = setup();
+  addReviewVote(pr);
+  pr.isDraft = true;
+  const calls = [];
+  window.MockHost.rpc = async method => { calls.push(method); return approvedResult(pr); };
+  await hooks.onAction('approve', {}, pr.key);
+  assert.deepEqual(calls, ['approve']);
+  assert.equal(hooks.S.snap.prs[0].isDraft, true);
+});
+
+test('ordinary approval applies only confirmed captured PR and never overwrites newer queued revision or neighbor', async () => {
+  const { hooks, pr, window } = setup();
+  addReviewVote(pr);
+  const neighbor = { ...pr, key: 'other:456', id: 456 };
+  hooks.S.snap.prs.push(neighbor);
+  let resolve;
+  window.MockHost.rpc = () => new Promise(r => { resolve = r; });
+  const pending = hooks.onAction('approve', {}, pr.key);
+  const newer = { ...pr, reviewVote: { ...pr.reviewVote, target: { ...pr.reviewVote.target, iterationId: 5 } } };
+  hooks.S.pendingSnapshot = { prs: [newer, neighbor] };
+  resolve(approvedResult(pr));
+  await pending;
+  assert.equal(hooks.S.snap.prs[0].reviewVote.vote, 10);
+  assert.equal(hooks.S.pendingSnapshot.prs[0].reviewVote.target.iterationId, 5);
+  assert.equal(hooks.S.pendingSnapshot.prs[0].reviewVote.vote, 0);
+  assert.equal(hooks.S.snap.prs[1], neighbor);
+});
+
+test('a later vote reset or revision change clears earlier ordinary-approval success message', async () => {
+  const { hooks, pr, window } = setup();
+  addReviewVote(pr);
+  window.MockHost.rpc = async () => approvedResult(pr);
+  await hooks.onAction('approve', {}, pr.key);
+  assert.equal(hooks.S.reviewVotes.get(pr.key).kind, 'confirmed');
+  hooks.setSnapshot({ ...hooks.S.snap, prs: [{ ...pr, reviewVote: { ...pr.reviewVote, target: { ...pr.reviewVote.target, iterationId: 5 } } }] });
+  assert.equal(hooks.S.reviewVotes.has(pr.key), false);
+  assert.equal(hooks.S.snap.prs[0].reviewVote.vote, 0);
+});
+
 test('only rows with a provider offer expose the approval action; existing actions remain', () => {
   const { hooks, pr } = setup();
   const html = hooks.actionButtons(pr);
