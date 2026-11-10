@@ -802,6 +802,21 @@ public sealed partial class PrService
 
     // ---------------------------------------------------------------- triage
 
+    internal async Task<ExplainContext> GetExplainContextAsync(string key, CancellationToken ct)
+    {
+        var pr = Find(key);
+        void CheckAvailable()
+        {
+            if (_store.Current.Hidden.Contains(key, StringComparer.OrdinalIgnoreCase) ||
+                !_store.Current.Repos.Any(r => r.Key == $"{pr.Org}/{pr.Project}/{pr.Repo}".ToLowerInvariant()))
+                throw new InvalidOperationException("This PR is no longer monitored. Refresh before explaining it.");
+        }
+        CheckAvailable();
+        var context = await ExplainContext.CaptureAsync(_ado, pr, ct);
+        try { CheckAvailable(); return context; }
+        catch { context.Dispose(); throw; }
+    }
+
     public async Task<(PrView Pr, string SourceRef, string SourceCommit, string Prompt)> GetCopilotSourceAsync(string key)
     {
         var pr = Find(key);

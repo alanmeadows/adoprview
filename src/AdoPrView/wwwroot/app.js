@@ -29,6 +29,8 @@ function onHostMessage(m) {
     toast(m.data.text, m.data.kind);
   } else if (m.event === 'copilotRun') {
     try { updateCopilotRun(m.data); } catch (e) { toast(e.message || String(e), 'error'); }
+  } else if (m.event === 'explanation') {
+    try { updateExplanation(m.data); } catch (e) { toast(e.message || String(e), 'error'); }
   }
 }
 
@@ -60,6 +62,7 @@ const S = {
   approvalSettings: null,
   approvalSettingsBusy: false,
   runs: new Map(),
+  explanations: new Map(),
   rowMenu: null,
   drawer: false,
   discovered: null,
@@ -310,6 +313,84 @@ const runsForPr = key => [...S.runs.values()].reverse().filter(r => r.key === ke
   .sort((a, b) => (Date.parse(b.startedAt) || 0) - (Date.parse(a.startedAt) || 0));
 const runForPr = key => runsForPr(key).at(0);
 
+const explanationActive = r => !!r && ['preparing', 'running', 'cancelling'].includes(r.status);
+const explanationLabel = r => r?.status === 'failed' || r?.status === 'cancelled' ? 'Retry Explain' : r ? 'Explain again' : 'Explain this PR';
+function canExplain(key) {
+  const p = S.pendingSnapshot ? S.pendingSnapshot.prs.find(p => p.key === key) : findPr(key);
+  return !!p && !p.error && !p.isHidden && !hiddenSet().has(key.toLowerCase());
+}
+
+function explanationRevision(r) {
+  const v = r?.revision;
+  return v ? `Iteration ${v.iteration} · source ${v.sourceCommit.slice(0, 12)} · merge base ${v.baseCommit.slice(0, 12)}` : '';
+}
+
+function explanationBody(r) {
+  if (!r?.output) return '';
+  if (r.status !== 'completed') return `<pre class="explain-stream">${esc(r.output)}</pre>`;
+  const html = window.marked ? marked.parse(r.output, { gfm: true, breaks: true }) : esc(r.output);
+  // Model output cannot load remote media, navigate links or inject interactive controls.
+  return window.DOMPurify ? DOMPurify.sanitize(html, {
+    ALLOWED_TAGS: ['p', 'br', 'strong', 'em', 'ul', 'ol', 'li', 'code', 'pre', 'h1', 'h2', 'h3', 'h4',
+      'table', 'thead', 'tbody', 'tr', 'th', 'td', 'blockquote', 'hr', 'del'],
+    ALLOWED_ATTR: [],
+  }) : esc(r.output);
+}
+
+function renderExplanation(key) {
+  const r = S.explanations.get(key), active = explanationActive(r);
+  return `<div class="card explanation" data-explain-key="${esc(key)}">
+    <h3><span class="grow">What does this PR do?</span>
+      <button class="mini" data-act="explainPr" ${active || isBusy(key, 'explainPr') || !canExplain(key) ? 'disabled' : ''}>${svg('spark')} ${explanationLabel(r)}</button>
+      <button class="mini" data-act="cancelExplanation" data-request-id="${esc(r?.requestId || '')}" ${active ? '' : 'hidden'} ${r?.status === 'cancelling' ? 'disabled' : ''}>${svg('x')} Cancel</button></h3>
+    <div class="body">
+      <p class="explain-status small${r?.status === 'failed' ? ' error' : ''}" role="status" aria-live="polite">${esc(r?.message || 'A brief summary of what changes and where it fits in this repository.')}</p>
+      <div class="explain-output md" tabindex="0" aria-label="PR explanation" ${r?.output ? '' : 'hidden'}>${explanationBody(r)}</div>
+      <details class="explain-details">
+        <summary>Evidence and coverage<span class="explain-notices">${r?.coverage?.length ? ` · ${r.coverage.length} notices` : ''}</span></summary>
+        <p class="small">AI-generated; verify important details against the code. Read-only Copilot context; this does not start Fix PR or change ADO.</p>
+        <p class="explain-revision small">${esc(explanationRevision(r))}</p>
+        <div class="explain-evidence small">${(r?.evidence || []).map(x => `<p>${esc(x)}</p>`).join('')}</div>
+        <div class="explain-coverage small">${(r?.coverage || []).map(x => `<p>${esc(x)}</p>`).join('')}</div>
+      </details>
+    </div></div>`;
+}
+
+function updateExplanation(r) {
+  if (!r || typeof r.key !== 'string' || typeof r.requestId !== 'string' || !Number.isSafeInteger(r.sequence) ||
+      !['preparing', 'running', 'cancelling', 'completed', 'cancelled', 'failed'].includes(r.status) ||
+      typeof r.output !== 'string' || !Array.isArray(r.coverage))
+    throw new Error('Copilot returned an invalid explanation state.');
+  const old = S.explanations.get(r.key);
+  if (old && r.sequence <= old.sequence) return;
+  S.explanations.set(r.key, r);
+  // Streaming only mutates this panel, preserving neighboring action targets and focus.
+  for (const card of document.querySelectorAll('.explanation')) {
+    if (card.dataset.explainKey !== r.key) continue;
+    const active = explanationActive(r);
+    const status = $('.explain-status', card);
+    status.textContent = r.message;
+    status.classList.toggle('error', r.status === 'failed');
+    $('.explain-revision', card).textContent = explanationRevision(r);
+    const output = $('.explain-output', card);
+    const bottom = output.scrollHeight - output.clientHeight - output.scrollTop < 30;
+    output.hidden = !r.output;
+    output.innerHTML = explanationBody(r);
+    if (r.status === 'completed' && old?.status !== 'completed') output.scrollTop = 0;
+    else if (bottom) output.scrollTop = output.scrollHeight;
+    $('.explain-coverage', card).innerHTML = r.coverage.map(x => `<p>${esc(x)}</p>`).join('');
+    $('.explain-evidence', card).innerHTML = (r.evidence || []).map(x => `<p>${esc(x)}</p>`).join('');
+    $('.explain-notices', card).textContent = r.coverage.length ? ` · ${r.coverage.length} notices` : '';
+    const start = $('[data-act="explainPr"]', card);
+    start.disabled = active || isBusy(r.key, 'explainPr') || !canExplain(r.key);
+    start.innerHTML = `${svg('spark')} ${explanationLabel(r)}`;
+    const cancel = $('[data-act="cancelExplanation"]', card);
+    cancel.hidden = !active;
+    cancel.disabled = r.status === 'cancelling';
+    cancel.dataset.requestId = r.requestId;
+  }
+}
+
 function runSummary(r) {
   return `${r.status}${r.exitCode == null ? '' : ` · exit ${r.exitCode}`}: ${r.message || ''}`;
 }
@@ -526,6 +607,7 @@ function renderDetail(p) {
   const left = [];
   const right = [];
   const full = [];
+  full.push(renderExplanation(p.key));
   full.push(renderRunCard(p.key) + earlierRunCards(p.key));
 
   if (p.approval || S.approvals.has(p.key)) {
@@ -840,6 +922,29 @@ async function onAction(act, el, key) {
         updateCopilotRun(r);
       });
       break;
+    case 'explainPr':
+      if (!canExplain(key) || isBusy(key, act) || explanationActive(S.explanations.get(key))) return;
+      S.busy.add(`${key}:${act}`);
+      for (const card of document.querySelectorAll('.explanation')) {
+        if (card.dataset.explainKey === key) $('[data-act="explainPr"]', card).disabled = true;
+      }
+      try { updateExplanation(await rpc('explainPr', { key })); }
+      catch (e) { toast(e.message || String(e), 'error'); }
+      finally {
+        S.busy.delete(`${key}:${act}`);
+        const state = S.explanations.get(key);
+        for (const card of document.querySelectorAll('.explanation')) {
+          if (card.dataset.explainKey === key) $('[data-act="explainPr"]', card).disabled = explanationActive(state) || !canExplain(key);
+        }
+      }
+      break;
+    case 'cancelExplanation':
+      if (!p || isBusy(key, act)) return;
+      S.busy.add(`${key}:${act}`);
+      try { updateExplanation(await rpc('cancelExplanation', { key, requestId: el.dataset.requestId })); }
+      catch (e) { toast(e.message || String(e), 'error'); }
+      finally { S.busy.delete(`${key}:${act}`); }
+      break;
     case 'cancelRun':
       await runAction(key, 'cancelRun', async () => updateCopilotRun(await rpc('cancelCopilot', { key, runId: el.dataset.runId })));
       break;
@@ -1123,6 +1228,7 @@ async function boot() {
   const init = await rpc('init');
   S.settings = init.settings;
   for (const run of init.runs || []) updateCopilotRun(run);
+  for (const explanation of init.explanations || []) updateExplanation(explanation);
   setSnapshot(init.snapshot);
   render();
   window.chrome?.webview?.postMessage('ready');

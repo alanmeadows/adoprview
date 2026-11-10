@@ -83,6 +83,11 @@ test('real row hit testing and action identity across refreshes', { timeout: 900
         }
         if(method==='cancelCopilot')return {...S.runs.get(p.runId),status:'cancelled',message:'Cancelled fake run; worktree retained',worktreeRetained:true};
         if(method==='restartMerge')return {requested:true,message:'Intercepted merge re-check'};
+        if(method==='explainPr')return {key:p.key,requestId:'offline-explain-'+(++window.explainSequence),
+          sequence:window.explainSequence,status:'running',message:'Reading synthetic pinned context',
+          output:'',coverage:[],revision:{iteration:4,sourceCommit:'a'.repeat(40),baseCommit:'b'.repeat(40)}};
+        if(method==='cancelExplanation')return {...S.explanations.get(p.key),sequence:++window.explainSequence,
+          status:'cancelled',message:'Explanation cancelled. Partial text is not a finished explanation.'};
         if(method==='autoComplete'){
           if(window.autoFailure)throw Error('Offline auto-complete denied');
           const pr=structuredClone(S.snap.prs.find(x=>x.key===p.key));
@@ -140,6 +145,7 @@ test('real row hit testing and action identity across refreshes', { timeout: 900
         S.rowOrder=[];S.orderRevision=null;S.laneRetained.clear();S.runs.clear();S.busy.clear();closeRowMenu();
         window.holdLog=false;S.settings.hidden=['sample-deploy-id:1001'];S.hideUndo=[];
         window.confirmations=[];window.confirmResult=true;window.autoFailure=false;S.autoCompleteErrors.clear();
+        window.explainSequence=0;S.explanations.clear();
         setSnapshot(structuredClone(window.baseline));${race ? 'window.raceFixture();' : ''}render();window.calls=[];`);
       await frame();
     };
@@ -155,6 +161,63 @@ test('real row hit testing and action identity across refreshes', { timeout: 900
       const menu = await evaluate(`(()=>{const b=document.querySelector('#rowMenu button'),r=b.getBoundingClientRect();return {x:r.x+r.width/2,y:r.y+r.height/2};})()`);
       return { ...p, x: menu.x, y: menu.y };
     };
+
+    await t.test('Explain preserves row targets, sanitizes output, discloses pinned evidence and supports cancel/retry at wide and narrow widths', async () => {
+      const key='sample-service-id:101';
+      for (const width of [1600,900]) {
+        await send('Emulation.setDeviceMetricsOverride', {width,height:1000,deviceScaleFactor:1,mobile:false});
+        await reset(true);
+        await evaluate(`S.expanded.add('${key}');renderRows();
+          window.originalFix=document.querySelector('[data-key="${key}"] .row [data-act="triage"]');`);
+        await click(await point(key,'.detail [data-act="explainPr"]')); await frame();
+        assert.deepEqual((await calls()).map(c=>c.method),['explainPr']);
+        assert.equal(await evaluate(`(()=>{
+          const button=document.querySelector('[data-key="${key}"] [data-act="explainPr"]');
+          button.click();return button.disabled;
+        })()`),true);
+        assert.equal((await calls()).length,1);
+        await evaluate(`updateExplanation({...S.explanations.get('${key}'),sequence:++window.explainSequence,
+          output:'Partial <script>window.explainInjected=true</script>',coverage:['Binary payload omitted'],
+          evidence:['after: /README.md, lines 1-12.']});`);
+        assert.equal(await evaluate(`window.originalFix===document.querySelector('[data-key="${key}"] .row [data-act="triage"]')`),true);
+        assert.equal(await evaluate('window.explainInjected===true'),false);
+        assert.equal(await evaluate(`document.querySelector('[data-key="${key}"] .explain-details').open`),false);
+        await click(await point(key,'.detail [data-act="cancelExplanation"]')); await frame();
+        const cancel=(await calls()).find(c=>c.method==='cancelExplanation');
+        assert.equal(cancel.key,key);
+        assert.equal(cancel.requestId,'offline-explain-1');
+        assert.match(await evaluate(`document.querySelector('[data-key="${key}"] [data-act="explainPr"]').textContent`),/Retry Explain/);
+        await click(await point(key,'.detail [data-act="explainPr"]')); await frame();
+        await evaluate(`window.currentExplain=S.explanations.get('${key}');
+          updateExplanation({...window.currentExplain,sequence:++window.explainSequence,status:'completed',
+            message:'Summary ready.',output:'The fixture generator is a developer utility. Its dependency changes. <img src="https://evil.invalid/image"><a href="https://evil.invalid/">link</a><button>run</button>',
+            coverage:['Binary payload omitted'],evidence:['after: /README.md, lines 1-12.']});
+          updateExplanation({...window.currentExplain,sequence:1,output:'late cancelled response'});`);
+        assert.equal(await evaluate(`(()=>{
+          const card=document.querySelector('[data-key="${key}"] .explanation');
+          return !card.querySelector('.explain-output img, .explain-output a, .explain-output button, .explain-output script')
+            && card.querySelector('.explain-output').textContent.includes('developer utility')
+            && !card.querySelector('.explain-details').open
+            && card.scrollWidth<=card.clientWidth+1;
+        })()`),true,`Sanitized brief panel fits at ${width}px`);
+        const summary=await point(key,'.explain-details summary');
+        await click(summary); await frame();
+        assert.match(await evaluate(`document.querySelector('[data-key="${key}"] .explain-revision').textContent`),/source aaaaaaaaaaaa.*merge base bbbbbbbbbbbb/);
+        assert.match(await evaluate(`document.querySelector('[data-key="${key}"] .explain-evidence').textContent`),/README.md/);
+        assert.match(await evaluate(`document.querySelector('[data-key="${key}"] .explain-coverage').textContent`),/Binary payload omitted/);
+        await evaluate(`document.querySelector('[data-key="${key}"] .explain-details summary').focus();`);
+        await send('Input.dispatchKeyEvent',{type:'keyDown',key:'Enter',code:'Enter',windowsVirtualKeyCode:13,text:'\r'});
+        await send('Input.dispatchKeyEvent',{type:'keyUp',key:'Enter',code:'Enter',windowsVirtualKeyCode:13});
+        await frame();
+        assert.equal(await evaluate(`document.querySelector('[data-key="${key}"] .explain-details').open`),false);
+        await evaluate(`updateExplanation({...S.explanations.get('${key}'),sequence:++window.explainSequence,
+          status:'failed',message:'The PR revisions changed. Retry Explain.',output:'partial response'});`);
+        assert.match(await evaluate(`document.querySelector('[data-key="${key}"] .explain-status').textContent`),/revisions changed/);
+        assert.match(await evaluate(`document.querySelector('[data-key="${key}"] [data-act="explainPr"]').textContent`),/Retry Explain/);
+        assert.deepEqual((await calls()).map(c=>c.method),['explainPr','cancelExplanation','explainPr']);
+      }
+      await send('Emulation.setDeviceMetricsOverride', {width:1600,height:1000,deviceScaleFactor:1,mobile:false});
+    });
 
     await t.test('Auto turns grey in-place under the pointer only after confirmed set; cancel, refresh, collapse and failure remain truthful', async () => {
       await reset(true);

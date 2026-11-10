@@ -379,6 +379,7 @@ await CopilotRunTests.Run(Test);
 await CopilotRecoveryTests.Run(Test);
 await PopPaneTests.Run(Test);
 await AutoCompleteTests.Run(Test);
+await ExplainTests.Run(Test);
 
 Console.WriteLine($"{tests} offline tests passed. No live HTTP or approval requests were made.");
 

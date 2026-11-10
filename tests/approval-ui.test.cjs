@@ -28,7 +28,7 @@ function setup() {
     window, document, URLSearchParams, location: { search: '?mock=1' },
     console, setTimeout() {}, setInterval() {}, queueMicrotask, confirm: text => window.confirm(text),
   });
-  vm.runInContext(source + '\nglobalThis.hooks = { S, onAction, actionButtons, renderDetail, setSnapshot, flushRowUpdates, renderRows, undoHide, baseVisible, updateCopilotRun, renderRunShelf, runForPr, runActive, onDrawerAction, loadApprovalSettings, renderDrawer };', context);
+  vm.runInContext(source + '\nglobalThis.hooks = { S, onAction, actionButtons, renderDetail, setSnapshot, flushRowUpdates, renderRows, undoHide, baseVisible, updateCopilotRun, renderRunShelf, runForPr, runActive, onDrawerAction, loadApprovalSettings, renderDrawer, renderExplanation, updateExplanation, explanationBody };', context);
   const { hooks } = context;
   const pr = {
     key: 'repo:123', id: 123, repo: 'sample-service', title: 'Offline PR',
@@ -37,8 +37,96 @@ function setup() {
   };
   hooks.S.settings = { repos: [{}], hidden: [], whitelist: [], autoComplete: { mergeStrategy: 'squash' }, refreshSeconds: 120, mergeCheckMinutes: 10 };
   hooks.S.snap = { prs: [pr], lastRefresh: new Date().toISOString(), approvalProvider: { name: 'Sample approval' } };
-  return { hooks, pr, window, elements, dialogs };
+  return { hooks, pr, window, elements, dialogs, document, context, element };
 }
+
+test('Explain is available on expanded drafts without changing fixed row actions or starting Fix', async () => {
+  const { hooks, pr, window } = setup();
+  pr.isDraft = true;
+  assert.match(hooks.renderDetail(pr), /data-act="explainPr"/);
+  assert.doesNotMatch(hooks.actionButtons(pr), /data-act="explainPr"/);
+  const calls = [];
+  let resolve;
+  window.MockHost.rpc = (method, p) => {
+    calls.push({ method, p });
+    return new Promise(r => { resolve = r; });
+  };
+  const pending = hooks.onAction('explainPr', {}, pr.key);
+  await hooks.onAction('explainPr', {}, pr.key);
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].method, 'explainPr');
+  assert.deepEqual(Object.keys(calls[0].p), ['key']);
+  const state = { key: pr.key, requestId: 'one', sequence: 1, status: 'running', message: 'Reading', output: '', coverage: [], revision: null };
+  resolve(state);
+  await pending;
+  assert.equal(hooks.S.explanations.get(pr.key).requestId, 'one');
+  window.MockHost.rpc = async (method, p) => {
+    assert.equal(method, 'cancelExplanation');
+    assert.equal(p.key, pr.key);
+    assert.equal(p.requestId, 'one');
+    return { ...state, sequence: 2, status: 'cancelled' };
+  };
+  await hooks.onAction('cancelExplanation', { dataset: { requestId: 'one' } }, pr.key);
+  assert.equal(hooks.S.explanations.get(pr.key).status, 'cancelled');
+});
+
+test('Explain streams only into the captured panel and ignores stale request/sequence events', () => {
+  const { hooks, pr, document, element, elements } = setup();
+  const nodes = Object.fromEntries(['.explain-status', '.explain-revision', '.explain-output', '.explain-coverage', '.explain-evidence', '.explain-notices',
+    '[data-act="explainPr"]', '[data-act="cancelExplanation"]'].map(s => [s, element()]));
+  const card = { dataset: { explainKey: pr.key }, querySelector: s => nodes[s] };
+  document.querySelectorAll = s => s === '.explanation' ? [card] : [];
+  const sentinel = { innerHTML: 'neighbor stays put' };
+  elements.set('#rows', sentinel);
+  const state = { key: pr.key, requestId: 'one', sequence: 5, status: 'running', message: 'Reading',
+    output: '<script>unsafe</script>', coverage: ['Binary not inspected'], revision: { iteration: 4, sourceCommit: 'a'.repeat(40), baseCommit: 'b'.repeat(40) } };
+  hooks.updateExplanation(state);
+  assert.match(nodes['.explain-output'].innerHTML, /&lt;script&gt;/);
+  assert.equal(nodes['[data-act="cancelExplanation"]'].dataset.requestId, 'one');
+  assert.equal(nodes['[data-act="explainPr"]'].disabled, true);
+  assert.equal(sentinel.innerHTML, 'neighbor stays put');
+  hooks.updateExplanation({ ...state, requestId: 'new', sequence: 8, status: 'completed', output: 'finished' });
+  hooks.updateExplanation({ ...state, sequence: 6, output: 'late old response' });
+  assert.equal(hooks.S.explanations.get(pr.key).output, 'finished');
+  assert.equal(nodes['[data-act="cancelExplanation"]'].hidden, true);
+  assert.equal(nodes['[data-act="explainPr"]'].disabled, false);
+  assert.equal(nodes['.explain-output'].scrollTop, 0);
+  assert.match(nodes['.explain-revision'].textContent, /merge base bbbbbbbbbbbb/);
+});
+
+test('Explain refuses hidden, failed and removed pending rows without sending their content', async () => {
+  for (const reason of ['hidden', 'error', 'removed']) {
+    const { hooks, pr, window } = setup();
+    let calls = 0;
+    window.MockHost.rpc = async () => { calls++; };
+    if (reason === 'hidden') hooks.S.settings.hidden.push(pr.key);
+    if (reason === 'error') pr.error = 'Repository unavailable';
+    if (reason === 'removed') hooks.S.pendingSnapshot = { prs: [] };
+    assert.match(hooks.renderExplanation(pr.key), /data-act="explainPr" disabled/);
+    await hooks.onAction('explainPr', {}, pr.key);
+    assert.equal(calls, 0, reason);
+  }
+});
+
+test('Explain sanitizes completed Markdown without remote media/links/controls and labels partial errors', () => {
+  const { hooks, pr, window, context } = setup();
+  let options;
+  context.marked = window.marked = { parse: text => text };
+  context.DOMPurify = window.DOMPurify = { sanitize: (_, config) => { options = config; return '<p>safe</p>'; } };
+  assert.equal(hooks.explanationBody({ output: '<img src="https://evil.invalid/">', status: 'completed' }), '<p>safe</p>');
+  for (const tag of ['a', 'img', 'script', 'iframe', 'input', 'button', 'style', 'svg'])
+    assert.ok(!options.ALLOWED_TAGS.includes(tag));
+  assert.equal(options.ALLOWED_ATTR.length, 0);
+  hooks.updateExplanation({ key: pr.key, requestId: 'failed', sequence: 10, status: 'failed',
+    message: 'Sign in required', output: 'partial <b>text</b>', coverage: ['No full diff inspected'], revision: null });
+  const html = hooks.renderExplanation(pr.key);
+  assert.match(html, /Sign in required/);
+  assert.match(html, /No full diff inspected/);
+  assert.match(html, /partial &lt;b&gt;text&lt;\/b&gt;/);
+  assert.match(html, /Retry Explain/);
+  assert.match(html, /<details class="explain-details">/);
+  assert.doesNotMatch(html, /<details[^>]*\bopen\b/);
+});
 
 test('only rows with a provider offer expose the approval action; existing actions remain', () => {
   const { hooks, pr } = setup();

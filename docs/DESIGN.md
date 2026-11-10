@@ -41,6 +41,26 @@ enough detail inline that you rarely need to click into ADO.
   approval provider is loaded. A provider is trusted native .NET code that the
   core loads only from an explicitly configured local assembly; it is not a
   sandbox or plugin marketplace. See [Approval provider contract](#approval-provider-contract).
+* **Explain:** `Bridge -> ExplainService -> ExplainContext / ExplainModel`.
+  The service captures repository/PR identity and the latest iteration's source
+  and common-base commits, pages changes with `$compareTo=0`, and supplies bounded
+  diffs, file windows and directory listings through four host-owned read-only
+  tools. The model must inspect context beyond the diff to establish the affected
+  component's role in the repository. The final summary is limited to 1-3 sentences
+  and 80 words, with at most one compression attempt; host-recorded evidence and
+  omissions stay behind a separate disclosure. Final verification
+  rejects changed iterations, refs, commits or failed context reads. `ExplainModel`
+  lazily owns a native Windows SDK runtime under `AdoPrView\Explain\runtime`,
+  uses a fresh session per request, and verifies the effective tool catalog
+  exactly matches its allowlist before sending PR data. Configuration discovery,
+  instructions, skills, hooks, host Git operations, memory and session storage
+  are disabled; all permission requests are rejected. The child environment
+  excludes token overrides and ADO credentials. Copilot authentication uses the
+  SDK's logged-in-user mechanism. Stream events carry PR/request identity and a
+  monotonic sequence; only the explanation panel updates. Completed Markdown
+  permits no attributes, links, media or interactive controls. Shutdown cancels
+  and awaits work before disposing the runtime. See [usage](usage.md#explain-this-pr)
+  for bounds and [development](development.md) for offline checks.
 
 ## Approval provider contract
 

@@ -21,6 +21,7 @@ public sealed class MainWindow : Window, IApprovalUi
     readonly PopBrowserPane _pop;
     readonly IApprovalProvider? _approval;
     readonly CopilotRunService _copilot = new();
+    readonly ExplainService _explain;
     readonly ConcurrentDictionary<string, byte> _copilotStarting = new(StringComparer.OrdinalIgnoreCase);
     readonly Options _opts;
     readonly System.Windows.Forms.NotifyIcon _tray;
@@ -41,6 +42,7 @@ public sealed class MainWindow : Window, IApprovalUi
         _store = new SettingsStore();
         (_approval, var approvalError) = ApprovalProviderLoader.Load(_store.Current.ApprovalProvider);
         _prs = new PrService(new AdoClient(), _store, _approval, approvalError);
+        _explain = new ExplainService(_prs.GetExplainContextAsync);
         _pop = new PopBrowserPane(_prs.RefreshPopAsync);
 
         Title = "ADO PR View";
@@ -111,6 +113,7 @@ public sealed class MainWindow : Window, IApprovalUi
             _shutdownInProgress = true;
             try
             {
+                await _explain.DisposeAsync();
                 await _copilot.DisposeAsync();
                 _pop.Dispose();
                 _shutdownComplete = true;
@@ -161,8 +164,9 @@ public sealed class MainWindow : Window, IApprovalUi
                 System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo(e.Uri) { UseShellExecute = true });
         };
 
-        _bridge = new Bridge(_prs, _store, PostAsync, Kick, _approval, this, HandleCopilotAsync, HandlePopAsync);
+        _bridge = new Bridge(_prs, _store, PostAsync, Kick, _approval, this, HandleCopilotAsync, HandlePopAsync, HandleExplainAsync);
         _copilot.Changed += run => _ = _bridge.PushCopilotRunAsync(RunForUi(run));
+        _explain.Changed += state => _ = _bridge.PushExplanationAsync(state);
         core.WebMessageReceived += (_, e) =>
         {
             if (!PopTarget.IsDashboardSource(e.Source)) return;
@@ -193,6 +197,16 @@ public sealed class MainWindow : Window, IApprovalUi
         run.WorktreePath, run.WorktreeStatus, run.WorktreeRetained, run.Distro, run.SourceDirectory, run.StartedAt, run.FinishedAt,
         run.SessionId, run.ResumeAttempts, run.LogPath, run.OutputOffset,
     };
+
+    async Task<object> HandleExplainAsync(string action, JsonObject parameters)
+    {
+        if (action == "listExplanations") return _explain.States;
+        var key = parameters["key"]?.GetValue<string>() ?? throw new ArgumentException("Missing PR key.");
+        if (action == "cancelExplanation")
+            return await _explain.CancelAsync(key, parameters["requestId"]?.GetValue<string>() ?? throw new ArgumentException("Missing explanation ID."));
+        _prs.Find(key); // Reject keys that are not in the loaded dashboard before starting work.
+        return _explain.Start(key);
+    }
 
     async Task RecoverCopilotAsync()
     {

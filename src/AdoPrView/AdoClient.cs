@@ -1,5 +1,6 @@
 using System.Diagnostics;
 using System.Net;
+using System.IO;
 using System.Net.Http;
 using System.Net.Http.Headers;
 using System.Text;
@@ -74,6 +75,24 @@ public sealed class AdoClient
     }
 
     public Task<JsonNode> GetAsync(string url, CancellationToken ct = default) => SendJsonAsync(HttpMethod.Get, url, null, ct);
+    internal async Task<JsonNode> GetBoundedJsonAsync(string url, int maxBytes, CancellationToken ct)
+    {
+        using var response = await SendAsync(() => new HttpRequestMessage(HttpMethod.Get, url)
+            { Headers = { Accept = { new("application/json") } } }, ct, buffer: false);
+        if (response.Content.Headers.ContentLength > maxBytes)
+            throw new InvalidDataException("ADO response exceeds the explanation size limit.");
+        await using var input = await response.Content.ReadAsStreamAsync(ct);
+        using var output = new MemoryStream();
+        var buffer = new byte[8192];
+        int read;
+        while ((read = await input.ReadAsync(buffer, ct)) > 0)
+        {
+            if (output.Length + read > maxBytes)
+                throw new InvalidDataException("ADO response exceeds the explanation size limit.");
+            output.Write(buffer, 0, read);
+        }
+        return JsonNode.Parse(output.ToArray()) ?? throw new InvalidDataException("ADO returned empty JSON.");
+    }
     public Task<JsonNode> PatchAsync(string url, JsonNode body, CancellationToken ct = default) => SendJsonAsync(HttpMethod.Patch, url, body, ct);
     internal Task<JsonNode> PatchOnceAsync(string url, JsonNode body) => SendJsonAsync(HttpMethod.Patch, url, body, default, retry: false);
     public async Task DeleteAsync(string url, CancellationToken ct = default)
@@ -100,7 +119,7 @@ public sealed class AdoClient
         return string.IsNullOrWhiteSpace(text) ? new JsonObject() : JsonNode.Parse(text)!;
     }
 
-    async Task<HttpResponseMessage> SendAsync(Func<HttpRequestMessage> build, CancellationToken ct, bool retry = true)
+    async Task<HttpResponseMessage> SendAsync(Func<HttpRequestMessage> build, CancellationToken ct, bool retry = true, bool buffer = true)
     {
         await _throttle.WaitAsync(ct);
         try
@@ -109,7 +128,7 @@ public sealed class AdoClient
             {
                 var req = build();
                 req.Headers.Authorization = await _getToken(attempt > 0);
-                var resp = await _http.SendAsync(req, ct);
+                var resp = await _http.SendAsync(req, buffer ? HttpCompletionOption.ResponseContentRead : HttpCompletionOption.ResponseHeadersRead, ct);
                 if (resp.IsSuccessStatusCode && resp.StatusCode != HttpStatusCode.NonAuthoritativeInformation) return resp;
                 var status = resp.StatusCode;
                 if (retry && attempt == 0 && status is HttpStatusCode.Unauthorized or HttpStatusCode.NonAuthoritativeInformation)
