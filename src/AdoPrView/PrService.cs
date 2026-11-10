@@ -91,9 +91,11 @@ public sealed partial class PrService
 
     static bool MatchesWhitelist(JsonNode? createdBy, IReadOnlyList<string> whitelist)
     {
-        if (createdBy is null || whitelist.Count == 0) return false;
-        var name = S(createdBy["displayName"]);
-        var unique = S(createdBy["uniqueName"]);
+        return createdBy is not null && MatchesWhitelist(S(createdBy["displayName"]), S(createdBy["uniqueName"]), whitelist);
+    }
+
+    static bool MatchesWhitelist(string name, string unique, IReadOnlyList<string> whitelist)
+    {
         foreach (var raw in whitelist)
         {
             var w = raw.Trim();
@@ -338,6 +340,7 @@ public sealed partial class PrService
         await ParsePoliciesAsync(view, await evalsT);
         ParseThreads(view, await threadsT, await itersT, S(pr["lastMergeSourceCommit"]?["commitId"]), ReviewBotFor(_store.Current.ReviewBot, repo.Org));
         Classify(view);
+        SetReviewVote(view, pr, await itersT, await evalsT, meId);
         return view;
     }
 

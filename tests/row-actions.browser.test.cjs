@@ -83,6 +83,14 @@ test('real row hit testing and action identity across refreshes', { timeout: 900
         }
         if(method==='cancelCopilot')return {...S.runs.get(p.runId),status:'cancelled',message:'Cancelled fake run; worktree retained',worktreeRetained:true};
         if(method==='restartMerge')return {requested:true,message:'Intercepted merge re-check'};
+        if(method==='approve'){
+          const pr=structuredClone(S.snap.prs.find(x=>x.key===p.key));
+          if(window.holdApproval)await new Promise(resolve=>window.completeApproval=resolve);
+          if(window.approvalFailure)throw Error('Offline approval denied; refresh before retrying.');
+          pr.reviewVote={...pr.reviewVote,vote:10,canApprove:false,target:{...pr.reviewVote.target,vote:10}};
+          pr.reviewers=[{id:'offline-reviewer',name:'Offline Reviewer',vote:10}];
+          return {confirmed:true,message:'Your ordinary ADO vote is Approved. Other reviewers remain required.',pr};
+        }
         if(method==='autoComplete'){
           if(window.autoFailure)throw Error('Offline auto-complete denied');
           const pr=structuredClone(S.snap.prs.find(x=>x.key===p.key));
@@ -140,6 +148,7 @@ test('real row hit testing and action identity across refreshes', { timeout: 900
         S.rowOrder=[];S.orderRevision=null;S.laneRetained.clear();S.runs.clear();S.busy.clear();closeRowMenu();
         window.holdLog=false;S.settings.hidden=['sample-deploy-id:1001'];S.hideUndo=[];
         window.confirmations=[];window.confirmResult=true;window.autoFailure=false;S.autoCompleteErrors.clear();
+        window.holdApproval=false;window.approvalFailure=false;S.reviewVotes.clear();
         setSnapshot(structuredClone(window.baseline));${race ? 'window.raceFixture();' : ''}render();window.calls=[];`);
       await frame();
     };
@@ -155,6 +164,48 @@ test('real row hit testing and action identity across refreshes', { timeout: 900
       const menu = await evaluate(`(()=>{const b=document.querySelector('#rowMenu button'),r=b.getBoundingClientRect();return {x:r.x+r.width/2,y:r.y+r.height/2};})()`);
       return { ...p, x: menu.x, y: menu.y };
     };
+
+    await t.test('row and expanded ordinary Approve submit once without dialogs, including duplicate clicks and failures', async () => {
+      const key='sample-service-id:101';
+      for (const surface of ['row','detail']) for (const failure of [false,true]) {
+        await reset(true);
+        await evaluate(`{
+          const p=S.snap.prs.find(p=>p.key==='${key}');
+          p.isActive=true;p.repoId='sample-service-id';p.reviewers=[];
+          p.reviewVote={reviewerId:'offline-reviewer',reviewerName:'Offline Reviewer',vote:0,canApprove:true,
+            detail:'Only your ordinary vote. Other reviews remain separate.',
+            target:{reviewerId:'offline-reviewer',sourceCommit:'a'.repeat(40),targetCommit:'b'.repeat(40),
+              sourceRef:'refs/heads/feature',targetRef:'refs/heads/main',iterationId:4,vote:0}};
+          ${surface === 'row' ? 'delete p.approval;' : "p.approval={title:'Offline provider remains separate'};"}
+          S.expanded.add('${key}');renderRows();
+          window.holdApproval=true;window.approvalFailure=${failure};window.confirmResult=false;
+        }`);
+        await click(await point(key, `.${surface} [data-act="approve"]`)); await frame();
+        const approvalCalls=()=>calls().then(cs=>cs.filter(c=>c.method==='approve'));
+        const submitted=await approvalCalls();
+        assert.equal(submitted.length,1,`${surface} ${failure}: one RPC for deliberate click`);
+        assert.equal(submitted[0].key,key);
+        assert.deepEqual(submitted[0].expected,{
+          reviewerId:'offline-reviewer',sourceCommit:'a'.repeat(40),targetCommit:'b'.repeat(40),
+          sourceRef:'refs/heads/feature',targetRef:'refs/heads/main',iterationId:4,vote:0,
+        });
+        assert.deepEqual(await evaluate('window.confirmations'),[]);
+        assert.equal(await evaluate(`(()=>{
+          const buttons=[...document.querySelectorAll('[data-key="${key}"] [data-act="approve"]')];
+          const locked=buttons.length>0&&buttons.every(b=>b.disabled&&b.getAttribute('aria-busy')==='true');
+          buttons.forEach(b=>b.click());return locked;
+        })()`),true);
+        assert.equal((await approvalCalls()).length,1,'Duplicate controls cannot submit another RPC');
+        await evaluate('window.completeApproval()'); await frame();
+        assert.equal((await approvalCalls()).length,1,'Completion/failure does not retry the vote');
+        assert.deepEqual(await evaluate('window.confirmations'),[]);
+        assert.equal(await evaluate(`S.snap.prs.find(p=>p.key==='${key}').reviewVote.vote`),failure?0:10);
+        assert.equal(await evaluate(`S.reviewVotes.get('${key}').kind`),failure?'error':'confirmed');
+        if(failure)assert.match(await evaluate(`document.querySelector('[data-key="${key}"] [data-review-vote-outcome]').textContent`),/Offline approval denied/);
+        if(surface==='detail')assert.ok(await evaluate(`!!document.querySelector('[data-key="${key}"] .row [data-act="generateApproval"]')`));
+        assert.deepEqual((await calls()).map(c=>c.method),['approve']);
+      }
+    });
 
     await t.test('Auto turns grey in-place under the pointer only after confirmed set; cancel, refresh, collapse and failure remain truthful', async () => {
       await reset(true);
@@ -442,13 +493,18 @@ test('real row hit testing and action identity across refreshes', { timeout: 900
           const states=[
             {isMine:true,isDraft:true,humanActions:['reviews','publish','pop','autocomplete'],approval:{title:'Request approval for only this PR'},gates:{...base.gates,reviews:{state:'human'}}},
             {isMine:false,isDraft:false,humanActions:[],approval:{title:'Request approval for only this PR'},autoCompleteBy:'Offline',gates:{...base.gates,pop:{state:'ok'},reviews:{state:'ok'}}},
-            {isMine:false,humanActions:['reviews','pop','autocomplete'],approval:null,repo:'other-repo',gates:{...base.gates,reviews:{state:'human'}}},
-            {isMine:true,humanActions:[],approval:null,autoCompleteBy:null,gates:{...base.gates,pop:{state:'na'},reviews:{state:'ok'}}},
-            {isMine:true,humanActions:['reviews','publish','pop','autocomplete'],approval:{title:'Request approval for only this PR'},gates:{...base.gates,reviews:{state:'human'}}}
+            {isMine:false,humanActions:['reviews','pop','autocomplete'],approval:null,reviewVote:null,repo:'other-repo',gates:{...base.gates,reviews:{state:'human'}}},
+            {isMine:true,humanActions:[],approval:null,reviewVote:null,autoCompleteBy:null,gates:{...base.gates,pop:{state:'na'},reviews:{state:'ok'}}},
+            {isMine:true,humanActions:['reviews','publish','pop','autocomplete'],approval:{title:'Request approval for only this PR'},gates:{...base.gates,reviews:{state:'human'}}},
+            {isMine:false,approval:null,reviewVote:{...base.reviewVote,vote:0,canApprove:true}},
+            {isMine:true,approval:null,reviewVote:{...base.reviewVote,vote:10,canApprove:false,target:{...base.reviewVote.target,vote:10}}},
+            {isMine:false,approval:null,reviewVote:{...base.reviewVote,canApprove:false,detail:'Refresh before approving.'}},
+            {isMine:true,approval:null,reviewVote:{...base.reviewVote}}
           ];
           const ps=states.map((s,i)=>({...base,...s,key:'grid-'+i,id:100+i,title:'Grid fixture '+i,
             url:'https://dev.azure.com/contoso/Sample/_git/'+(s.repo||base.repo)+'/pullrequest/'+(100+i)}));
           for(const action of ['generateApproval','publish','pop','autocomplete','triage'])S.busy.add('grid-4:'+action);
+          S.busy.add('grid-8:approve');
           setSnapshot({...S.snap,prs:ps,orderRevision:(S.snap.orderRevision||0)+1});renderRows();
           document.querySelector('main').scrollLeft=9999;
         })()`);
@@ -468,6 +524,15 @@ test('real row hit testing and action identity across refreshes', { timeout: 900
           });
         }
         assert.equal(layout[3][0].button, null, 'Absent review action still needs its empty slot');
+        assert.deepEqual(await evaluate(`['grid-5','grid-6','grid-7','grid-8'].map(key=>{
+          const b=document.querySelector('[data-key="'+key+'"] .row [data-act="approve"]');
+          return {label:b.textContent.trim(),disabled:b.disabled,busy:b.getAttribute('aria-busy')};
+        })`), [
+          {label:'Approve',disabled:false,busy:null},
+          {label:'Approved',disabled:true,busy:null},
+          {label:'Approve',disabled:true,busy:null},
+          {label:'Approve',disabled:true,busy:'true'},
+        ]);
         for (const key of ['grid-0', 'grid-1', 'grid-2', 'grid-3', 'grid-4']) {
           const p = await point(key, '.row [data-act="open"]'); await click(p);
           assert.deepEqual((await calls()).filter(c => c.method === 'openUrl').at(-1), { method: 'openUrl', url: expectedUrl(p) });

@@ -12,6 +12,11 @@
     key: `${repo}-id:${id}`, id, title, url: url(repo, id), org, project, projectId: 'p', repo, repoId: `${repo}-id`,
     sourceBranch: o.branch || `user/sam/${title.toLowerCase().replace(/[^a-z0-9]+/g, '-').slice(0, 38)}`, targetBranch: 'main',
     author: o.author || me, isMine: !o.author, isHidden: false, isDraft: !!o.draft,
+    isActive: true,
+    reviewVote: { reviewerId: me.id, reviewerName: me.name, vote: 0, canApprove: true,
+      detail: 'Offline demonstration only. This records no real vote; other reviewers and policies remain unchanged.',
+      target: { reviewerId: me.id, sourceCommit: 'a'.repeat(40), targetCommit: 'b'.repeat(40),
+        sourceRef: `refs/heads/${o.branch || 'sample-change'}`, targetRef: 'refs/heads/main', iterationId: 4, vote: 0 } },
     approval: o.approval === undefined && repo === 'sample-service' ? { title: 'Request approval via the sample provider for only this PR' } : o.approval || null,
     created: iso(o.created || 60 * 30), updated: iso(o.updated || 20), description: o.description || '',
     mergeStatus: o.mergeStatus || 'succeeded', mergeFailure: null, mergeStale: !!o.stale, lastMergeTargetCommit: 'abc',
@@ -190,6 +195,14 @@ Fixes AB#1234`;
             message: failed ? 'Mock provider returned HTTP 403; approval is not confirmed.' : 'Mock provider response. This does not confirm a live approval.',
             response: JSON.stringify({ mock: true, pr: `${pr.repo}/${pr.id}` }, null, 2),
           };
+        }
+        case 'approve': {
+          const pr = prs.find(x => x.key === p.key);
+          if (!pr?.reviewVote?.canApprove || JSON.stringify(p.expected) !== JSON.stringify(pr.reviewVote.target))
+            throw new Error('Mock review state changed. Refresh first.');
+          pr.reviewVote = { ...pr.reviewVote, vote: 10, canApprove: false, target: { ...pr.reviewVote.target, vote: 10 } };
+          pr.reviewers = pr.reviewers.filter(r => r.id !== me.id).concat({ ...me, vote: 10, isRequired: false, isContainer: false });
+          return { confirmed: true, alreadyApproved: false, message: 'Mock vote recorded only in this offline demonstration. Other policies remain unchanged.', pr: structuredClone(pr) };
         }
         case 'hide': settings.hidden.push(p.key); return settings;
         case 'unhide': settings.hidden = settings.hidden.filter((h) => h !== p.key); return settings;

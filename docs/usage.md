@@ -46,9 +46,9 @@ each lane. Click a counter to filter by it.
 - **Needs Human** means only reviewer approval (+1), Proof of Presence,
   auto-complete or publishing a draft remains, in any combination. In practice
   that is two kinds of work, which can appear together on one PR:
-  - **A reviewer's approval is still needed.** The enlarged **+1** button marks
-    the PR. Any approver can provide it, so it applies to watched PRs too;
-    the +1 is amber only on your own PRs.
+  - **A reviewer's approval is still needed.** **Approve** records your own
+    reviewer vote. Other required reviewers may still need to approve, including
+    on watched PRs. An optional provider uses the **+1** button instead.
   - **Your finishing actions:** **PoP** (Proof of Presence), **Auto**
     (set auto-complete) and/or **Publish** (a draft), alone or alongside +1
     when a review is also still needed. These are amber on your own PRs; on
@@ -90,15 +90,31 @@ requirement and no warnings or waits are invented.
 
 ## Row actions
 
-Row actions use fixed **+1 / Publish / PoP / Auto / Fix / Open** grid slots across
+Row actions use fixed **Review / Publish / PoP / Auto / Fix / Open** grid slots across
 every row. Compact, busy or missing actions keep their slot; enlarged buttons
 cannot displace neighboring actions. Hide has no visible slot.
 
-The **+1** slot is enlarged when the PR needs human reviewer approval,
-including an approval invalidated by later commits, and amber on your own PRs.
-It opens the PR in ADO so you can arrange review. Reviews, PoP and Auto-complete
-do not occupy table columns; their action buttons and expanded status/reviewer
-details retain the underlying requirements.
+**Approve** records the signed-in user's ordinary ADO reviewer vote (`10`).
+One click submits the vote without a confirmation dialog or account selection.
+The app checks the captured PR, signed-in identity, latest iteration and
+source/target revisions before submitting once, then reads back the vote and
+PR state. **Your ADO review** in expanded details shows your recorded vote and
+keeps **Open in ADO** available. ADO checks permissions; an author's vote may not
+count toward required reviewers. Your approval does not imply other required or
+latest-iteration reviews, policies, merge permission or PoP are satisfied.
+
+An enabled optional approval provider retains its separate **+1** row action;
+ordinary **Approve** remains in expanded details. Without a provider, the row's
+Review slot shows **Approve** directly. Already-approved votes display
+**Approved**, not another write action. If reviewer identity or revision cannot
+be verified, refresh before approving. Hidden, inactive and no-longer-monitored
+PRs cannot be approved here. Monitored drafts support ordinary reviewer votes;
+approving does not publish the draft.
+
+ADO's reviewer-vote API has no atomic revision condition. The app checks both
+sides of the write and reports **Approval not confirmed** if revisions change or
+read-back fails. A vote may have been recorded in that case: refresh and inspect
+the PR before retrying. It never automatically retries or revokes the vote.
 
 **Publish** marks a draft ready for review. **Open** opens the PR in Azure
 DevOps. **PoP**, **Auto** and **Fix** are described below.

@@ -47,6 +47,7 @@ const S = {
   showTs: new Set(),
   busy: new Set(),          // "key:action"
   approvals: new Map(),    // key -> last approval provider outcome (never a credential)
+  reviewVotes: new Map(),
   autoCompleteErrors: new Map(),
   lastSig: '',
   pendingSnapshot: null,
@@ -186,6 +187,11 @@ function setSnapshot(snap) {
     Object.keys(LANES).indexOf(a.lane) - Object.keys(LANES).indexOf(b.lane) ||
     (Date.parse(b.updated) || 0) - (Date.parse(a.updated) || 0));
   const byKey = new Map(snap.prs.map(p => [p.key, p]));
+  for (const [key, outcome] of S.reviewVotes) {
+    if (outcome.kind === 'confirmed' && (byKey.get(key)?.reviewVote?.vote !== 10 ||
+        JSON.stringify(byKey.get(key)?.reviewVote?.target) !== JSON.stringify(findPr(key)?.reviewVote?.target)))
+      S.reviewVotes.delete(key);
+  }
   const oldKeys = new Set(S.rowOrder);
   const order = S.orderRevision === null || revision !== S.orderRevision
     ? sorted.map(p => p.key)
@@ -206,6 +212,7 @@ function setSnapshot(snap) {
       });
       for (const pr of S.snap.prs) syncAutoCompleteButtons(pr.key);
     }
+    for (const pr of S.snap.prs) syncReviewVoteControls(pr.key);
     renderStatus();
     return;
   }
@@ -471,6 +478,67 @@ function providerName() { return S.snap.approvalProvider?.name || 'Approval prov
 function approvalTitle(p) { return p.approval?.title || `Request approval via ${providerName()} for only this PR`; }
 function botName() { return S.settings?.reviewBot?.name || 'Review bot'; }
 
+function reviewVoteFor(p) {
+  const state = p.reviewVote;
+  if (!state) return null;
+  const queued = S.pendingSnapshot?.prs.find(pr => pr.key === p.key);
+  if (S.pendingSnapshot && (!queued || queued.error || queued.isActive === false || queued.isHidden ||
+      JSON.stringify(queued.reviewVote?.target) !== JSON.stringify(state.target)))
+    return { ...state, vote: queued?.reviewVote?.vote ?? null, canApprove: false,
+      detail: 'The PR revision or your review state changed. Finish this interaction, then review the refreshed PR before approving.' };
+  if (p.isActive === false || p.isHidden || p.error ||
+      hiddenSet().has(p.key.toLowerCase()))
+    return { ...state, canApprove: false, detail: 'This PR is inactive, hidden or could not be refreshed.' };
+  return state;
+}
+
+function reviewVoteTitle(p) {
+  const state = reviewVoteFor(p);
+  return isBusy(p.key, 'approve') ? 'Submitting your ordinary ADO reviewer vote...' : state?.canApprove
+    ? `Approve as ${state.reviewerName}. ADO checks your permissions; other review requirements may remain.`
+    : `${state?.vote === 10 ? `Approved as ${state.reviewerName}.` : 'Approve unavailable.'} ${state?.detail || 'Refresh to identify your ADO reviewer and the PR revision.'}`;
+}
+
+function reviewVoteButton(p, mini = false) {
+  const state = reviewVoteFor(p), busy = isBusy(p.key, 'approve'), title = reviewVoteTitle(p);
+  return `<button class="${mini ? 'mini' : 'act reviewer-vote'} ${busy ? 'busy' : ''} ${state?.vote === 10 ? 'done' : ''}" data-act="approve"
+    title="${esc(title)}" aria-label="${esc(title)}" ${busy || !state?.canApprove ? 'disabled' : ''} ${busy ? 'aria-busy="true"' : ''}>${svg(busy ? 'refresh' : 'check')}<span>${state?.vote === 10 ? 'Approved' : 'Approve'}</span></button>`;
+}
+
+function reviewVoteDescription(p) {
+  const state = reviewVoteFor(p);
+  const labels = { 10: 'Approved', 5: 'Approved with suggestions', 0: 'No vote', '-5': 'Waiting for author', '-10': 'Rejected' };
+  return state ? `<b>${esc(state.reviewerName)}</b> &mdash; your recorded vote: <b>${esc(labels[state.vote] || 'Unknown')}</b>.
+    <p class="small">${esc(state.detail)}</p>` : 'Refresh to identify your ADO reviewer and the PR revision.';
+}
+
+function syncReviewVoteControls(key) {
+  const p = findPr(key);
+  if (!p) return;
+  for (const button of document.querySelectorAll('[data-act="approve"]')) {
+    if (button.closest('.pr')?.dataset.key !== key) continue;
+    const state = reviewVoteFor(p), busy = isBusy(key, 'approve');
+    button.disabled = busy || !state?.canApprove;
+    button.title = reviewVoteTitle(p);
+    button.setAttribute('aria-label', button.title);
+    button.classList.toggle('busy', busy);
+    button.classList.toggle('done', state?.vote === 10);
+    if (busy) button.setAttribute('aria-busy', 'true');
+    else button.removeAttribute('aria-busy');
+    button.innerHTML = svg(busy ? 'refresh' : 'check') + `<span>${state?.vote === 10 ? 'Approved' : 'Approve'}</span>`;
+  }
+  for (const node of document.querySelectorAll('[data-review-vote-state], [data-review-vote-outcome]')) {
+    if (node.closest('.pr')?.dataset.key !== key) continue;
+    if (node.hasAttribute('data-review-vote-state')) node.innerHTML = reviewVoteDescription(p);
+    else {
+      const outcome = S.reviewVotes.get(key);
+      node.textContent = outcome?.message || '';
+      node.hidden = !outcome;
+      node.classList.toggle('error', outcome?.kind === 'error');
+    }
+  }
+}
+
 function actionButtons(p) {
   const out = {};
   const human = p.humanActions || [];
@@ -482,6 +550,7 @@ function actionButtons(p) {
 
   const needsReview = human.includes('reviews') || p.gates?.reviews?.state === 'human';
   if (p.approval) out.approval = b('generateApproval', 'approval', '', needsReview ? 'provider-approval hot review-needed' : 'provider-approval', approvalTitle(p));
+  else if (p.reviewVote) out.approval = reviewVoteButton(p);
   else if (needsReview) out.approval = b('manualReview', 'approval', '', `${hot} review-needed`, 'Human reviewer approval needed. Open this PR to arrange review.');
   if (human.includes('publish')) out.publish = b('publish', 'send', 'Publish', hot, 'Publish draft (mark ready for review)');
   if (human.includes('pop')) out.pop = b('pop', 'key', 'PoP', hot, 'Proof of Presence — opens the inline Edge pane for your security key');
@@ -624,11 +693,19 @@ function renderDetail(p) {
       </li>`).join('')}</ul></div></div>`);
   }
 
+  if (p.reviewVote) {
+    const outcome = S.reviewVotes.get(p.key);
+    right.push(`<div class="card"><h3><span class="grow">Your ADO review</span>${reviewVoteButton(p, true)}
+      <button class="mini" data-act="open" title="Open in Azure DevOps">${svg('ext')} Open in ADO</button></h3><div class="body">
+      <div data-review-vote-state>${reviewVoteDescription(p)}</div>
+      <p data-review-vote-outcome role="status" class="${outcome?.kind === 'error' ? 'error' : ''}" ${outcome ? '' : 'hidden'}>${esc(outcome?.message || '')}</p>
+      </div></div>`);
+  }
   const revs = (p.reviewers || []).slice().sort((a, b) => (b.isRequired - a.isRequired) || (a.vote - b.vote));
   if (revs.length) {
     const vl = { 10: 'Approved', 5: 'Approved w/ suggestions', 0: 'No vote', '-5': 'Waiting for author', '-10': 'Rejected' };
     right.push(`<div class="card"><h3>Reviewers <span class="cnt">${revs.length}</span></h3><div class="body"><ul class="list">${revs.map((r) => `
-      <li>${avatar(r.name)}<span class="k">${esc(r.name)} ${r.isRequired ? '<span class="badge req">required</span>' : ''}${r.isContainer ? ' <span class="badge">group</span>' : ''}</span>
+      <li>${avatar(r.name)}<span class="k">${esc(r.name)}${r.id?.toLowerCase() === p.reviewVote?.reviewerId?.toLowerCase() ? ' (you)' : ''} ${r.isRequired ? '<span class="badge req">required</span>' : ''}${r.isContainer ? ' <span class="badge">group</span>' : ''}</span>
       <span class="vote v${r.vote}">${vl[r.vote] ?? r.vote}</span></li>`).join('')}</ul></div></div>`);
   }
 
@@ -721,6 +798,7 @@ async function runAction(key, act, fn, okText) {
   if (isBusy(key, act)) return;
   S.busy.add(`${key}:${act}`);
   if (act === 'autocomplete' || act === 'cancelAuto') syncAutoCompleteButtons(key);
+  else if (act === 'approve') syncReviewVoteControls(key);
   else renderRows();
   try {
     const r = await fn();
@@ -732,6 +810,7 @@ async function runAction(key, act, fn, okText) {
     S.busy.delete(`${key}:${act}`);
     if (act === 'triage') syncCopilotButton(key);
     if (act === 'autocomplete' || act === 'cancelAuto') syncAutoCompleteButtons(key);
+    if (act === 'approve') syncReviewVoteControls(key);
     renderRows(true);
   }
 }
@@ -790,6 +869,34 @@ async function onAction(act, el, key) {
     case 'manualReview':
       await rpc('openUrl', { url: p.url });
       break;
+    case 'approve': {
+      const state = p && reviewVoteFor(p);
+      if (!state?.canApprove || !state.target || isBusy(key, act)) return;
+      const expected = { ...state.target };
+      S.expanded.add(key);
+      S.reviewVotes.delete(key);
+      await runAction(key, act, async () => {
+        try {
+          const result = await rpc('approve', { key, expected });
+          const updated = result?.pr, target = updated?.reviewVote?.target;
+          if (result?.confirmed !== true || typeof result.message !== 'string' || updated?.key !== key ||
+              updated.id !== p.id || updated.repoId !== p.repoId || updated.org !== p.org || updated.project !== p.project ||
+              updated.reviewVote?.vote !== 10 || target?.vote !== 10 ||
+              Object.keys(expected).some(k => k !== 'vote' && expected[k] !== target[k]) ||
+              !Array.isArray(updated.reviewers) || !Array.isArray(updated.humanActions) || !updated.gates)
+            throw new Error('ADO approval read-back was not confirmed. ADO may have recorded your vote; refresh and check the PR before retrying.');
+          S.snap = { ...S.snap, prs: S.snap.prs.map(pr => pr.key === key ? updated : pr) };
+          if (S.pendingSnapshot) S.pendingSnapshot = { ...S.pendingSnapshot, prs: S.pendingSnapshot.prs.map(pr =>
+            pr.key === key && JSON.stringify(pr.reviewVote?.target) === JSON.stringify(expected) ? updated : pr) };
+          S.reviewVotes.set(key, { kind: 'confirmed', message: result.message });
+          toast(result.message);
+        } catch (e) {
+          S.reviewVotes.set(key, { kind: 'error', message: e.message || String(e) });
+          throw e;
+        }
+      });
+      break;
+    }
     case 'url':
       await rpc('openUrl', { url: el.dataset.url });
       break;
