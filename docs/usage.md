@@ -34,7 +34,13 @@ calls used see [DESIGN.md](DESIGN.md); for building and tests see
 - Closing the window keeps it in the tray while notifications are on; exit from the tray menu.
 - A custom four-note chime announces new **Needs Human** arrivals, even while
   the app is focused. Initial load and unchanged rows stay silent; simultaneous
-  arrivals share one chime. The existing Notifications checkbox controls it.
+  arrivals share one chime. Settings has independent **Tray notifications
+  (closing the window keeps it in the tray)** and **Play chime for new Needs Human
+  PRs** checkboxes. Turn the chime off to mute it while keeping tray notifications
+  and background monitoring. Chimes can also stay on with tray notifications off;
+  close-to-tray still depends only on Tray notifications.
+  Existing settings retain their previous sound behavior until you change it.
+  Muted arrivals are consumed without replaying when the chime is turned back on.
 - The current refresh interval is shown in the status bar and is configurable
   in Settings (default: 2 minutes; merge re-check: 10 minutes).
 

@@ -23,8 +23,9 @@ enough detail inline that you rarely need to click into ADO.
   bar, tray icon with balloon notifications when a PR newly needs human action or
   becomes blocked. A bespoke four-note chime plays once per update when one or
   more PRs enter Needs Human, even in the foreground. Initial load, unchanged
-  rows, hidden/error rows, disabled notifications and headless captures are
-  silent. Full refresh and single-PR refresh share transition detection.
+  rows, hidden/error rows, disabled chimes and headless captures are
+  silent. Chime playback is independent of tray notifications; close-to-tray
+  still follows tray notifications. Full refresh and single-PR refresh share transition detection.
 * **UI:** plain HTML/CSS/JS (no build step) served from a WebView2 virtual host.
   `marked` + `DOMPurify` are vendored for safe Markdown descriptions.
   `?mock=1` runs the UI in any browser against fixture data for fast iteration.
