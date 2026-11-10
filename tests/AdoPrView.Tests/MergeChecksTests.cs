@@ -14,6 +14,97 @@ static class MergeChecksTests
 
     public static async Task Run(Func<string, Func<Task>, Task> test)
     {
+        await test("ignored drafts skip attention, detailed reads and merge writes while non-drafts retain classification", async () =>
+        {
+            using var f = new Fixture();
+            f.Store.Current.IgnoreDrafts = true;
+            var draft = f.Add(); draft.Draft = true; draft.MergeStatus = "conflicts";
+            var normal = f.Add(id: 2); normal.MergeStatus = "conflicts";
+            f.FailPrs.Add(draft.Key);
+            await f.Service.RefreshAsync(forceMergeCheck: true);
+            var view = f.View(draft);
+            Check(view.IsIgnoredDraft && view.Error is null && view.Blockers.Count == 0 &&
+                view.HumanActions.Count == 0 && view.Gates.Count == 0, "Ignored draft was polled or classified for attention");
+            Check(f.View(normal).Lane == Lane.Blocked && !f.View(normal).IsIgnoredDraft, "Non-draft changed");
+            Check(f.Patches.Count == 0 && !(await f.Service.RestartMergeAsync(draft.Key)).Requested, "Ignored draft had merge activity");
+            try { await f.Service.GetCopilotSourceAsync(draft.Key); throw new Exception("Ignored draft started Fix"); }
+            catch (InvalidOperationException ex) { Check(ex.Message.Contains("monitored"), "Fix failed for another reason"); }
+        });
+        await test("draft ignore defaults off and enabling preserves published and back-to-draft transitions", async () =>
+        {
+            using var f = new Fixture();
+            var p = f.Add(); p.Draft = true;
+            var peer = f.Add(id: 2);
+            await f.Service.RefreshAsync();
+            Check(!f.View(p).IsIgnoredDraft && f.View(p).Lane == Lane.NeedsHuman &&
+                f.View(p).HumanActions.Contains("publish"), "Default draft behavior changed");
+            f.Store.Current.IgnoreDrafts = true;
+            f.Service.ApplyMonitoringSettings();
+            Check(f.View(p).IsIgnoredDraft && f.View(p).HumanActions.Count == 0, "Setting did not immediately suppress attention");
+            var events = new List<PrView>();
+            f.Service.LaneChanged += (pr, _) => events.Add(pr);
+            p.Draft = false;
+            await f.Service.RefreshAsync();
+            Check(!f.View(p).IsIgnoredDraft && f.View(p).Lane == f.View(peer).Lane &&
+                !f.View(p).HumanActions.Contains("publish") && f.View(p).Gates.Count > 0, "Publishing did not restore monitoring");
+            p.Draft = true; p.MergeStatus = "conflicts";
+            await f.Service.RefreshAsync();
+            Check(f.View(p).IsIgnoredDraft && events.All(v => !v.IsIgnoredDraft), "Returning to draft notified");
+            events.Clear();
+            f.FailLists.Add(p.Repo);
+            await f.Service.RefreshAsync();
+            Check(events.Count == 0, "Failed list emitted draft attention");
+            f.FailLists.Clear();
+            f.Store.Current.IgnoreDrafts = false;
+            f.Service.ApplyMonitoringSettings();
+            await f.Service.RefreshAsync();
+            Check(!f.View(p).IsIgnoredDraft && f.View(p).Lane == Lane.Blocked, "Turning off ignore did not restore blocked draft");
+        });
+        await test("merge preflight returning to draft never PATCHes and suppresses cached attention", async () =>
+        {
+            using var f = new Fixture();
+            f.Store.Current.IgnoreDrafts = true;
+            var p = f.Add(); p.Preview = Fixture.New;
+            f.BeforePrRead = (pr, n) => { if (n == 2) pr.Draft = true; };
+            await f.Service.RefreshAsync();
+            Check(f.Patches.Count == 0 && f.View(p).IsDraft && f.View(p).IsIgnoredDraft &&
+                f.View(p).HumanActions.Count == 0, "Fresh back-to-draft preflight wrote or retained attention");
+        });
+        await test("draft discovered by fresh row read is excluded before policy polling and actions", async () =>
+        {
+            using var f = new Fixture();
+            f.Store.Current.IgnoreDrafts = true;
+            var p = f.Add();
+            await f.Service.RefreshAsync();
+            p.Draft = true;
+            await f.Service.RefreshOneAsync(p.Key);
+            Check(f.View(p).IsIgnoredDraft && f.View(p).Gates.Count == 0, "Single-row refresh monitored a draft");
+            try { await f.Service.SetAutoCompleteAsync(p.Key, true); throw new Exception("Ignored draft auto-completed"); }
+            catch (InvalidOperationException ex) { Check(ex.Message.Contains("ignored"), "Unexpected action error"); }
+            Check(f.Patches.Count == 0, "Ignored draft write escaped");
+        });
+        foreach (var action in new[] { "auto", "cancelAuto", "publish", "requeue" })
+            await test($"fresh ignored draft blocks native {action} write", async () =>
+            {
+                using var f = new Fixture();
+                f.Store.Current.IgnoreDrafts = true;
+                var p = f.Add();
+                await f.Service.RefreshAsync();
+                p.Draft = true;
+                try
+                {
+                    switch (action)
+                    {
+                        case "auto": await f.Service.SetAutoCompleteAsync(p.Key, true); break;
+                        case "cancelAuto": await f.Service.SetAutoCompleteAsync(p.Key, false); break;
+                        case "publish": await f.Service.PublishAsync(p.Key); break;
+                        case "requeue": await f.Service.RequeueAsync(p.Key, "offline-evaluation"); break;
+                    }
+                    throw new Exception("Ignored draft write accepted");
+                }
+                catch (InvalidOperationException ex) { Check(ex.Message.Contains("ignored"), "Unexpected action error"); }
+                Check(f.Patches.Count == 0, "Ignored draft write escaped");
+            });
         await test("merge cadence sends exact restart PATCH, preserves options and follows fresh results", async () =>
         {
             using var f = new Fixture();

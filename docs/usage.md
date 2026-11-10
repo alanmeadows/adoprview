@@ -90,6 +90,13 @@ requirement and no warnings or waits are invented.
 
 ## Row actions
 
+In Settings, **Ignore draft PRs** excludes drafts from all attention lanes,
+title/tray/taskbar counts, notifications and automatic merge re-checks. It is
+off by default. The **Ignored drafts** filter lists them without attention
+actions; open a draft in Azure DevOps to publish it, or turn the setting off.
+Publishing restores normal classification on the next refresh. Existing Fix
+runs and their output are retained and are not cancelled by this option.
+
 Row actions use fixed **+1 / Publish / PoP / Auto / Fix / Open** grid slots across
 every row. Compact, busy or missing actions keep their slot; enlarged buttons
 cannot displace neighboring actions. Hide has no visible slot.

@@ -349,6 +349,48 @@ await Test("hidden and error rows do not create arrival notifications", () =>
     return Task.CompletedTask;
 });
 
+await Test("ignored drafts never create arrivals and publication restores notification eligibility", () =>
+{
+    var ignored = Pr(); ignored.IsDraft = true; ignored.IsIgnoredDraft = true; ignored.Lane = Lane.NeedsHuman;
+    var human = Pr(); human.Lane = Lane.NeedsHuman;
+    Check(!PrService.GetLaneChanges(Snap(human), Snap(ignored)).Any(), "Returning to ignored draft notified");
+    Check(PrService.GetLaneChanges(Snap(ignored), Snap(human)).Count() == 1, "Publication did not restore arrivals");
+    return Task.CompletedTask;
+});
+
+await Test("notice drain suppresses queued drafts, stale lanes, hidden and error rows", () =>
+{
+    foreach (var suppressed in new[] { "draft", "setting", "hidden", "error", "lane", "removed" })
+    {
+        var human = Pr(hidden: suppressed == "hidden"); human.Lane = Lane.NeedsHuman;
+        var pending = new Dictionary<string, Lane> { [human.Key] = Lane.NeedsHuman };
+        if (suppressed == "draft") { human.IsDraft = true; human.IsIgnoredDraft = true; }
+        if (suppressed == "setting") human.IsDraft = true;
+        if (suppressed == "error") human.Error = "Offline";
+        if (suppressed == "lane") human.Lane = Lane.Blocked;
+        var delivery = MainWindow.DrainNotices(suppressed == "removed" ? [] : [human], pending,
+            new AppSettings { IgnoreDrafts = suppressed == "setting" }, false);
+        Check(delivery.Notices.Length == 0 && !delivery.PlayHumanSound && pending.Count == 0, "Stale queued notice escaped: " + suppressed);
+    }
+    return Task.CompletedTask;
+});
+
+await Test("notice drain retains Notifications control and consumes muted arrivals without replay", () =>
+{
+    var human = Pr(); human.Lane = Lane.NeedsHuman;
+    foreach (var notifications in new[] { false, true })
+    foreach (var headless in new[] { false, true })
+    {
+        var pending = new Dictionary<string, Lane> { [human.Key] = Lane.NeedsHuman };
+        var settings = new AppSettings { Notifications = notifications };
+        var delivery = MainWindow.DrainNotices([human], pending, settings, headless);
+        Check(delivery.Notices.Length == 1 && delivery.PlayHumanSound == (notifications && !headless), "Notification controls changed");
+        settings.Notifications = true;
+        Check(!MainWindow.DrainNotices([human], pending, settings, false).PlayHumanSound, "Consumed arrival replayed");
+    }
+    return Task.CompletedTask;
+});
+
 await Test("custom chime is an original, non-clipping mono PCM wave under one second", () =>
 {
     var wave = HumanAttentionSound.CreateWave();

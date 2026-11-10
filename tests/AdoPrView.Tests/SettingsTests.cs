@@ -17,6 +17,7 @@ static class SettingsTests
             Check(store.Current.Repos.Count == 0 && store.Current.Whitelist.Count == 0 && store.Current.ReviewBot is null &&
                 store.Current.FixSkill is null && store.Current.FixReviewerModels.Count == 0 && store.Current.ApprovalProvider is null, "New settings were seeded");
             Check(!File.Exists(path), "Loading created a settings file");
+            Check(!store.Current.IgnoreDrafts, "Draft ignoring must be opt-in");
         }));
         await test("settings save preserves unknown fields at every level and personal choices", () => InDir(dir =>
         {
@@ -57,6 +58,7 @@ static class SettingsTests
             // Same shape as the drawer: the native settings spread, with the Save form's fields replacing them.
             var form = JsonSerializer.SerializeToNode(store.Current, Bridge.Json)!.AsObject();
             form["refreshSeconds"] = 300;
+            form["ignoreDrafts"] = true;
             form["autoComplete"] = new JsonObject { ["mergeStrategy"] = "noFastForward", ["deleteSourceBranch"] = false, ["transitionWorkItems"] = false };
             bridge.HandleAsync(new JsonObject { ["id"] = 1, ["method"] = "saveSettings", ["params"] = new JsonObject { ["settings"] = form } }.ToJsonString())
                 .GetAwaiter().GetResult();
@@ -67,6 +69,7 @@ static class SettingsTests
                 !ac["deleteSourceBranch"]!.GetValue<bool>() && !ac["transitionWorkItems"]!.GetValue<bool>(), "Auto-complete save lost or ignored fields");
             Check(saved["window"]!["futureWindow"]!.GetValue<string>() == "x" && saved["futureTop"]!.GetValue<int>() == 1 &&
                 saved["refreshSeconds"]!.GetValue<int>() == 300, "Drawer save dropped other settings");
+            Check(new SettingsStore(path).Current.IgnoreDrafts, "Draft setting did not survive bridge save/reload");
         }));
         await test("window placement persistence keeps unknown placement fields", () => InDir(dir =>
         {
