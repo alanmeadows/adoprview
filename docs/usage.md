@@ -34,7 +34,13 @@ calls used see [DESIGN.md](DESIGN.md); for building and tests see
 - Closing the window keeps it in the tray while notifications are on; exit from the tray menu.
 - A custom four-note chime announces new **Needs Human** arrivals, even while
   the app is focused. Initial load and unchanged rows stay silent; simultaneous
-  arrivals share one chime. The existing Notifications checkbox controls it.
+  arrivals share one chime. Settings has independent **Tray notifications
+  (closing the window keeps it in the tray)** and **Play chime for new Needs Human
+  PRs** checkboxes. Turn the chime off to mute it while keeping tray notifications
+  and background monitoring. Chimes can also stay on with tray notifications off;
+  close-to-tray still depends only on Tray notifications.
+  Existing settings retain their previous sound behavior until you change it.
+  Muted arrivals are consumed without replaying when the chime is turned back on.
 - The current refresh interval is shown in the status bar and is configurable
   in Settings (default: 2 minutes; merge re-check: 10 minutes).
 
@@ -254,7 +260,13 @@ default) and each repository's source directory. Blank directories try
 `~/clones/<repo>`. The app verifies the directory and its exact Azure DevOps
 organization/project/repository remote before launching. WSL needs Git,
 authenticated Copilot CLI and the managed task runner `bgtask`. The shared
-`~/.config/bash/environment` supplies PATH/BASH_ENV.
+`~/.config/bash/environment` supplies PATH/BASH_ENV. The non-login runner keeps
+existing PATH resolution first, then tries nvm's default and executable
+`~/.local/bin/copilot` if Copilot is still missing. This PATH adjustment is
+inherited by runner children only; no shell configuration is edited.
+`bgtask` also supports the existing `~/go/bin/bgtask` fallback. Preflight errors
+identify the failed dependency or inspection stage and exit code without
+displaying environment values, remote URLs or raw tool errors.
 
 Inline-run compatibility checks advertised CLI option names, not exact help
 sentences. If a required option is absent, the error lists it. Check

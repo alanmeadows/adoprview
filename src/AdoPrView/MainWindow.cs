@@ -96,7 +96,7 @@ public sealed class MainWindow : Window, IApprovalUi
         {
             if (_shutdownComplete) return;
             SavePlacement();
-            if (!_quitting && !_opts.HeadlessCapture && WindowState != WindowState.Minimized && _store.Current.Notifications)
+            if (ShouldKeepInTray(_store.Current, _quitting, _opts.HeadlessCapture, WindowState))
             {
                 // Closing the window keeps the poller alive in the tray.
                 e.Cancel = true;
@@ -264,6 +264,9 @@ public sealed class MainWindow : Window, IApprovalUi
             _tray.ShowBalloonTip(6000, notices.Length == 1 ? "PR status changed" : $"{notices.Length} PRs changed", string.Join("\n", notices.Take(4)), System.Windows.Forms.ToolTipIcon.Info);
     }
 
+    internal static bool ShouldKeepInTray(AppSettings settings, bool quitting, bool headlessCapture, WindowState state) =>
+        !quitting && !headlessCapture && state != WindowState.Minimized && settings.Notifications;
+
     internal static (string[] Notices, bool PlayHumanSound) DrainNotices(IEnumerable<PrView> visible,
         Dictionary<string, Lane> pendingNotices, AppSettings settings, bool headlessCapture)
     {
@@ -273,7 +276,7 @@ public sealed class MainWindow : Window, IApprovalUi
                 pendingNotices.TryGetValue(p.Key, out var lane) && lane == p.Lane).ToList();
             var notices = pending.Select(p => $"{(p.Lane == Lane.NeedsHuman ? "Needs Human" : "Blocked")}: !{p.Id} {p.Title}").ToArray();
             pendingNotices.Clear();
-            return (notices, settings.Notifications && !headlessCapture && pending.Any(p => p.Lane == Lane.NeedsHuman));
+            return (notices, settings.Sound && !headlessCapture && pending.Any(p => p.Lane == Lane.NeedsHuman));
         }
     }
 

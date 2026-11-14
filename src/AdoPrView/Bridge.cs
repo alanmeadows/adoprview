@@ -141,6 +141,8 @@ public sealed class Bridge(PrService prs, SettingsStore store, Func<string, Task
                     s.MergeCheckMinutes = Math.Clamp(incoming.MergeCheckMinutes, 1, 240);
                     s.Notifications = incoming.Notifications;
                     s.IgnoreDrafts = incoming.IgnoreDrafts;
+                    if (p["settings"]!.AsObject().Any(field => field.Key.Equals("sound", StringComparison.OrdinalIgnoreCase)))
+                        s.Sound = incoming.Sound;
                     // Update known fields in place so fields from other versions survive.
                     var autoComplete = s.AutoComplete ??= new();
                     if (incoming.AutoComplete is { } ac)

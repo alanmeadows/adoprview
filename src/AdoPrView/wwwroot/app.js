@@ -956,7 +956,8 @@ function renderDrawer() {
       <p class="help">Exclude drafts from attention counts, notifications and automatic merge checks. Find them with the Ignored drafts filter. Publishing resumes monitoring on the next refresh; existing Fix runs are not stopped.</p>
       <div class="field"><label>Refresh every (seconds)</label><input type="number" id="refreshSeconds" min="30" max="3600" value="${st.refreshSeconds}" /></div>
       <div class="field"><label>Merge-conflict re-check every (minutes)</label><input type="number" id="mergeCheckMinutes" min="1" max="240" value="${st.mergeCheckMinutes}" /></div>
-      <label class="check"><input type="checkbox" id="notifications" ${st.notifications ? 'checked' : ''}/> Tray notifications and a distinctive chime for new Needs Human PRs (closing the window keeps it in the tray)</label>
+      <label class="check"><input type="checkbox" id="notifications" ${st.notifications ? 'checked' : ''}/> Tray notifications (closing the window keeps it in the tray)</label>
+      <label class="check"><input type="checkbox" id="sound" ${st.sound ? 'checked' : ''}/> Play chime for new Needs Human PRs</label>
     </div>
     <div class="section">
       <h4>Auto-complete</h4>
@@ -1043,6 +1044,7 @@ async function onDrawerAction(act, el) {
           refreshSeconds: +$('#refreshSeconds').value || 120,
           mergeCheckMinutes: +$('#mergeCheckMinutes').value || 10,
           notifications: $('#notifications').checked,
+          sound: $('#sound').checked,
           ignoreDrafts: $('#ignoreDrafts').checked,
           autoComplete: { mergeStrategy: $('#mergeStrategy').value, deleteSourceBranch: $('#deleteSourceBranch').checked, transitionWorkItems: $('#transitionWorkItems').checked },
           triageInstructions: $('#triageInstructions').value,
