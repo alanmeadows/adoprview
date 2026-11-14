@@ -89,5 +89,17 @@ neighboring action targets. All approval writes in these checks are intercepted.
 synthetic fixtures. The screenshots in [images](images) were captured from that
 mock UI with synthetic data.
 
+The opt-in native PoP check intercepts all website requests with synthetic pages
+and uses a disposable browser profile. It exercises sign-in popup/page
+`window.close()` in normal and maximized windows, captured-policy rechecks,
+host disposal and ordinary deliberate window close, without real sign-in or PR writes:
+
+```powershell
+$env:ADOPRVIEW_TEST_FILTER = 'Native PoP WebView2'
+$env:ADOPRVIEW_TEST_POP_WEBVIEW = '1'
+dotnet run --project tests\AdoPrView.Tests -c Release
+Remove-Item Env:\ADOPRVIEW_TEST_FILTER, Env:\ADOPRVIEW_TEST_POP_WEBVIEW
+```
+
 See [DESIGN.md](DESIGN.md) for the architecture, approval provider contract,
 ADO calls, classification and merge preview scheduling.
