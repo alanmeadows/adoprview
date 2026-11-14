@@ -576,7 +576,7 @@ public sealed partial class PrService
             return;
         }
         // Merge
-        if (v.MergeRecheckPending || MergeInFlight(v.MergeStatus))
+        if (MergeInFlight(v.MergeStatus) || v.MergeRecheckPending && !MergeFailed(v.MergeStatus))
         {
             v.Waiting.Add("Merge evaluation");
             v.Gates["merge"] = new("pending", "Checking", v.MergeRecheckRequestedAt is { } at
