@@ -34,15 +34,21 @@ it does not contact a model or establish live ADO endpoint compatibility.
 No live approval, PR or auth requests are made:
 
 ```powershell
-dotnet run --project tests\AdoPrView.Tests
+dotnet build tests\AdoPrView.Tests -c Release -warnaserror
+dotnet run --project tests\AdoPrView.Tests -c Release --no-build
 node --test tests\approval-ui.test.cjs
 node --test tests\row-actions.browser.test.cjs
 powershell -NoProfile -ExecutionPolicy Bypass -File tests\install-guide.tests.ps1
 ```
 
+CI and the release package treat compiler warnings as errors (`-warnaserror`
+on the build and `dotnet publish`), so keep both projects warning-clean.
+
 The browser regression uses Node 22+ and the installed Microsoft Edge (or set
 `ROW_TEST_BROWSER` to another Chromium executable). Real mouse/keyboard input
 is used, with all URL launches and PR actions intercepted; no live PR is changed.
+It also renders hostile synthetic PR description/comment markdown through the
+vendored marked and DOMPurify and checks no script runs or native-bridge call is made.
 Native fake-HTTP/fake-clock checks cover periodic/forced restarts, target-change
 sweeps, retries, in-flight deduplication and fresh result handling. The install
 guide check parses every PowerShell block in INSTALL.md and runs its settings
@@ -63,6 +69,21 @@ $env:ADOPRVIEW_TEST_WSL_PREFLIGHT = '1'
 dotnet run --project tests\AdoPrView.Tests
 Remove-Item Env:\ADOPRVIEW_TEST_FILTER, Env:\ADOPRVIEW_TEST_WSL_PREFLIGHT
 ```
+
+Direct reviewer approval has a focused offline native suite:
+
+```powershell
+$env:ADOPRVIEW_TEST_FILTER = 'Reviewer vote'
+dotnet run --project tests\AdoPrView.Tests -c Release
+Remove-Item Env:\ADOPRVIEW_TEST_FILTER
+```
+
+Its fake HTTP transport checks the authenticated reviewer-only payload, captured
+source/target revisions, latest iteration, monitoring eligibility, duplicate
+requests, nonretrying writes and explicit ambiguity on post-write races or
+read-back failure. The frontend and browser suites exercise one-click row and
+expanded actions, busy/error/confirmed states, provider coexistence and stable
+neighboring action targets. All approval writes in these checks are intercepted.
 
 `src\AdoPrView\wwwroot\index.html?mock=1` runs the UI in a browser against
 synthetic fixtures. The screenshots in [images](images) were captured from that

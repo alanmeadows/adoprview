@@ -24,7 +24,7 @@ foreach ($old in "$name.zip", "$name-setup.exe", "AdoPrView-v$version-checksums.
 }
 
 & dotnet publish $project -c Release -r win-x64 --self-contained true -o $stage `
-    -p:DebugType=embedded -p:ContinuousIntegrationBuild=true --nologo
+    -p:DebugType=embedded -p:ContinuousIntegrationBuild=true -warnaserror --nologo
 if ($LASTEXITCODE) { throw "dotnet publish failed with exit code $LASTEXITCODE." }
 
 foreach ($required in 'AdoPrView.exe', 'AdoPrView.dll', 'hostfxr.dll', 'coreclr.dll', 'PresentationFramework.dll',
