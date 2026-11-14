@@ -349,7 +349,10 @@ older snapshot's hidden flag, determine row visibility after a restore.
 * Inline PoP prototype: a native resizable pane below the dashboard owns a
   separate WebView2 environment/profile (`PoPWebView2`), with Windows
   primary-account SSO enabled. HTTPS sign-in popups use additional unprivileged
-  WebView2 controls in the same pane/environment. There is no dashboard message
+  WebView2 controls in the same pane/environment. They use WinForms WebView2 inside WPF
+  `WindowsFormsHost`: the WPF WebView2 control's built-in website-close handler
+  closes its containing WPF Window. The PoP host instead defers website close
+  callbacks and closes only the still-current popup/pane. There is no dashboard message
   dispatcher, host object or `app.local` mapping on any website surface; web
   messages/host objects are disabled and dashboard RPC also verifies its source.
   Origin display omits URL paths/query/fragment. Local/non-HTTPS navigation,

@@ -3,16 +3,18 @@ using System.IO;
 using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Input;
+using System.Windows.Forms.Integration;
 using System.Windows.Markup;
 using System.Windows.Media;
 using Microsoft.Web.WebView2.Core;
-using Microsoft.Web.WebView2.Wpf;
+using WebView2 = Microsoft.Web.WebView2.WinForms.WebView2;
 
 namespace AdoPrView;
 
 public sealed class PopBrowserPane : Border, IDisposable
 {
     readonly WebView2 browser = new();
+    readonly WindowsFormsHost browserHost;
     readonly Grid browserArea = new();
     readonly TextBlock title = new(), origin = new(), policy = new(), navigation = new();
     readonly Button back, reload, check, closePopup;
@@ -55,6 +57,7 @@ public sealed class PopBrowserPane : Border, IDisposable
     CoreWebView2Environment? environment;
     Task? initialization;
     WebView2? popup;
+    WindowsFormsHost? popupHost;
     bool browserUsed, disposed;
 
     public event Action<bool>? OpenChanged;
@@ -132,7 +135,10 @@ public sealed class PopBrowserPane : Border, IDisposable
         };
         DockPanel.SetDock(headerFrame, Dock.Top);
         root.Children.Add(headerFrame);
-        browserArea.Children.Add(browser);
+        // WPF WebView2 automatically closes its containing Window on website window.close().
+        // A WinForms control has no such owner-close handler; keep these remote surfaces inline.
+        browserHost = new WindowsFormsHost { Child = browser };
+        browserArea.Children.Add(browserHost);
         // Keep the rectangular HWND inset; WPF rounded corners cannot clip WebView2.
         root.Children.Add(new Border
         {
@@ -255,7 +261,8 @@ public sealed class PopBrowserPane : Border, IDisposable
             }
             var captured = session.Selection;
             var child = popup = new WebView2();
-            browserArea.Children.Add(child);
+            popupHost = new WindowsFormsHost { Child = child };
+            browserArea.Children.Add(popupHost);
             try
             {
                 await child.EnsureCoreWebView2Async(environment);
@@ -279,7 +286,17 @@ public sealed class PopBrowserPane : Border, IDisposable
                 }
             }
         };
-        core.WindowCloseRequested += (_, _) => { if (view == popup) ClosePopup(); else _ = GuardTaskAsync(CloseAsync); };
+        core.WindowCloseRequested += (_, _) =>
+        {
+            var captured = session.Selection;
+            // Dispose only after the WebView callback returns, and never close a newer surface/selection.
+            _ = Dispatcher.BeginInvoke(new Action(() =>
+            {
+                if (disposed || session.Selection != captured) return;
+                if (view == popup) ClosePopup();
+                else if (view == browser && session.IsOpen) _ = GuardTaskAsync(CloseAsync);
+            }));
+        };
         core.LaunchingExternalUriScheme += (_, e) =>
         {
             e.Cancel = true;
@@ -287,7 +304,7 @@ public sealed class PopBrowserPane : Border, IDisposable
         };
         core.DownloadStarting += (_, e) => { e.Cancel = true; navigation.Text = "Downloads are disabled in this PoP pane."; };
         core.ProcessFailed += (_, _) => navigation.Text = "The embedded website process failed. Reload or use Open in Edge (external).";
-        view.GotKeyboardFocus += (_, _) => browserUsed = true;
+        view.Enter += (_, _) => browserUsed = true;
         if (!allowBlank) SurfaceCreated?.Invoke(core);
         UpdateNavigation();
     }
@@ -309,10 +326,10 @@ public sealed class PopBrowserPane : Border, IDisposable
     {
         if (popup is not null)
         {
-            var child = popup;
             popup = null;
-            browserArea.Children.Remove(child);
-            child.Dispose();
+            browserArea.Children.Remove(popupHost!);
+            popupHost!.Dispose();
+            popupHost = null;
         }
         closePopup.Visibility = Visibility.Collapsed;
         UpdateNavigation();
@@ -364,6 +381,6 @@ public sealed class PopBrowserPane : Border, IDisposable
         if (disposed) return;
         disposed = true;
         ClosePopup();
-        browser.Dispose();
+        browserHost.Dispose();
     }
 }
