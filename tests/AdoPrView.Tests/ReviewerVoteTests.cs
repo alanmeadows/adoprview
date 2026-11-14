@@ -125,6 +125,40 @@ static class ReviewerVoteTests
             var result = await f.Service.ApproveAsync("repo-id:123", f.Expected);
             Check(result.Confirmed && result.Pr.IsDraft && f.Puts == 1, "Monitored draft behavior changed");
         });
+        foreach (var fromRead in new[] { 1, 2 })
+            await test($"Reviewer vote refuses a PR that becomes an ignored draft (ADO read {fromRead}) without a PUT", async () =>
+            {
+                using var f = new Fixture();
+                await f.Init();
+                f.Store.Current.IgnoreDrafts = true;
+                f.DraftFromRead = fromRead;
+                await Rejected(f);
+                Check(f.Puts == 0, "Ignored draft reached vote API");
+            });
+        await test("Reviewer vote and an enabled approval provider remain separate actions on the same PR", async () =>
+        {
+            var provider = new TestApprovalProvider();
+            using var f = new Fixture(provider);
+            TestApprovalProvider.Requests.Clear();
+            await f.Init();
+            var before = f.Service.Find("repo-id:123");
+            Check(before.Approval is not null && before.ReviewVote?.CanApprove == true, "Provider offer and direct vote did not coexist");
+            string? reply = null;
+            var bridge = new Bridge(f.Service, f.Store, text => { reply = text; return Task.CompletedTask; }, _ => { }, provider, new Ui());
+            await bridge.HandleAsync("""{"id":1,"method":"generateApproval","params":{"key":"repo-id:123"}}""");
+            Check(JsonNode.Parse(reply!)!["error"] is null && TestApprovalProvider.Requests.SequenceEqual(["repo-id:123"]) && f.Puts == 0,
+                "Provider action wrote a direct reviewer vote or was not dispatched");
+            await bridge.HandleAsync(JsonSerializer.Serialize(new { id = 2, method = "approve", @params = new { key = "repo-id:123", expected = f.Expected } }, Bridge.Json));
+            Check(JsonNode.Parse(reply!)!["result"]?["confirmed"]?.GetValue<bool>() == true && f.Puts == 1 && TestApprovalProvider.Requests.Count == 1,
+                "Direct vote was routed through the provider or did not record");
+            Check(f.Service.Find("repo-id:123").Approval is not null && f.Service.Current.ApprovalProvider?.Name == provider.Name,
+                "Direct vote made the enabled provider unavailable");
+        });
+    }
+
+    sealed class Ui : IApprovalUi
+    {
+        public Task<T> OnUiThreadAsync<T>(Func<System.Windows.Window?, T> action) => Task.FromResult(action(null));
     }
 
     sealed class Fixture : IDisposable
@@ -133,7 +167,7 @@ static class ReviewerVoteTests
         public readonly PrView Neighbor = Seed(456);
         public readonly PrService Service;
         readonly HttpClient http;
-        public int Vote, Puts, ReviewerReads, PrReads;
+        public int Vote, Puts, ReviewerReads, PrReads, DraftFromRead;
         public bool AbsentSelf, IsAuthor, Draft;
         public string Change = "";
         public ReviewVoteTarget Expected = null!;
@@ -148,12 +182,12 @@ static class ReviewerVoteTests
             Url = "https://dev.azure.com/offline/project/_git/repo/pullrequest/" + id,
             ProjectId = "project-id", Repo = "repo", RepoId = "repo-id", IsActive = true, Author = new("Author", null, OtherId),
         };
-        public Fixture()
+        public Fixture(IApprovalProvider? provider = null)
         {
             Store.Current.Repos.Add(new RepoRef { Org = "offline", Project = "project", ProjectId = "project-id", Repo = "repo", RepoId = "repo-id" });
             Store.Current.Whitelist.Add("Author");
             http = new HttpClient(new FakeHandler(Respond));
-            Service = new PrService(new AdoClient(http, _ => Task.FromResult(new AuthenticationHeaderValue("Bearer", "offline"))), Store);
+            Service = new PrService(new AdoClient(http, _ => Task.FromResult(new AuthenticationHeaderValue("Bearer", "offline"))), Store, provider);
             typeof(PrService).GetField("_snapshot", BindingFlags.Instance | BindingFlags.NonPublic)!.SetValue(Service,
                 new Snapshot { Prs = [Seed(123), Neighbor], OrderRevision = 19 });
         }
@@ -213,7 +247,7 @@ static class ReviewerVoteTests
                 if (Change == "inactive" || Change == "post-inactive" && Puts > 0) pr["status"] = "completed";
                 if (Change == "source-ref") pr["sourceRefName"] = "refs/heads/another";
                 if (Change == "target-ref") pr["targetRefName"] = "refs/heads/another";
-                pr["isDraft"] = Draft;
+                pr["isDraft"] = Draft || DraftFromRead > 0 && PrReads >= DraftFromRead;
                 return Json(pr, Change == "post-read" && Puts > 0 ? HttpStatusCode.Forbidden : HttpStatusCode.OK);
             }
             if (path.EndsWith("/iterations"))

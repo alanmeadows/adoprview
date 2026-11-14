@@ -34,7 +34,13 @@ calls used see [DESIGN.md](DESIGN.md); for building and tests see
 - Closing the window keeps it in the tray while notifications are on; exit from the tray menu.
 - A custom four-note chime announces new **Needs Human** arrivals, even while
   the app is focused. Initial load and unchanged rows stay silent; simultaneous
-  arrivals share one chime. The existing Notifications checkbox controls it.
+  arrivals share one chime. Settings has independent **Tray notifications
+  (closing the window keeps it in the tray)** and **Play chime for new Needs Human
+  PRs** checkboxes. Turn the chime off to mute it while keeping tray notifications
+  and background monitoring. Chimes can also stay on with tray notifications off;
+  close-to-tray still depends only on Tray notifications.
+  Existing settings retain their previous sound behavior until you change it.
+  Muted arrivals are consumed without replaying when the chime is turned back on.
 - The current refresh interval is shown in the status bar and is configurable
   in Settings (default: 2 minutes; merge re-check: 10 minutes).
 
@@ -90,6 +96,13 @@ requirement and no warnings or waits are invented.
 
 ## Row actions
 
+In Settings, **Ignore draft PRs** excludes drafts from all attention lanes,
+title/tray/taskbar counts, notifications and automatic merge re-checks. It is
+off by default. The **Ignored drafts** filter lists them without attention
+actions; open a draft in Azure DevOps to publish it, or turn the setting off.
+Publishing restores normal classification on the next refresh. Existing Fix
+runs and their output are retained and are not cancelled by this option.
+
 Row actions use fixed **Review / Publish / PoP / Auto / Fix / Open** grid slots across
 every row. Compact, busy or missing actions keep their slot; enlarged buttons
 cannot displace neighboring actions. Hide has no visible slot.
@@ -107,8 +120,8 @@ An enabled optional approval provider retains its separate **+1** row action;
 ordinary **Approve** remains in expanded details. Without a provider, the row's
 Review slot shows **Approve** directly. Already-approved votes display
 **Approved**, not another write action. If reviewer identity or revision cannot
-be verified, refresh before approving. Hidden, inactive and no-longer-monitored
-PRs cannot be approved here. Monitored drafts support ordinary reviewer votes;
+be verified, refresh before approving. Hidden, inactive, ignored-draft and
+no-longer-monitored PRs cannot be approved here. Monitored drafts support ordinary reviewer votes;
 approving does not publish the draft.
 
 ADO's reviewer-vote API has no atomic revision condition. The app checks both
@@ -263,7 +276,13 @@ default) and each repository's source directory. Blank directories try
 `~/clones/<repo>`. The app verifies the directory and its exact Azure DevOps
 organization/project/repository remote before launching. WSL needs Git,
 authenticated Copilot CLI and the managed task runner `bgtask`. The shared
-`~/.config/bash/environment` supplies PATH/BASH_ENV.
+`~/.config/bash/environment` supplies PATH/BASH_ENV. The non-login runner keeps
+existing PATH resolution first, then tries nvm's default and executable
+`~/.local/bin/copilot` if Copilot is still missing. This PATH adjustment is
+inherited by runner children only; no shell configuration is edited.
+`bgtask` also supports the existing `~/go/bin/bgtask` fallback. Preflight errors
+identify the failed dependency or inspection stage and exit code without
+displaying environment values, remote URLs or raw tool errors.
 
 Inline-run compatibility checks advertised CLI option names, not exact help
 sentences. If a required option is absent, the error lists it. Check

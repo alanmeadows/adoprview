@@ -29,7 +29,7 @@ public sealed partial class PrService
     static bool MergeConflicted(string status) => status == "conflicts";
     static bool AutomaticMergeCheckEligible(PrView pr) => !MergeConflicted(pr.MergeStatus) && !MergeInFlight(pr.MergeStatus);
     TimeSpan MergeCadence => TimeSpan.FromMinutes(Math.Max(1, _store.Current.MergeCheckMinutes));
-    bool Monitored(PrView pr) => pr.IsActive && !pr.IsHidden &&
+    bool Monitored(PrView pr) => pr.IsActive && !pr.IsHidden && !pr.IsIgnoredDraft && !(_store.Current.IgnoreDrafts && pr.IsDraft) &&
         !_store.Current.Hidden.Contains(pr.Key, StringComparer.OrdinalIgnoreCase) &&
         _store.Current.Repos.Any(r => r.Key == $"{pr.Org}/{pr.Project}/{pr.Repo}".ToLowerInvariant());
 
@@ -158,8 +158,10 @@ public sealed partial class PrService
         check.Error = $"Merge re-check failed: {ex.Message}.";
     }
 
-    static void ReadMergeFields(PrView pr, JsonNode json)
+    void ReadMergeFields(PrView pr, JsonNode json)
     {
+        if (json["isDraft"] is not null) pr.IsDraft = B(json["isDraft"]);
+        pr.IsIgnoredDraft = _store.Current.IgnoreDrafts && pr.IsDraft;
         if (json["mergeStatus"] is not null) pr.MergeStatus = S(json["mergeStatus"]);
         if (json["status"] is not null) pr.IsActive = S(json["status"]) == "active";
         if (json.AsObject().ContainsKey("lastMergeTargetCommit")) pr.LastMergeTargetCommit = S(json["lastMergeTargetCommit"]?["commitId"]);
@@ -172,7 +174,10 @@ public sealed partial class PrService
         if (!Monitored(pr)) return new(false, $"!{pr.Id} is hidden or no longer monitored; no merge re-check requested.");
         var cur = await _ado.GetAsync(PrApi(pr));
         if (string.IsNullOrEmpty(S(cur["status"]))) throw new AdoException("ADO did not return the PR's active status.");
+        if (_store.Current.IgnoreDrafts && cur["isDraft"] is null)
+            throw new AdoException("ADO did not confirm whether the PR is a draft; no merge re-check requested.");
         ReadMergeFields(pr, cur);
+        if (!Monitored(pr)) return new(false, $"!{pr.Id} is an ignored draft or no longer monitored; no merge re-check requested.");
         if (!pr.IsActive) return new(false, $"!{pr.Id} is no longer active; no merge re-check requested.");
         if (MergeInFlight(pr.MergeStatus)) return new(false, $"!{pr.Id} already has a merge evaluation in progress; it was not restarted.");
         if (automatic && !AutomaticMergeCheckEligible(pr))

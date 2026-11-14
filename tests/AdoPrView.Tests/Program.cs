@@ -349,6 +349,105 @@ await Test("hidden and error rows do not create arrival notifications", () =>
     return Task.CompletedTask;
 });
 
+await Test("ignored drafts never create arrivals and publication restores notification eligibility", () =>
+{
+    var ignored = Pr(); ignored.IsDraft = true; ignored.IsIgnoredDraft = true; ignored.Lane = Lane.NeedsHuman;
+    var human = Pr(); human.Lane = Lane.NeedsHuman;
+    Check(!PrService.GetLaneChanges(Snap(human), Snap(ignored)).Any(), "Returning to ignored draft notified");
+    Check(PrService.GetLaneChanges(Snap(ignored), Snap(human)).Count() == 1, "Publication did not restore arrivals");
+    return Task.CompletedTask;
+});
+
+await Test("notice drain suppresses queued drafts, stale lanes, hidden and error rows", () =>
+{
+    foreach (var suppressed in new[] { "draft", "setting", "hidden", "error", "lane", "removed" })
+    {
+        var human = Pr(hidden: suppressed == "hidden"); human.Lane = Lane.NeedsHuman;
+        var pending = new Dictionary<string, Lane> { [human.Key] = Lane.NeedsHuman };
+        if (suppressed == "draft") { human.IsDraft = true; human.IsIgnoredDraft = true; }
+        if (suppressed == "setting") human.IsDraft = true;
+        if (suppressed == "error") human.Error = "Offline";
+        if (suppressed == "lane") human.Lane = Lane.Blocked;
+        var delivery = MainWindow.DrainNotices(suppressed == "removed" ? [] : [human], pending,
+            new AppSettings { IgnoreDrafts = suppressed == "setting" }, false);
+        Check(delivery.Notices.Length == 0 && !delivery.PlayHumanSound && pending.Count == 0, "Stale queued notice escaped: " + suppressed);
+    }
+    return Task.CompletedTask;
+});
+
+await Test("notice drain retains Sound control and consumes muted arrivals without replay", () =>
+{
+    var human = Pr(); human.Lane = Lane.NeedsHuman;
+    foreach (var sound in new[] { false, true })
+    foreach (var headless in new[] { false, true })
+    {
+        var pending = new Dictionary<string, Lane> { [human.Key] = Lane.NeedsHuman };
+        var settings = new AppSettings { Sound = sound };
+        var delivery = MainWindow.DrainNotices([human], pending, settings, headless);
+        Check(delivery.Notices.Length == 1 && delivery.PlayHumanSound == (sound && !headless), "Sound controls changed");
+        settings.Sound = true;
+        Check(!MainWindow.DrainNotices([human], pending, settings, false).PlayHumanSound, "Consumed arrival replayed");
+    }
+    return Task.CompletedTask;
+});
+
+foreach (var notifications in new[] { false, true })
+foreach (var sound in new[] { false, true })
+await Test($"chime and close-to-tray are independent: notifications={notifications}, sound={sound}", () =>
+{
+    var settings = new AppSettings { Notifications = notifications, Sound = sound };
+    var human = Pr(); human.Lane = Lane.NeedsHuman;
+    var pending = new Dictionary<string, Lane> { [human.Key] = human.Lane };
+    var delivery = MainWindow.DrainNotices([human], pending, settings, headlessCapture: false);
+    Check(delivery.PlayHumanSound == sound && delivery.Notices.Length == 1 && pending.Count == 0,
+        "Tray notifications changed chime eligibility or consumed the notice incorrectly");
+    Check(MainWindow.ShouldKeepInTray(settings, false, false, System.Windows.WindowState.Normal) == notifications &&
+        MainWindow.ShouldKeepInTray(settings, false, false, System.Windows.WindowState.Maximized) == notifications,
+        "Sound changed normal close-to-tray behavior");
+    Check(!MainWindow.ShouldKeepInTray(settings, true, false, System.Windows.WindowState.Normal) &&
+        !MainWindow.ShouldKeepInTray(settings, false, true, System.Windows.WindowState.Normal) &&
+        !MainWindow.ShouldKeepInTray(settings, false, false, System.Windows.WindowState.Minimized),
+        "Explicit exit, headless or minimized-close behavior changed");
+    pending[human.Key] = human.Lane;
+    Check(!MainWindow.DrainNotices([human], pending, settings, headlessCapture: true).PlayHumanSound, "Headless capture would play sound");
+    return Task.CompletedTask;
+});
+
+await Test("queued human arrivals use the current mute setting at delivery without replaying on unmute", () =>
+{
+    var human = Pr(); human.Lane = Lane.NeedsHuman;
+    var settings = new AppSettings { Notifications = true, Sound = true };
+    var pending = new Dictionary<string, Lane> { [human.Key] = human.Lane };
+    settings.Sound = false;
+    var delivery = MainWindow.DrainNotices([human], pending, settings, headlessCapture: false);
+    Check(!delivery.PlayHumanSound && delivery.Notices.Length == 1 && settings.Notifications, "Queued mute suppressed the tray notice or played sound");
+    settings.Sound = true;
+    Check(!MainWindow.DrainNotices([human], pending, settings, headlessCapture: false).PlayHumanSound, "Unmute replayed a consumed arrival");
+    settings.Sound = false;
+    pending[human.Key] = human.Lane;
+    settings.Sound = true;
+    Check(MainWindow.DrainNotices([human], pending, settings, headlessCapture: false).PlayHumanSound, "Queued unmute did not use the current sound setting");
+    human.Lane = Lane.Blocked; pending[human.Key] = human.Lane;
+    Check(!MainWindow.DrainNotices([human], pending, settings, headlessCapture: false).PlayHumanSound, "Blocked arrival played the human chime");
+    pending[human.Key] = Lane.NeedsHuman;
+    Check(MainWindow.DrainNotices([human], pending, settings, headlessCapture: false).Notices.Length == 0, "Stale queued lane produced a notification");
+    return Task.CompletedTask;
+});
+
+await Test("queued chimes coalesce and discard hidden, error and removed arrivals", () =>
+{
+    var human = Pr(); human.Lane = Lane.NeedsHuman;
+    var another = Pr(id: 456); another.Lane = Lane.NeedsHuman;
+    var pending = new Dictionary<string, Lane> { [human.Key] = human.Lane, [another.Key] = another.Lane };
+    var delivery = MainWindow.DrainNotices([human, another], pending, new AppSettings(), headlessCapture: false);
+    Check(delivery.PlayHumanSound && delivery.Notices.Length == 2 && pending.Count == 0, "Arrivals were not coalesced");
+    pending[human.Key] = human.Lane; pending[another.Key] = another.Lane; pending["removed"] = Lane.NeedsHuman;
+    human = Pr(hidden: true); human.Lane = Lane.NeedsHuman; another.Error = "Offline error";
+    delivery = MainWindow.DrainNotices([human, another], pending, new AppSettings(), headlessCapture: false);
+    Check(!delivery.PlayHumanSound && delivery.Notices.Length == 0 && pending.Count == 0, "Ineligible arrivals were delivered or retained");
+    return Task.CompletedTask;
+});
+
 await Test("custom chime is an original, non-clipping mono PCM wave under one second", () =>
 {
     var wave = HumanAttentionSound.CreateWave();
@@ -377,6 +476,7 @@ await ReviewBotScopeTests.Run(Test);
 await BuildCacheScopeTests.Run(Test);
 await CopilotSourceTests.Run(Test);
 await CopilotRunTests.Run(Test);
+await CopilotPreflightTests.Run(Test);
 await CopilotRecoveryTests.Run(Test);
 await PopPaneTests.Run(Test);
 await AutoCompleteTests.Run(Test);

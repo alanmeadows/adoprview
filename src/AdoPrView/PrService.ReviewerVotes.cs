@@ -87,6 +87,8 @@ public sealed partial class PrService
         CheckReviewIdentity(scope, pr);
         if (S(pr["status"]) != "active")
             throw new InvalidOperationException("This PR is inactive. Refresh before approving.");
+        if (_store.Current.IgnoreDrafts && (pr["isDraft"] is null || B(pr["isDraft"])))
+            throw new InvalidOperationException("This PR is an ignored draft or ADO did not confirm its draft state. Refresh before approving.");
         var latest = LatestReviewIteration(await iterationsTask);
         var reviewer = Arr(pr["reviewers"]).FirstOrDefault(r => S(r["id"]).Equals(expected.ReviewerId, StringComparison.OrdinalIgnoreCase));
         if (pr["reviewers"] is not JsonArray || reviewer is not null && (B(reviewer["isContainer"]) || I(reviewer["vote"]) is null) ||
