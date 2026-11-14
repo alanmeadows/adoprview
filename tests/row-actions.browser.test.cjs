@@ -228,9 +228,9 @@ test('real row hit testing and action identity across refreshes', { timeout: 900
       await send('Emulation.setDeviceMetricsOverride', {width:1600,height:1000,deviceScaleFactor:1,mobile:false});
     });
 
-    await t.test('row and expanded ordinary Approve submit once without dialogs, including duplicate clicks and failures', async () => {
+    await t.test('ordinary Approve preserves collapsed/expanded rows through pending, result and refresh without dialogs or duplicate votes', async () => {
       const key='sample-service-id:101';
-      for (const surface of ['row','detail']) for (const failure of [false,true]) {
+      for (const [surface, expanded] of [['row',false],['row',true],['detail',true]]) for (const failure of [false,true]) {
         await reset(true);
         await evaluate(`{
           const p=S.snap.prs.find(p=>p.key==='${key}');
@@ -240,10 +240,18 @@ test('real row hit testing and action identity across refreshes', { timeout: 900
             target:{reviewerId:'offline-reviewer',sourceCommit:'a'.repeat(40),targetCommit:'b'.repeat(40),
               sourceRef:'refs/heads/feature',targetRef:'refs/heads/main',iterationId:4,vote:0}};
           ${surface === 'row' ? 'delete p.approval;' : "p.approval={title:'Offline provider remains separate'};"}
-          S.expanded.add('${key}');renderRows();
+          ${expanded ? `S.expanded.add('${key}');` : ''}renderRows();
           window.holdApproval=true;window.approvalFailure=${failure};window.confirmResult=false;
         }`);
+        const assertExpansion = async phase => {
+          assert.deepEqual(await evaluate(`(()=>{
+            const row=document.querySelector('[data-key="${key}"]');
+            return {state:S.expanded.has('${key}'),open:row.classList.contains('open'),detail:!!row.querySelector('.detail')};
+          })()`), {state:expanded,open:expanded,detail:expanded}, `${surface}/${expanded}/${failure}: ${phase}`);
+        };
+        await assertExpansion('before click');
         await click(await point(key, `.${surface} [data-act="approve"]`)); await frame();
+        await assertExpansion('pending');
         const approvalCalls=()=>calls().then(cs=>cs.filter(c=>c.method==='approve'));
         const submitted=await approvalCalls();
         assert.equal(submitted.length,1,`${surface} ${failure}: one RPC for deliberate click`);
@@ -259,14 +267,26 @@ test('real row hit testing and action identity across refreshes', { timeout: 900
           buttons.forEach(b=>b.click());return locked;
         })()`),true);
         assert.equal((await approvalCalls()).length,1,'Duplicate controls cannot submit another RPC');
+        await evaluate(`setSnapshot({...S.snap,orderRevision:(S.snap.orderRevision||0)+1});`);
+        await frame();
+        await assertExpansion('refresh while pending');
         await evaluate('window.completeApproval()'); await frame();
+        await assertExpansion('result');
         assert.equal((await approvalCalls()).length,1,'Completion/failure does not retry the vote');
         assert.deepEqual(await evaluate('window.confirmations'),[]);
         assert.equal(await evaluate(`S.snap.prs.find(p=>p.key==='${key}').reviewVote.vote`),failure?0:10);
         assert.equal(await evaluate(`S.reviewVotes.get('${key}').kind`),failure?'error':'confirmed');
-        if(failure)assert.match(await evaluate(`document.querySelector('[data-key="${key}"] [data-review-vote-outcome]').textContent`),/Offline approval denied/);
+        if(failure)assert.match(await evaluate(`document.querySelector('#toasts').textContent`),/Offline approval denied/);
         if(surface==='detail')assert.ok(await evaluate(`!!document.querySelector('[data-key="${key}"] .row [data-act="generateApproval"]')`));
         assert.deepEqual((await calls()).map(c=>c.method),['approve']);
+        await move(10,10);
+        await evaluate(`document.activeElement?.blur();`);
+        await frame();
+        await evaluate(`setSnapshot({...S.snap,orderRevision:(S.snap.orderRevision||0)+1});flushRowUpdates();`);
+        await frame();
+        await assertExpansion('refresh after result');
+        await click(await point(key, '.row .title')); await frame();
+        assert.equal(await evaluate(`S.expanded.has('${key}')`),!expanded,'Ordinary row click still toggles expansion');
       }
     });
 

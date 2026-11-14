@@ -976,7 +976,6 @@ async function onAction(act, el, key) {
       const state = p && reviewVoteFor(p);
       if (!state?.canApprove || !state.target || isBusy(key, act)) return;
       const expected = { ...state.target };
-      S.expanded.add(key);
       S.reviewVotes.delete(key);
       await runAction(key, act, async () => {
         try {

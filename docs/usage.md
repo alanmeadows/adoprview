@@ -110,6 +110,7 @@ every row. Compact, busy or missing actions keep their slot; enlarged buttons
 cannot displace neighboring actions. Hide has no visible slot.
 
 **Approve** records the signed-in user's ordinary ADO reviewer vote (`10`).
+Clicking it keeps the row collapsed or expanded as it was.
 One click submits the vote without a confirmation dialog or account selection.
 The app checks the captured PR, signed-in identity, latest iteration and
 source/target revisions before submitting once, then reads back the vote and
