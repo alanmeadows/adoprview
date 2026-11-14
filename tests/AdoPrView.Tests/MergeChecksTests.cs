@@ -138,6 +138,63 @@ static class MergeChecksTests
             Check(f.Patches.SequenceEqual([p.Key]), "Missing preview target did not restart");
         });
 
+        await test("merge trigger followed by authoritative succeeded GET is Clean in the first snapshot without waiting", async () =>
+        {
+            using var f = new Fixture();
+            var p = f.Add(); p.Preview = Fixture.New;
+            f.BeforePrRead = (pr, n) => { if (n == 3) f.Complete(pr); };
+            await f.Service.RefreshAsync();
+            var view = f.View(p);
+            Check(f.Patches.SequenceEqual([p.Key]) && view.MergeStatus == "succeeded" && !view.MergeStale &&
+                !view.MergeRecheckPending && view.Gates["merge"].Label == "Clean" && view.Lane == Lane.NeedsHuman,
+                "Accepted trigger masked its authoritative completed GET result in the first snapshot");
+            Check(view.MergeRecheckRequestedAt == f.Clock.GetUtcNow(), "Trigger timestamp was lost");
+            await f.Service.RefreshAsync();
+            Check(f.Patches.Count == 1, "Completed result invented another merge trigger");
+        });
+
+        foreach (var status in new[] { "queued", "notSet" })
+            await test($"merge {status} exposes human requirements in the first snapshot and never restarts pending state", async () =>
+            {
+                using var f = new Fixture();
+                var p = f.Add(); p.MergeStatus = status; p.Preview = Fixture.New; p.Draft = true;
+                await f.Service.RefreshAsync(forceMergeCheck: true);
+                Check(f.View(p).Lane == Lane.NeedsHuman && f.View(p).HumanActions.Contains("publish") &&
+                    f.View(p).HumanActions.Contains("autocomplete") && f.View(p).Waiting.Count == 0 &&
+                    f.View(p).Gates["merge"].Label == (status == "queued" ? "Queued" : "Unknown"),
+                    "First pending snapshot hid available human actions");
+                var manual = await f.Service.RestartMergeAsync(p.Key);
+                f.Clock.Advance(TimeSpan.FromHours(1));
+                await f.Service.RefreshAsync(forceMergeCheck: true);
+                Check(!manual.Requested && f.Patches.Count == 0, "Pending/unset merge was cancelled or restarted");
+            });
+
+        foreach (var incomplete in new[] { false, true })
+        await test($"accepted merge trigger with failed or incomplete follow-up GET reports read error without retrying early (incomplete={incomplete})", async () =>
+        {
+            using var f = new Fixture();
+            var p = f.Add(); p.Preview = Fixture.New; f.ReturnQueued = false;
+            f.BeforePrRead = (pr, n) =>
+            {
+                if (n != 3) return;
+                if (incomplete) pr.Status = "";
+                else f.FailPrs.Add(pr.Key);
+            };
+            await f.Service.RefreshAsync();
+            Check(f.Patches.Count == 1 && f.View(p).MergeRecheckRequestedAt == f.Clock.GetUtcNow() &&
+                f.View(p).MergeRecheckError is null && f.View(p).MergeCheckError!.Contains("was accepted") &&
+                f.View(p).Gates["merge"].State == "warn" && f.Service.Current.MergeCheckStatus!.Contains("1 requested"),
+                "Failed post-trigger read became a failed trigger or a clean preview");
+            f.FailPrs.Clear(); f.BeforePrRead = null; p.Status = "active";
+            f.Clock.Advance(TimeSpan.FromSeconds(120));
+            await f.Service.RefreshAsync();
+            Check(f.Patches.Count == 1 && f.View(p).MergeCheckError is null && f.View(p).Gates["merge"].Label == "Stale",
+                "Read-back recovery eagerly duplicated an accepted trigger");
+            f.Clock.Advance(TimeSpan.FromMinutes(8));
+            await f.Service.RefreshAsync();
+            Check(f.Patches.Count == 2 && f.View(p).Gates["merge"].Label == "Stale", "Accepted trigger did not retain retry cadence");
+        });
+
         foreach (var missing in new[] { false, true })
             await test($"merge target {(missing ? "missing" : "read failure")} is explicit and recovery retries before the next cadence", async () =>
             {
@@ -233,12 +290,12 @@ static class MergeChecksTests
                 !view.MergeRecheckError.Contains("Retrying"), "Genuine error was erased or still promises automatic retries during conflicts");
         });
 
-        await test("conflicts clear an accepted stale pending restart but a deliberate manual recheck remains available", async () =>
+        await test("conflicts replace an accepted stale result but a deliberate manual recheck remains available", async () =>
         {
             using var f = new Fixture();
             var p = f.Add(); p.Preview = Fixture.New; f.ReturnQueued = false;
             await f.Service.RefreshAsync();
-            Check(f.View(p).MergeRecheckPending, "Fixture did not start a pending restart");
+            Check(!f.View(p).MergeRecheckPending && f.View(p).Gates["merge"].Label == "Stale", "Accepted stale result invented pending state");
             p.MergeStatus = "conflicts";
             await f.Service.RefreshOneAsync(p.Key);
             await f.Service.RefreshAsync(forceMergeCheck: true);
@@ -379,7 +436,7 @@ static class MergeChecksTests
             Check(f.Patches.Count(k => k == a.Key) == 2 && f.Patches.Count(k => k == b.Key) == 1, "Force retry lost or healthy PR repeated");
         });
 
-        await test("accepted but stale merge results stop Checking across repeated cadences and expose human-only requirements", async () =>
+        await test("accepted stale merge results expose human-only requirements immediately and retain nonduplicative cadence", async () =>
         {
             using var f = new Fixture();
             var p = f.Add(); p.Preview = Fixture.New;
@@ -394,7 +451,8 @@ static class MergeChecksTests
                         ["type"] = new JsonObject { ["id"] = "offline", ["displayName"] = name } },
                 });
             await f.Service.RefreshAsync();
-            Check(f.View(p).MergeRecheckPending, "HTTP acceptance was treated as fresh computation");
+            Check(!f.View(p).MergeRecheckPending && f.View(p).Lane == Lane.NeedsHuman &&
+                f.View(p).Gates["merge"].Label == "Stale", "Initial accepted stale result hid human attention");
             for (var minutes = 2; minutes <= 40; minutes += 2)
             {
                 f.Clock.Advance(TimeSpan.FromSeconds(120));
@@ -402,18 +460,12 @@ static class MergeChecksTests
                 var view = f.View(p);
                 Check(f.Patches.Count == 1 + minutes / 10, "Stale retries duplicated writes or lost their cadence");
                 Check(view.MergeStale, "Old terminal result was called current");
-                if (minutes < 10)
-                    Check(view.MergeRecheckPending, "Accepted request grace ended before the merge interval");
-                else
-                {
-                    Check(!view.MergeRecheckPending && view.Gates["merge"].State == "warn" &&
-                        view.Gates["merge"].Label == "Retry needed", "Repeated stale responses renewed Checking indefinitely");
-                    Check(view.MergeRecheckError!.Contains("current target") &&
-                        view.Gates["merge"].Detail!.Contains("current target"), "Unverified preview warning was lost");
-                    Check(view.Lane == Lane.NeedsHuman && view.Waiting.Count == 0 && view.Blockers.Count == 0 &&
-                        view.HumanActions.Order().SequenceEqual(new[] { "autocomplete", "pop" }), "Stale bookkeeping hid human-only requirements");
-                    Check(f.Service.Current.MergeCheckStatus!.Contains("0 checking"), "Status summary invented running work");
-                }
+                Check(!view.MergeRecheckPending && view.Gates["merge"].State == "warn" &&
+                    view.Gates["merge"].Label == "Stale" && view.MergeRecheckError is null,
+                    "Repeated stale responses invented pending work or trigger failures");
+                Check(view.Lane == Lane.NeedsHuman && view.Waiting.Count == 0 && view.Blockers.Count == 0 &&
+                    view.HumanActions.Order().SequenceEqual(new[] { "autocomplete", "pop" }), "Stale bookkeeping hid human-only requirements");
+                Check(f.Service.Current.MergeCheckStatus!.Contains("0 queued"), "Status summary invented running work");
             }
             var requestedAt = f.View(p).MergeRecheckRequestedAt;
             Check(requestedAt == f.Clock.GetUtcNow(), "Successful retry request timestamp was not retained");
@@ -425,7 +477,7 @@ static class MergeChecksTests
         });
 
         foreach (var status in new[] { "queued", "notSet" })
-            await test($"accepted merge retry observes {status} and stays Checking without automatic or manual cancellation", async () =>
+            await test($"accepted merge retry observes {status} without hiding human actions or permitting cancellation", async () =>
             {
                 using var f = new Fixture();
                 var p = f.Add(); p.Preview = Fixture.New; f.ReturnQueued = false;
@@ -439,8 +491,8 @@ static class MergeChecksTests
                     f.Clock.Advance(TimeSpan.FromMinutes(10));
                     await f.Service.RefreshAsync();
                     var manual = await f.Service.RestartMergeAsync(p.Key);
-                    Check(f.Patches.Count == 2 && !manual.Requested && f.View(p).MergeRecheckPending &&
-                        f.View(p).Gates["merge"].Label == "Checking" && f.View(p).Lane == Lane.Waiting,
+                    Check(f.Patches.Count == 2 && !manual.Requested && f.View(p).MergeRecheckPending == (status == "queued") &&
+                        f.View(p).Gates["merge"].Label == (status == "queued" ? "Queued" : "Unknown") && f.View(p).Lane == Lane.NeedsHuman,
                         "Observed in-flight retry was timed out, promoted or restarted");
                 }
                 f.Complete(p);
@@ -468,7 +520,7 @@ static class MergeChecksTests
                     Check(f.View(p).Gates["merge"].Detail!.Contains(p.MergeFailure), "Merge failure explanation was lost");
             });
 
-        await test("timed-out merge result retains target read diagnostics until a verified completed preview arrives", async () =>
+        await test("stale merge result retains target read diagnostics until a verified completed preview arrives", async () =>
         {
             using var f = new Fixture();
             var p = f.Add(); p.Preview = Fixture.New; f.ReturnQueued = false;
@@ -478,7 +530,7 @@ static class MergeChecksTests
             await f.Service.RefreshAsync();
             Check(!f.View(p).MergeRecheckPending && f.View(p).Gates["merge"].State == "warn" &&
                 f.View(p).Gates["merge"].Detail!.Contains("Cannot verify merge target") &&
-                f.View(p).MergeRecheckError!.Contains("current target") && f.Service.Current.RepoErrors.Count > 0,
+                f.View(p).MergeRecheckError is null && f.Service.Current.RepoErrors.Count > 0,
                 "Unverified terminal retry hid target errors or claimed it was running");
             f.HeadFailure = null; f.Complete(p);
             await f.Service.RefreshOneAsync(p.Key);
@@ -489,7 +541,7 @@ static class MergeChecksTests
 
         foreach (var (status, label) in new[] { ("failure", "Failed"), ("rejectedByPolicy", "Rejected"), ("conflicts", "Conflicts") })
             foreach (var restartFailed in new[] { false, true })
-                await test($"verified terminal merge {status} clears expired preview warning but retains restart error={restartFailed}", async () =>
+                await test($"verified terminal merge {status} retains only genuine restart error={restartFailed}", async () =>
                 {
                     using var f = new Fixture();
                     var p = f.Add(); p.Preview = Fixture.New; f.ReturnQueued = false;
@@ -515,7 +567,7 @@ static class MergeChecksTests
                         "Terminal cleanup retained a false summary error or duplicated a retry");
                 });
 
-        await test("expired merge grace survives failed retry followed by accepted stale retries without returning to Checking", async () =>
+        await test("failed merge retry followed by accepted stale retries retains warnings and cadence without hiding human work", async () =>
         {
             using var f = new Fixture();
             var p = f.Add(); p.Preview = Fixture.New; f.ReturnQueued = false;
@@ -524,7 +576,7 @@ static class MergeChecksTests
             f.PatchFailure = HttpStatusCode.ServiceUnavailable;
             await f.Service.RefreshAsync();
             Check(!f.View(p).MergeRecheckPending && f.View(p).MergeRecheckError!.Contains("503") &&
-                f.View(p).MergeRecheckError!.Contains("current target"), "Failed retry discarded independent preview expiry");
+                f.View(p).MergeStale, "Failed retry discarded the observed stale result");
             await f.Service.RefreshAsync();
             Check(f.Patches.Count == 2, "Transport failure backoff was ignored");
             f.PatchFailure = null;
@@ -536,8 +588,8 @@ static class MergeChecksTests
                 Check(f.Patches.Count == 3 + (minutes - 12) / 10, "Accepted stale retries lost their per-request cadence");
                 Check(!view.MergeRecheckPending && view.MergeStale && view.Gates["merge"].State == "warn" &&
                     view.Lane == Lane.NeedsHuman && view.Waiting.Count == 0, "Transport recovery renewed expired Checking");
-                Check(view.MergeRecheckError!.Contains("current target") && !view.MergeRecheckError.Contains("503"),
-                    "Accepted retry lost preview expiry or retained a recovered transport error");
+                Check(view.MergeRecheckError is null && view.Gates["merge"].Label == "Stale",
+                    "Accepted retry lost staleness or retained a recovered transport error");
                 if (minutes == 32) break;
                 f.Clock.Advance(TimeSpan.FromSeconds(120));
                 await f.Service.RefreshAsync();

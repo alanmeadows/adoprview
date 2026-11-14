@@ -70,9 +70,9 @@ const S = {
 };
 
 const LANES = {
-  needsHuman: { label: 'Needs Human', hint: 'Only human actions remain', short: 'Reviewer · PoP · Auto', c: 'var(--needs)' },
+  needsHuman: { label: 'Needs Human', hint: 'Human actions available; merge preview may still be pending or unverified', short: 'Reviewer · PoP · Auto', c: 'var(--needs)' },
   blocked: { label: 'Blocked', hint: 'Agent-fixable problems', short: 'Fix with agent', c: 'var(--blocked)' },
-  waiting: { label: 'Waiting', hint: 'Automated builds, checks or review bot in progress', short: 'In progress', c: 'var(--waiting)' },
+  waiting: { label: 'Waiting', hint: 'Other automated work is pending, or merge verification remains with no human actions', short: 'Pending', c: 'var(--waiting)' },
   ready: { label: 'Ready', hint: 'No outstanding actions — completing', short: 'Completing', c: 'var(--ready)' },
 };
 const GATES = ['merge', 'build', 'checks', 'comments', 'agency'];
@@ -774,7 +774,7 @@ function renderDetail(p) {
       <button class="mini ${p.autoCompleteBy ? 'auto-set' : ''}" data-act="${p.autoCompleteBy ? 'cancelAuto' : 'autocomplete'}" title="${esc(autoCompleteTitle(p))}" aria-label="${esc(autoCompleteTitle(p))}" ${autoCompleteBusy(p.key) ? 'disabled aria-busy="true"' : ''}>${svg(autoCompleteBusy(p.key) ? 'refresh' : p.autoCompleteBy ? 'x' : 'zap')} ${p.autoCompleteBy ? 'Cancel auto-complete' : 'Set auto-complete'}</button></h3>
     <div class="body"><div class="error" role="status" data-auto-complete-error ${S.autoCompleteErrors.has(p.key) ? '' : 'hidden'}>${esc(S.autoCompleteErrors.get(p.key) || '')}</div><dl class="kv">
       <dt>Merge status</dt><dd>${esc(p.mergeStatus || '—')}${p.mergeStale ? ' <span class="small">(preview target is stale or missing)</span>' : ''}${p.mergeFailure ? `<div class="small">${esc(p.mergeFailure)}</div>` : ''}</dd>
-      <dt>Merge re-check</dt><dd>${p.mergeRecheckRequestedAt ? `Requested ${esc(new Date(p.mergeRecheckRequestedAt).toLocaleString())}${p.mergeRecheckPending ? ' — awaiting ADO result' : ''}` : 'No restart requested this session'}
+      <dt>Merge re-check</dt><dd>${p.mergeRecheckRequestedAt ? `Triggered ${esc(new Date(p.mergeRecheckRequestedAt).toLocaleString())}; merge status comes from the PR read` : 'No restart requested this session'}
         ${p.mergeCheckError ? `<div class="error">${esc(p.mergeCheckError)}</div>` : ''}
         ${p.mergeRecheckError ? `<div class="error">${esc(p.mergeRecheckError)}</div>` : ''}</dd>
       <dt>Branches</dt><dd><code>${esc(p.sourceBranch)}</code> → <code>${esc(p.targetBranch)}</code></dd>

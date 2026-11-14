@@ -139,7 +139,7 @@ public sealed partial class PrService
                 if (current.Vote == 10)
                 {
                     await VerifyReviewRevisionAsync(fresh, current);
-                    ApplyMergeCheckState(fresh, fresh: true);
+                    ApplyMergeCheckState(fresh);
                     Classify(fresh);
                     ReplaceOne(fresh);
                     return new(true, true, "Your ADO vote is already Approved. Other review requirements may remain.", fresh);
@@ -162,7 +162,7 @@ public sealed partial class PrService
                     if (updated.ReviewVote?.Target is not { Vote: 10 } confirmed || !SameReviewRevision(confirmed, expected))
                         throw new InvalidOperationException("The PR revision or recorded vote changed during approval.");
                     await VerifyReviewRevisionAsync(updated, expected with { Vote = 10 });
-                    ApplyMergeCheckState(updated, fresh: true);
+                    ApplyMergeCheckState(updated);
                     Classify(updated);
                     ReplaceOne(updated);
                     return new(true, false, "Your ADO vote is Approved. This does not confirm other reviews, policy completion, merge permission or PoP.", updated);

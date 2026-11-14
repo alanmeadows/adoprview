@@ -50,8 +50,10 @@ calls used see [DESIGN.md](DESIGN.md); for building and tests see
 Every PR gets one lane label, and the header counters show how many PRs are in
 each lane. Click a counter to filter by it.
 
-- **Needs Human** means only reviewer approval (+1), Proof of Presence,
-  auto-complete or publishing a draft remains, in any combination. In practice
+- **Needs Human** means reviewer approval (+1), Proof of Presence,
+  auto-complete or publishing a draft is available, with no observed blockers or
+  other pending automated gates. A pending or unverified merge preview does not
+  hide these actions and remains visible in the Merge gate. In practice
   that is two kinds of work, which can appear together on one PR:
   - **A reviewer's approval is still needed.** **Approve** records your own
     reviewer vote. Other required reviewers may still need to approve, including
@@ -63,11 +65,13 @@ each lane. Click a counter to filter by it.
 - **Blocked** — failures and required fixes: merge conflicts, a failed build or
   check, unresolved comments, open review-bot findings, a rejecting vote, and so
   on. These are what the inline Copilot Fix is for.
-- **Waiting** — automated work (builds, checks, merge evaluation) is still running.
-- **Ready** — every blocking policy is approved (auto-complete will merge).
+- **Waiting** — other automated work (builds, checks, review bot) is pending, or
+  merge verification remains and no human action is available.
+- **Ready** — no outstanding actions or observed merge uncertainty remains;
+  auto-complete can complete when ADO's policies allow.
 
-The Needs Human lane is the app's verified, human-only state for the data it
-read. It is not a guarantee that every policy is known or green; open the
+The Needs Human lane highlights available human work, not a guarantee that the
+merge preview is complete, current or clean, or that every policy is green. Open the
 expanded row or ADO when in doubt. [DESIGN.md](DESIGN.md#classification-lanes-sorted-top--bottom)
 has the full classification rules.
 
@@ -183,18 +187,22 @@ re-check is queued.
 Already queued/notSet evaluations are never cancelled. Deferred work is picked
 up after those finish or a failed PR read recovers. Restart failures appear in
 the row's Merge details and status line and retry on a subsequent normal refresh
-(at least one refresh interval later). Accepted requests can show **Checking**
-for up to one merge interval while awaiting ADO's fresh result. If ADO still
-returns an old or unverified terminal preview, the row shows **Retry needed**
-instead; cadence retries do not renew Checking unless ADO reports queued/notSet
-or returns a current-target preview. The stale/unverified warning remains until
-a verified result arrives, including a failure, policy rejection or conflict.
-Restart failures do not reset expired preview grace; a successful retry clears
-its transport error without discarding a still-unverified preview warning.
-Otherwise human-only requirements can appear in **Needs Human** without claiming
-the merge preview is clean. Observed failures,
-policy rejection and conflicts are shown immediately, not hidden by local request
-grace. Genuinely queued/notSet evaluations stay Checking regardless of age.
+(at least one refresh interval later). PATCH is only the trigger; the app reads
+the PR once afterward and uses its `mergeStatus`, with later normal PR GETs
+updating the observation. There is no client-side merge operation or timeout
+grace. A successful current-target result can be **Clean** immediately.
+ADO's `queued` is **Queued**; `notSet` or an unknown status is **Unknown**, not
+proof a task is running. Neither status is restarted automatically or manually.
+Stale previews remain **Stale**, target/read failures remain **Unverified**, and
+failed triggers show **Retry needed**. Accepted triggers retain their timestamp
+and merge-cadence retry spacing even if the follow-up PR read fails; that read
+error does not become a failed write or prompt an eager duplicate trigger.
+
+Pending or unverified merge information does not hide otherwise available human
+actions: **Needs Human** can appear in the first snapshot without any clock
+advance. Other pending builds/checks/review-bot gates still take precedence, as
+do observed conflicts, failure and policy rejection (**Blocked**). With no
+human work, an unverified merge stays **Waiting**, not **Ready**.
 Ref-read failures are visible and retried on the next refresh.
 Existing merge options are preserved. No merge, branch push, policy change or
 auto-complete change is part of these automatic checks.

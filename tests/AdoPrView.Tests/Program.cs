@@ -72,6 +72,53 @@ await Test("merge classifier retains stale warning without hiding human-only act
     return Task.CompletedTask;
 });
 
+foreach (var status in new[] { "queued", "notSet", "" })
+{
+    foreach (var action in new[] { "reviews", "pop", "autocomplete", "publish" })
+        await Test($"merge {status} permits human action {action} immediately without claiming Clean", () =>
+        {
+            var pr = Pr(mergeStatus: status, autoCompleteBy: action == "autocomplete" ? null : "Offline",
+                draft: action == "publish");
+            if (action is "reviews" or "pop") pr.Policies.Add(Policy(action == "reviews" ? "review" : "pop", "rejected"));
+            PrService.Classify(pr);
+            Check(pr.Lane == Lane.NeedsHuman && pr.HumanActions.Contains(action) && pr.Waiting.Count == 0 &&
+                pr.Gates["merge"].Label == (status == "queued" ? "Queued" : "Unknown") &&
+                pr.Gates["merge"].State != "ok", "Merge uncertainty hid human attention or was called clean");
+            return Task.CompletedTask;
+        });
+    await Test($"merge {status} with no human action is not Ready", () =>
+    {
+        var pr = Pr(mergeStatus: status);
+        PrService.Classify(pr);
+        Check(pr.Lane == Lane.Waiting && pr.Waiting.Count == 1 && pr.HumanActions.Count == 0 &&
+            pr.Gates["merge"].State != "ok", "Unverified merge without human work was called ready");
+        return Task.CompletedTask;
+    });
+}
+
+await Test("merge trigger timestamp and obsolete local pending cannot mask an observed succeeded result", () =>
+{
+    var pr = Pr(autoCompleteBy: null);
+    pr.MergeRecheckPending = true;
+    pr.MergeRecheckRequestedAt = DateTimeOffset.UtcNow;
+    PrService.Classify(pr);
+    Check(pr.Lane == Lane.NeedsHuman && pr.Waiting.Count == 0 && pr.Gates["merge"].Label == "Clean",
+        "Request bookkeeping invented a running merge evaluation");
+    return Task.CompletedTask;
+});
+
+foreach (var kind in new[] { "build", "status", "agency" })
+    await Test($"merge uncertainty does not hide genuine pending {kind} work", () =>
+    {
+        var pr = Pr(mergeStatus: "queued", autoCompleteBy: null);
+        if (kind == "agency") pr.Agency = new("pending", 1, 1, "Offline review is running");
+        else pr.Policies.Add(Policy(kind, "running"));
+        PrService.Classify(pr);
+        Check(pr.Lane == Lane.Waiting && pr.Waiting.Count == 1 && pr.HumanActions.Contains("autocomplete"),
+            "Human actions bypassed other machine work");
+        return Task.CompletedTask;
+    });
+
 foreach (var status in new[] { "queued", "running", "rejected" })
     await Test("native reviewer policy " + status + " is a human approval requirement", () =>
     {
