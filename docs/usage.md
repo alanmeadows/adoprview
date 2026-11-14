@@ -170,8 +170,11 @@ for up to one merge interval while awaiting ADO's fresh result. If ADO still
 returns an old or unverified terminal preview, the row shows **Retry needed**
 instead; cadence retries do not renew Checking unless ADO reports queued/notSet
 or returns a current-target preview. The stale/unverified warning remains until
-a verified result arrives, and otherwise human-only requirements can appear in
-**Needs Human** without claiming the merge preview is clean. Observed failures,
+a verified result arrives, including a failure, policy rejection or conflict.
+Restart failures do not reset expired preview grace; a successful retry clears
+its transport error without discarding a still-unverified preview warning.
+Otherwise human-only requirements can appear in **Needs Human** without claiming
+the merge preview is clean. Observed failures,
 policy rejection and conflicts are shown immediately, not hidden by local request
 grace. Genuinely queued/notSet evaluations stay Checking regardless of age.
 Ref-read failures are visible and retried on the next refresh.

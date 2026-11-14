@@ -487,6 +487,69 @@ static class MergeChecksTests
                 "Verified late result did not clear only the expired-preview warning");
         });
 
+        foreach (var (status, label) in new[] { ("failure", "Failed"), ("rejectedByPolicy", "Rejected"), ("conflicts", "Conflicts") })
+            foreach (var restartFailed in new[] { false, true })
+                await test($"verified terminal merge {status} clears expired preview warning but retains restart error={restartFailed}", async () =>
+                {
+                    using var f = new Fixture();
+                    var p = f.Add(); p.Preview = Fixture.New; f.ReturnQueued = false;
+                    await f.Service.RefreshAsync();
+                    f.Clock.Advance(TimeSpan.FromMinutes(10));
+                    if (restartFailed) f.PatchFailure = HttpStatusCode.ServiceUnavailable;
+                    await f.Service.RefreshAsync();
+                    f.PatchFailure = null;
+                    f.Complete(p); p.MergeStatus = status; p.MergeFailure = "Offline terminal failure";
+                    var requestedAt = f.View(p).MergeRecheckRequestedAt;
+                    await f.Service.RefreshOneAsync(p.Key);
+                    var view = f.View(p);
+                    Check(!view.MergeStale && !view.MergeRecheckPending && view.Lane == Lane.Blocked &&
+                        view.Gates["merge"].Label == label, "Verified terminal result lost its actual merge state");
+                    Check(view.MergeRecheckError is null || !view.MergeRecheckError.Contains("current target"),
+                        "Verified terminal result retained the expired preview warning");
+                    Check(restartFailed ? view.MergeRecheckError?.Contains("503") == true : view.MergeRecheckError is null,
+                        "Timeout cleanup erased a transport error or retained a timeout-only error");
+                    Check(view.MergeRecheckRequestedAt == requestedAt, "Terminal cleanup lost request evidence");
+                    await f.Service.RefreshAsync();
+                    Check(f.Patches.Count == 2 && f.Service.Current.MergeCheckStatus!.Contains(
+                        $"{(restartFailed ? 1 : 0)} with re-check/target errors"),
+                        "Terminal cleanup retained a false summary error or duplicated a retry");
+                });
+
+        await test("expired merge grace survives failed retry followed by accepted stale retries without returning to Checking", async () =>
+        {
+            using var f = new Fixture();
+            var p = f.Add(); p.Preview = Fixture.New; f.ReturnQueued = false;
+            await f.Service.RefreshAsync();
+            f.Clock.Advance(TimeSpan.FromMinutes(10));
+            f.PatchFailure = HttpStatusCode.ServiceUnavailable;
+            await f.Service.RefreshAsync();
+            Check(!f.View(p).MergeRecheckPending && f.View(p).MergeRecheckError!.Contains("503") &&
+                f.View(p).MergeRecheckError!.Contains("current target"), "Failed retry discarded independent preview expiry");
+            await f.Service.RefreshAsync();
+            Check(f.Patches.Count == 2, "Transport failure backoff was ignored");
+            f.PatchFailure = null;
+            f.Clock.Advance(TimeSpan.FromSeconds(120));
+            await f.Service.RefreshAsync();
+            for (var minutes = 12; minutes <= 32; minutes += 2)
+            {
+                var view = f.View(p);
+                Check(f.Patches.Count == 3 + (minutes - 12) / 10, "Accepted stale retries lost their per-request cadence");
+                Check(!view.MergeRecheckPending && view.MergeStale && view.Gates["merge"].State == "warn" &&
+                    view.Lane == Lane.NeedsHuman && view.Waiting.Count == 0, "Transport recovery renewed expired Checking");
+                Check(view.MergeRecheckError!.Contains("current target") && !view.MergeRecheckError.Contains("503"),
+                    "Accepted retry lost preview expiry or retained a recovered transport error");
+                if (minutes == 32) break;
+                f.Clock.Advance(TimeSpan.FromSeconds(120));
+                await f.Service.RefreshAsync();
+            }
+            var requestedAt = f.View(p).MergeRecheckRequestedAt;
+            f.Complete(p);
+            await f.Service.RefreshAsync();
+            Check(f.Patches.Count == 5 && f.View(p).MergeRecheckError is null &&
+                !f.View(p).MergeRecheckPending && f.View(p).Gates["merge"].Label == "Clean" &&
+                f.View(p).MergeRecheckRequestedAt == requestedAt, "Late verified result did not consume independent preview expiry");
+        });
+
         await test("target read failure cannot erase the baseline or hide later external target movement", async () =>
         {
             using var f = new Fixture();

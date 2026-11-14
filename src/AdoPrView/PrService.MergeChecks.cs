@@ -60,32 +60,24 @@ public sealed partial class PrService
     {
         var check = CheckFor(pr);
         if (pr.MergeCheckError is not null) check.DetectionFailed = true;
-        if (MergeFailed(pr.MergeStatus))
+        var verified = fresh && !MergeInFlight(pr.MergeStatus) &&
+            pr.CurrentTargetCommit is not null && !pr.MergeStale;
+        if (verified) check.PreviewTimedOut = false;
+        if (MergeFailed(pr.MergeStatus) || verified)
         {
             check.Awaiting = false;
             if (MergeConflicted(pr.MergeStatus)) _mergeSweepHandled[pr.Key] = _mergeSweep;
         }
-        else if (fresh && !MergeInFlight(pr.MergeStatus))
+        else if (fresh && check.Awaiting && !MergeInFlight(pr.MergeStatus) && _time.GetUtcNow() >= check.NextAttempt)
         {
-            if (pr.CurrentTargetCommit is not null && !pr.MergeStale)
-            {
-                check.Awaiting = false;
-                if (check.PreviewTimedOut)
-                {
-                    check.PreviewTimedOut = false;
-                    check.Error = null;
-                }
-            }
-            else if (check.Awaiting && _time.GetUtcNow() >= check.NextAttempt)
-            {
-                check.Awaiting = false;
-                check.PreviewTimedOut = true;
-                check.Error = "ADO has not returned a preview for the current target.";
-            }
+            check.Awaiting = false;
+            check.PreviewTimedOut = true;
         }
         pr.MergeRecheckRequestedAt = check.RequestedAt;
         pr.MergeRecheckPending = check.Awaiting;
-        pr.MergeRecheckError = check.Error is null ? null : check.Error + (MergeConflicted(pr.MergeStatus)
+        var error = string.Join(" ", new[] { check.Error,
+            check.PreviewTimedOut ? "ADO has not returned a preview for the current target." : null }.Where(e => e is not null));
+        pr.MergeRecheckError = error.Length == 0 ? null : error + (MergeConflicted(pr.MergeStatus)
             ? " Automatic re-checks are paused while ADO reports conflicts."
             : $" Retrying on a later refresh (not before {check.NextAttempt:u}).");
     }
@@ -132,10 +124,11 @@ public sealed partial class PrService
             ApplyMergeCheckState(pr, fresh: true);
             var check = CheckFor(pr);
             var sweep = _mergeSweepHandled.GetValueOrDefault(pr.Key) < _mergeSweep;
-            var retry = check.Error is not null && now >= check.NextAttempt;
+            var retryNeeded = check.Error is not null || check.PreviewTimedOut;
+            var retry = retryNeeded && now >= check.NextAttempt;
             var recovered = check.DetectionFailed && pr.MergeCheckError is null;
             if (AutomaticMergeCheckEligible(pr) && !pr.MergeRecheckPending &&
-                (check.Error is null || now >= check.NextAttempt) &&
+                (!retryNeeded || now >= check.NextAttempt) &&
                 (sweep || retry || pr.MergeStale && (periodic || recovered)))
             {
                 try
@@ -165,7 +158,6 @@ public sealed partial class PrService
     {
         var check = CheckFor(pr);
         check.Awaiting = false;
-        check.PreviewTimedOut = false;
         check.NextAttempt = _time.GetUtcNow().AddSeconds(Math.Max(30, _store.Current.RefreshSeconds));
         check.Error = $"Merge re-check failed: {ex.Message}.";
     }
@@ -205,20 +197,17 @@ public sealed partial class PrService
         var check = CheckFor(pr);
         // Repeated acceptance of the same unverified terminal preview is not
         // evidence of running work, and must not renew the expired request grace.
-        var keepWarning = automatic && check.PreviewTimedOut && pr.MergeStatus == "succeeded" &&
+        var keepWarning = automatic && check.PreviewTimedOut && !MergeInFlight(pr.MergeStatus) &&
             (pr.CurrentTargetCommit is null || pr.MergeStale);
         check.RequestedAt = _time.GetUtcNow();
         check.NextAttempt = check.RequestedAt.Value + MergeCadence;
         check.Awaiting = !MergeFailed(pr.MergeStatus) && !keepWarning;
-        if (!keepWarning)
-        {
-            check.PreviewTimedOut = false;
-            check.Error = null;
-        }
+        check.PreviewTimedOut = keepWarning;
+        check.Error = null;
         _mergeSweepHandled[pr.Key] = _mergeSweep;
-        return new(true, $"Merge re-check requested for !{pr.Id}; " + (keepWarning
-            ? "ADO still reports an unverified preview for the current target."
-            : MergeFailed(pr.MergeStatus) ? $"ADO reports {pr.MergeStatus}."
+        return new(true, $"Merge re-check requested for !{pr.Id}; " + (MergeFailed(pr.MergeStatus)
+            ? $"ADO reports {pr.MergeStatus}."
+            : keepWarning ? "ADO still reports an unverified preview for the current target."
             : "awaiting ADO's result."));
     }
 
