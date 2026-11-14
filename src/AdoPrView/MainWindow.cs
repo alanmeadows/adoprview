@@ -26,8 +26,7 @@ public sealed class MainWindow : Window, IApprovalUi
     readonly Options _opts;
     readonly System.Windows.Forms.NotifyIcon _tray;
     readonly HumanAttentionSound _attentionSound = new();
-    readonly List<string> _pendingNotices = new();
-    bool _pendingHumanSound;
+    readonly Dictionary<string, Lane> _pendingNotices = new(StringComparer.OrdinalIgnoreCase);
     Bridge? _bridge;
     CancellationTokenSource _wake = new();
     bool _uiReady;
@@ -99,7 +98,7 @@ public sealed class MainWindow : Window, IApprovalUi
         {
             if (_shutdownComplete) return;
             SavePlacement();
-            if (!_quitting && !_opts.HeadlessCapture && WindowState != WindowState.Minimized && _store.Current.Notifications)
+            if (ShouldKeepInTray(_store.Current, _quitting, _opts.HeadlessCapture, WindowState))
             {
                 // Closing the window keeps the poller alive in the tray.
                 e.Cancel = true;
@@ -177,11 +176,10 @@ public sealed class MainWindow : Window, IApprovalUi
         _prs.Changed += s => Dispatcher.InvokeAsync(() => OnSnapshot(s));
         _prs.LaneChanged += (pr, _) =>
         {
-            if (pr.Lane is Lane.NeedsHuman or Lane.Blocked)
+            if (!pr.IsIgnoredDraft && pr.Lane is Lane.NeedsHuman or Lane.Blocked)
                 lock (_pendingNotices)
                 {
-                    _pendingNotices.Add($"{(pr.Lane == Lane.NeedsHuman ? "Needs Human" : "Blocked")}: !{pr.Id} {pr.Title}");
-                    if (pr.Lane == Lane.NeedsHuman) _pendingHumanSound = true;
+                    _pendingNotices[pr.Key] = pr.Lane;
                 }
         };
 
@@ -264,8 +262,7 @@ public sealed class MainWindow : Window, IApprovalUi
     void OnSnapshot(Snapshot s)
     {
         _ = _bridge?.PushSnapshotAsync(s);
-        if (s.Refreshing) return;
-        var visible = s.Prs.Where(p => !p.IsHidden).ToList();
+        var visible = s.Prs.Where(p => !p.IsHidden && !p.IsIgnoredDraft && !(_store.Current.IgnoreDrafts && p.IsDraft)).ToList();
         var needs = visible.Count(p => p.Lane == Lane.NeedsHuman);
         var blocked = visible.Count(p => p.Lane == Lane.Blocked);
         Title = needs > 0 ? $"ADO PR View — {needs} need human action" : "ADO PR View";
@@ -273,19 +270,28 @@ public sealed class MainWindow : Window, IApprovalUi
         TaskbarItemInfo.Overlay = needs > 0 ? Badge(needs) : null;
         TaskbarItemInfo.Description = _tray.Text;
 
-        string[] notices;
-        bool playHumanSound;
-        lock (_pendingNotices)
-        {
-            notices = _pendingNotices.ToArray();
-            _pendingNotices.Clear();
-            playHumanSound = _pendingHumanSound;
-            _pendingHumanSound = false;
-        }
-        if (playHumanSound && _store.Current.Notifications && !_opts.HeadlessCapture)
+        if (s.Refreshing) return;
+        var (notices, playHumanSound) = DrainNotices(visible, _pendingNotices, _store.Current, _opts.HeadlessCapture);
+        if (playHumanSound)
             _attentionSound.Play();
         if (notices.Length > 0 && _store.Current.Notifications && !_opts.HeadlessCapture && !IsActive)
             _tray.ShowBalloonTip(6000, notices.Length == 1 ? "PR status changed" : $"{notices.Length} PRs changed", string.Join("\n", notices.Take(4)), System.Windows.Forms.ToolTipIcon.Info);
+    }
+
+    internal static bool ShouldKeepInTray(AppSettings settings, bool quitting, bool headlessCapture, WindowState state) =>
+        !quitting && !headlessCapture && state != WindowState.Minimized && settings.Notifications;
+
+    internal static (string[] Notices, bool PlayHumanSound) DrainNotices(IEnumerable<PrView> visible,
+        Dictionary<string, Lane> pendingNotices, AppSettings settings, bool headlessCapture)
+    {
+        lock (pendingNotices)
+        {
+            var pending = visible.Where(p => !p.IsHidden && !p.IsIgnoredDraft && !(settings.IgnoreDrafts && p.IsDraft) && p.Error is null &&
+                pendingNotices.TryGetValue(p.Key, out var lane) && lane == p.Lane).ToList();
+            var notices = pending.Select(p => $"{(p.Lane == Lane.NeedsHuman ? "Needs Human" : "Blocked")}: !{p.Id} {p.Title}").ToArray();
+            pendingNotices.Clear();
+            return (notices, settings.Sound && !headlessCapture && pending.Any(p => p.Lane == Lane.NeedsHuman));
+        }
     }
 
     static ImageSource Badge(int n)

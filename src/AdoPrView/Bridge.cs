@@ -146,6 +146,9 @@ public sealed class Bridge(PrService prs, SettingsStore store, Func<string, Task
                     s.RefreshSeconds = Math.Clamp(incoming.RefreshSeconds, 30, 3600);
                     s.MergeCheckMinutes = Math.Clamp(incoming.MergeCheckMinutes, 1, 240);
                     s.Notifications = incoming.Notifications;
+                    s.IgnoreDrafts = incoming.IgnoreDrafts;
+                    if (p["settings"]!.AsObject().Any(field => field.Key.Equals("sound", StringComparison.OrdinalIgnoreCase)))
+                        s.Sound = incoming.Sound;
                     // Update known fields in place so fields from other versions survive.
                     var autoComplete = s.AutoComplete ??= new();
                     if (incoming.AutoComplete is { } ac)
@@ -159,6 +162,7 @@ public sealed class Bridge(PrService prs, SettingsStore store, Func<string, Task
                     s.WslRepoDirectories = (incoming.WslRepoDirectories ?? new()).Where(kv => !string.IsNullOrWhiteSpace(kv.Value))
                         .ToDictionary(kv => kv.Key.ToLowerInvariant(), kv => kv.Value.Trim(), StringComparer.OrdinalIgnoreCase);
                 });
+                prs.ApplyMonitoringSettings();
                 kickRefresh(false);
                 return store.Current;
             default:

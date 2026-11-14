@@ -152,12 +152,18 @@ const findPr = (key) => S.snap.prs.find((p) => p.key === key);
 // --------------------------------------------------------------- filtering
 function hiddenSet() { return new Set((S.settings?.hidden || []).map((h) => h.toLowerCase())); }
 
+function ignoredDraft(p) {
+  const fresh = S.pendingSnapshot?.prs.find(pr => pr.key === p.key) || p;
+  return !!(fresh.isIgnoredDraft || (S.settings?.ignoreDrafts && fresh.isDraft));
+}
+
 function baseVisible() {
   const hidden = hiddenSet();
   const q = S.q.trim().toLowerCase();
   return S.snap.prs.filter((p) => {
     // Settings can undo a hide before a refreshed snapshot clears its old flag.
     if (hidden.has(p.key.toLowerCase())) return false;
+    if (S.scope === 'drafts' ? !ignoredDraft(p) : ignoredDraft(p)) return false;
     if (S.scope === 'mine' && !p.isMine) return false;
     if (S.scope === 'watched' && p.isMine) return false;
     if (S.repo && p.repo !== S.repo) return false;
@@ -225,9 +231,12 @@ function setSnapshot(snap) {
 function render() { renderHeader(); renderRows(); if (S.drawer) renderDrawer(); }
 
 function renderHeader() {
+  if (!S.settings?.ignoreDrafts && S.scope === 'drafts') S.scope = 'all';
   const vis = baseVisible();
+  $('#draftFilter').hidden = !S.settings?.ignoreDrafts;
+  document.querySelectorAll('#scope button').forEach(b => b.classList.toggle('on', b.dataset.scope === S.scope));
   $('#laneCounters').innerHTML = Object.entries(LANES).map(([k, m]) => {
-    const n = vis.filter((p) => p.lane === k).length;
+    const n = vis.filter((p) => !ignoredDraft(p) && p.lane === k).length;
     return `<button class="lane-btn ${S.lane === k ? 'on' : ''} ${n ? '' : 'zero'} ${n && (k === 'needsHuman' || k === 'blocked') ? 'pulse' : ''}" data-lane="${k}" style="--c:${m.c}">
       <span class="bar"></span><span class="n">${n}</span><span class="l"><b>${m.label}</b><span>${m.short}</span></span></button>`;
   }).join('');
@@ -285,7 +294,7 @@ function renderRows(whenIdle = false) {
     empty.innerHTML = `<div class="big">📂</div><h2>No repositories yet</h2><div>Add an Azure DevOps repository URL in settings.</div><button class="btn primary" data-act="settings">Open settings</button>`;
     return;
   }
-  const shown = S.lane ? vis.filter((p) => p.lane === S.lane || S.laneRetained.has(p.key)) : vis;
+  const shown = S.lane ? vis.filter((p) => !ignoredDraft(p) && (p.lane === S.lane || S.laneRetained.has(p.key))) : vis;
   if (S.lane) shown.forEach(p => S.laneRetained.add(p.key));
   if (!shown.length) {
     rows.innerHTML = '';
@@ -294,7 +303,9 @@ function renderRows(whenIdle = false) {
     return;
   }
   empty.hidden = true;
-  const html = shown.map(p => renderPr(p, LANES[p.lane]));
+  const html = shown.map(p => renderPr(p, ignoredDraft(p)
+    ? { label: 'Ignored draft', hint: 'Not monitored until published or Ignore draft PRs is turned off', c: 'var(--muted)' }
+    : LANES[p.lane]));
   const scroller = $('main');
   const top = scroller.scrollTop;
   const logScroll = {};
@@ -317,7 +328,7 @@ const explanationActive = r => !!r && ['preparing', 'running', 'cancelling'].inc
 const explanationLabel = r => r?.status === 'failed' || r?.status === 'cancelled' ? 'Retry Explain' : r ? 'Explain again' : 'Explain this PR';
 function canExplain(key) {
   const p = S.pendingSnapshot ? S.pendingSnapshot.prs.find(p => p.key === key) : findPr(key);
-  return !!p && !p.error && !p.isHidden && !hiddenSet().has(key.toLowerCase());
+  return !!p && !p.error && !p.isHidden && !hiddenSet().has(key.toLowerCase()) && !ignoredDraft(p);
 }
 
 function explanationRevision(r) {
@@ -419,14 +430,14 @@ function earlierRunCards(key) {
   return earlier.map(r => renderRunCard(key, r, true)).join('');
 }
 
-// Runs stay inside their PR row. Only runs whose PR has left the loaded data entirely
-// appear here (unless hidden), and only in the unfiltered view, as collapsible entries.
+// Runs stay inside their PR row. Departed PRs and ignored drafts keep collapsible
+// run entries here (unless hidden), only in the unfiltered view.
 function renderRunShelf() {
   const shelf = $('#runShelf');
   if (!shelf) return;
   const unfiltered = !S.lane && !S.q.trim() && !S.repo && S.scope === 'all';
   const loaded = !!(S.snap.lastRefresh || S.snap.error);
-  const present = new Set(S.snap.prs.map(p => p.key));
+  const present = new Set(S.snap.prs.filter(p => !ignoredDraft(p)).map(p => p.key));
   // A PR that just left the active list starts collapsed here; later deliberate toggles are kept.
   for (const key of S.activeKeys) if (!present.has(key)) S.expanded.delete(key);
   S.activeKeys = present;
@@ -437,7 +448,7 @@ function renderRunShelf() {
     const r = runForPr(key), open = S.expanded.has(key);
     return `<div class="pr run-only ${open ? 'open' : ''}" data-key="${esc(key)}">
       <div class="run-heading" data-act="toggle">${svg('chev').replace('<svg', '<svg class="chev"')}
-        <div class="prmain"><div class="title">${esc(r.title)}</div><div class="meta small"><span class="id">!${esc(r.id)}</span><span class="sep"> · </span><span>${esc(r.repo)}</span><span class="sep"> · </span><span>PR no longer in the active list · ${esc(runSummary(r))}</span></div></div></div>
+        <div class="prmain"><div class="title">${esc(r.title)}</div><div class="meta small"><span class="id">!${esc(r.id)}</span><span class="sep"> · </span><span>${esc(r.repo)}</span><span class="sep"> · </span><span>${findPr(key) && ignoredDraft(findPr(key)) ? 'Ignored draft' : 'PR no longer in the active list'} · ${esc(runSummary(r))}</span></div></div></div>
       ${open ? `<div class="detail"><div class="full stack">${renderRunCard(key, r)}${earlierRunCards(key)}</div></div>` : ''}
     </div>`;
   }).join('');
@@ -561,6 +572,10 @@ function actionButtons(p) {
     return `<button class="act ${cls} ${busy ? 'busy' : ''} ${running ? 'running' : ''}" data-act="${act}" title="${esc(title)}" aria-label="${esc(title)}" ${busy ? 'disabled' : ''} ${busy || running ? 'aria-busy="true"' : ''} ${extra}>${svg(busy || running ? 'refresh' : icon)}${label ? `<span>${label}</span>` : ''}</button>`;
   };
 
+  if (ignoredDraft(p)) {
+    out.open = b('open', 'ext', '', '', 'Open in Azure DevOps');
+    return ['approval', 'publish', 'pop', 'auto', 'fix', 'open'].map(slot => `<span class="action-slot" data-slot="${slot}">${out[slot] || ''}</span>`).join('');
+  }
   const needsReview = human.includes('reviews') || p.gates?.reviews?.state === 'human';
   if (p.approval) out.approval = b('generateApproval', 'approval', '', needsReview ? 'provider-approval hot review-needed' : 'provider-approval', approvalTitle(p));
   else if (needsReview) out.approval = b('manualReview', 'approval', '', `${hot} review-needed`, 'Human reviewer approval needed. Open this PR to arrange review.');
@@ -595,7 +610,7 @@ function renderPr(p, meta) {
           <div class="meta">${tags.join('')}${metaBits.join('<span class="sep">·</span>')}</div>
         </div>
       </div>
-      ${GATES.map((g) => gateCell(p, g)).join('')}
+      ${GATES.map((g) => gateCell(ignoredDraft(p) ? { gates: {} } : p, g)).join('')}
       <div class="c-upd" title="Updated ${esc(new Date(p.updated).toLocaleString())}\nCreated ${esc(new Date(p.created).toLocaleString())}">${ago(p.updated)}<small>age ${ago(p.created)}</small></div>
       <div class="c-act">${actionButtons(p)}</div>
     </div>
@@ -604,6 +619,10 @@ function renderPr(p, meta) {
 }
 
 function renderDetail(p) {
+  if (ignoredDraft(p)) return `<div class="detail"><div class="full">
+    <p>Ignored draft: no attention notifications or automatic merge checks. Publish it in Azure DevOps or turn off Ignore draft PRs in Settings to resume monitoring.</p>
+    ${runsForPr(p.key).length ? renderRunCard(p.key) + earlierRunCards(p.key) : ''}
+    </div></div>`;
   const left = [];
   const right = [];
   const full = [];
@@ -845,6 +864,8 @@ async function changeAutoComplete(p, enable) {
 
 async function onAction(act, el, key) {
   const p = key ? findPr(key) : null;
+  if (p && ignoredDraft(p) && !['toggle', 'open', 'hide', 'cancelRun', 'cancelExplanation'].includes(act))
+    throw new Error('Draft PRs are ignored. Publish in Azure DevOps or turn off Ignore draft PRs in Settings first.');
   switch (act) {
     case 'toggle':
       if (window.getSelection()?.toString()) return;
@@ -1036,9 +1057,12 @@ function renderDrawer() {
     </div>
     <div class="section">
       <h4>Polling</h4>
+      <label class="check"><input type="checkbox" id="ignoreDrafts" ${st.ignoreDrafts ? 'checked' : ''}/> Ignore draft PRs</label>
+      <p class="help">Exclude drafts from attention counts, notifications and automatic merge checks. Find them with the Ignored drafts filter. Publishing resumes monitoring on the next refresh; existing Fix runs are not stopped.</p>
       <div class="field"><label>Refresh every (seconds)</label><input type="number" id="refreshSeconds" min="30" max="3600" value="${st.refreshSeconds}" /></div>
       <div class="field"><label>Merge-conflict re-check every (minutes)</label><input type="number" id="mergeCheckMinutes" min="1" max="240" value="${st.mergeCheckMinutes}" /></div>
-      <label class="check"><input type="checkbox" id="notifications" ${st.notifications ? 'checked' : ''}/> Tray notifications and a distinctive chime for new Needs Human PRs (closing the window keeps it in the tray)</label>
+      <label class="check"><input type="checkbox" id="notifications" ${st.notifications ? 'checked' : ''}/> Tray notifications (closing the window keeps it in the tray)</label>
+      <label class="check"><input type="checkbox" id="sound" ${st.sound ? 'checked' : ''}/> Play chime for new Needs Human PRs</label>
     </div>
     <div class="section">
       <h4>Auto-complete</h4>
@@ -1125,6 +1149,8 @@ async function onDrawerAction(act, el) {
           refreshSeconds: +$('#refreshSeconds').value || 120,
           mergeCheckMinutes: +$('#mergeCheckMinutes').value || 10,
           notifications: $('#notifications').checked,
+          sound: $('#sound').checked,
+          ignoreDrafts: $('#ignoreDrafts').checked,
           autoComplete: { mergeStrategy: $('#mergeStrategy').value, deleteSourceBranch: $('#deleteSourceBranch').checked, transitionWorkItems: $('#transitionWorkItems').checked },
           triageInstructions: $('#triageInstructions').value,
           wslDistro: $('#wslDistro').value.trim(),
@@ -1188,6 +1214,7 @@ function wire() {
   $('#scope').addEventListener('click', (e) => {
     const b = e.target.closest('button[data-scope]');
     if (!b) return;
+    if (b.dataset.scope === 'drafts' || S.scope === 'drafts') S.lane = null;
     S.scope = b.dataset.scope;
     S.laneRetained.clear();
     $('#scope').querySelectorAll('button').forEach((x) => x.classList.toggle('on', x === b));

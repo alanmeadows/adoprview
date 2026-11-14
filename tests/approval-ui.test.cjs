@@ -28,7 +28,7 @@ function setup() {
     window, document, URLSearchParams, location: { search: '?mock=1' },
     console, setTimeout() {}, setInterval() {}, queueMicrotask, confirm: text => window.confirm(text),
   });
-  vm.runInContext(source + '\nglobalThis.hooks = { S, onAction, actionButtons, renderDetail, setSnapshot, flushRowUpdates, renderRows, undoHide, baseVisible, updateCopilotRun, renderRunShelf, runForPr, runActive, onDrawerAction, loadApprovalSettings, renderDrawer, renderExplanation, updateExplanation, explanationBody };', context);
+  vm.runInContext(source + '\nglobalThis.hooks = { S, onAction, actionButtons, renderDetail, setSnapshot, flushRowUpdates, renderHeader, renderRows, undoHide, baseVisible, updateCopilotRun, renderRunShelf, runForPr, runActive, onDrawerAction, loadApprovalSettings, renderDrawer, renderExplanation, updateExplanation, explanationBody };', context);
   const { hooks } = context;
   const pr = {
     key: 'repo:123', id: 123, repo: 'sample-service', title: 'Offline PR',
@@ -108,6 +108,18 @@ test('Explain refuses hidden, failed and removed pending rows without sending th
   }
 });
 
+test('ignored drafts disable Explain but still allow cancelling an in-flight explanation', async () => {
+  const { hooks, pr, window } = setup();
+  hooks.S.settings.ignoreDrafts = true;
+  pr.isDraft = true;
+  assert.match(hooks.renderExplanation(pr.key), /data-act="explainPr" disabled/);
+  const calls = [];
+  window.MockHost.rpc = async (method, p) => { calls.push(method); return { key: pr.key, requestId: p.requestId, sequence: 2, status: 'cancelled' }; };
+  await assert.rejects(hooks.onAction('explainPr', {}, pr.key), /Draft PRs are ignored/);
+  await hooks.onAction('cancelExplanation', { dataset: { requestId: 'one' } }, pr.key);
+  assert.deepEqual(calls, ['cancelExplanation']);
+});
+
 test('Explain sanitizes completed Markdown without remote media/links/controls and labels partial errors', () => {
   const { hooks, pr, window, context } = setup();
   let options;
@@ -126,6 +138,104 @@ test('Explain sanitizes completed Markdown without remote media/links/controls a
   assert.match(html, /Retry Explain/);
   assert.match(html, /<details class="explain-details">/);
   assert.doesNotMatch(html, /<details[^>]*\bopen\b/);
+});
+
+test('ignored drafts are opt-in, excluded from attention and discoverable without write actions', () => {
+  const { hooks, pr, elements } = setup();
+  pr.isDraft = true;
+  assert.equal(hooks.baseVisible().length, 1);
+  hooks.S.settings.ignoreDrafts = true;
+  hooks.renderRows();
+  assert.equal(hooks.baseVisible().length, 0);
+  hooks.S.scope = 'drafts';
+  hooks.renderHeader();
+  assert.doesNotMatch(elements.get('#laneCounters').innerHTML, /<span class="n">[1-9]/);
+  hooks.renderRows();
+  assert.equal(hooks.baseVisible().length, 1);
+  assert.match(elements.get('#rows').innerHTML, /Ignored draft/);
+  assert.doesNotMatch(hooks.actionButtons(pr), /data-act="(?:autocomplete|publish|triage|pop|generateApproval)"/);
+  assert.match(hooks.actionButtons(pr), /data-act="open"/);
+  hooks.S.expanded.add(pr.key);
+  assert.match(hooks.renderDetail(pr), /no attention notifications or automatic merge checks/);
+});
+
+test('back-to-draft pending snapshot suppresses stale row actions and lane retention', async () => {
+  const { hooks, pr } = setup();
+  hooks.S.settings.ignoreDrafts = true;
+  hooks.S.pendingSnapshot = { prs: [{ ...pr, isDraft: true, isIgnoredDraft: true }] };
+  hooks.S.laneRetained.add(pr.key);
+  assert.equal(hooks.baseVisible().length, 0);
+  await assert.rejects(hooks.onAction('triage', {}, pr.key), /Draft PRs are ignored/);
+  hooks.S.pendingSnapshot = null;
+  assert.equal(hooks.baseVisible().length, 1);
+});
+
+test('existing Fix controls remain reachable when its PR is ignored', () => {
+  const { hooks, pr, elements } = setup();
+  hooks.S.settings.ignoreDrafts = true;
+  pr.isDraft = true;
+  hooks.S.runs.set('run', { key: pr.key, runId: 'run', title: pr.title, id: pr.id, repo: pr.repo,
+    status: 'running', output: '', worktree: '/tmp/offline', startedAt: new Date().toISOString() });
+  hooks.renderRunShelf();
+  assert.match(elements.get('#runShelf').innerHTML, /Ignored draft/);
+  hooks.S.expanded.add(pr.key);
+  hooks.renderRunShelf();
+  assert.match(elements.get('#runShelf').innerHTML, /data-act="cancelRun"/);
+});
+
+test('draft filter resets when disabled and settings Save preserves the opt-in choice', async () => {
+  const { hooks, elements, window } = setup();
+  hooks.S.scope = 'drafts';
+  hooks.renderHeader();
+  assert.equal(hooks.S.scope, 'all');
+  assert.equal(elements.get('#draftFilter').hidden, true);
+  hooks.renderDrawer();
+  assert.match(elements.get('#drawerBody').innerHTML, /id="ignoreDrafts"/);
+  for (const id of ['refreshSeconds', 'mergeCheckMinutes', 'triageInstructions', 'wslDistro', 'mergeStrategy',
+    'notifications', 'ignoreDrafts', 'deleteSourceBranch', 'transitionWorkItems'])
+    elements.set('#' + id, { value: '', checked: id === 'ignoreDrafts' });
+  let calls = 0;
+  window.MockHost.rpc = async (method, p) => {
+    assert.equal(method, 'saveSettings');
+    assert.equal(p.settings.ignoreDrafts, true);
+    calls++;
+    return p.settings;
+  };
+  await hooks.onDrawerAction('save', {});
+  assert.equal(calls, 1);
+  assert.equal(hooks.S.settings.ignoreDrafts, true);
+});
+
+test('settings expose and save independent tray notifications and chime controls in every combination', async () => {
+  for (const notifications of [false, true]) for (const sound of [false, true]) {
+    const { hooks, window, elements } = setup();
+    Object.assign(hooks.S.settings, { notifications, sound, futureSetting: 'KEEP' });
+    hooks.renderDrawer();
+    const html = elements.get('#drawerBody').innerHTML;
+    assert.match(html, /id="notifications"[^>]*\/> Tray notifications \(closing the window keeps it in the tray\)/);
+    assert.match(html, /id="sound"[^>]*\/> Play chime for new Needs Human PRs/);
+    assert.equal(/id="notifications" checked/.test(html), notifications);
+    assert.equal(/id="sound" checked/.test(html), sound);
+    for (const id of ['refreshSeconds', 'mergeCheckMinutes', 'triageInstructions', 'wslDistro', 'mergeStrategy',
+      'notifications', 'sound', 'deleteSourceBranch', 'transitionWorkItems']) {
+      if (!elements.has('#' + id)) elements.set('#' + id, { value: '', checked: false });
+    }
+    elements.get('#notifications').checked = !notifications;
+    elements.get('#sound').checked = !sound;
+    let calls = 0;
+    window.MockHost.rpc = async (method, p) => {
+      assert.equal(method, 'saveSettings');
+      assert.equal(p.settings.notifications, !notifications);
+      assert.equal(p.settings.sound, !sound);
+      assert.equal(p.settings.futureSetting, 'KEEP');
+      calls++;
+      return p.settings;
+    };
+    await hooks.onDrawerAction('save', {});
+    assert.equal(calls, 1);
+    assert.equal(hooks.S.settings.notifications, !notifications);
+    assert.equal(hooks.S.settings.sound, !sound);
+  }
 });
 
 test('only rows with a provider offer expose the approval action; existing actions remain', () => {

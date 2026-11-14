@@ -96,7 +96,7 @@ public sealed partial class CopilotRunService
             var old = saved.Environment;
             var probe = await Invoke("preflight", old.Distribution, PreflightScript,
                 [old.Root, e.State.Request.Repo], token: token).ConfigureAwait(false);
-            RequireSuccess(probe, "Saved run cannot be verified: WSL, authentication or its configured tools are unavailable.");
+            RequirePreflightSuccess(probe);
             var env = ParseEnvironment(probe.StandardOutput, e.State.Request);
             if (env.Distribution != old.Distribution || env.Root != old.Root || env.CommonDirectory != old.CommonDirectory ||
                 env.Home != old.Home || env.CopilotHome != old.CopilotHome || env.RemoteHash != old.RemoteHash)
