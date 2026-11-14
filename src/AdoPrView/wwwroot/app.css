@@ -284,6 +284,18 @@ main { flex: 1; overflow: auto; padding: 0 20px 28px; }
 .md hr { border: 0; border-top: 1px solid var(--border); }
 .md.clamp { max-height: 420px; overflow: auto; }
 
+.explanation .body { padding: 14px 16px; }
+.explain-output { max-height: 520px; overflow: auto; scrollbar-gutter: stable; }
+.explain-output > * { max-width: 75ch; }
+.explain-stream { white-space: pre-wrap; overflow-wrap: anywhere; font: inherit; margin: 0; color: var(--text2); }
+.explain-revision { overflow-wrap: anywhere; }
+.explain-coverage p { margin: 8px 0 0; color: var(--text2); overflow-wrap: anywhere; }
+.explain-evidence p { margin: 6px 0; overflow-wrap: anywhere; }
+.explain-details { margin-top: 12px; color: var(--text2); }
+.explain-details summary { cursor: pointer; font-size: 12px; }
+.explain-details summary:focus-visible { outline: 2px solid var(--accent2); outline-offset: 3px; }
+.explanation button:focus-visible, .explain-output:focus-visible { outline: 2px solid var(--accent2); outline-offset: 3px; }
+
 .list { list-style: none; margin: 0; padding: 0; }
 .list li { display: flex; align-items: flex-start; gap: 8px; padding: 6px 0; border-bottom: 1px dashed #222735; font-size: 12.5px; color: var(--text2); }
 .list li:last-child { border-bottom: 0; }

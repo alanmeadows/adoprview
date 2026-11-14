@@ -20,6 +20,8 @@
   </ItemGroup>
 
   <ItemGroup>
+    <PackageReference Include="DiffPlex" Version="1.9.0" />
+    <PackageReference Include="GitHub.Copilot.SDK" Version="1.0.29" />
     <PackageReference Include="Microsoft.Web.WebView2" Version="1.0.4314.35" />
     <InternalsVisibleTo Include="AdoPrView.Tests" />
   </ItemGroup>

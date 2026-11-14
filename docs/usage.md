@@ -14,6 +14,7 @@ calls used see [DESIGN.md](DESIGN.md); for building and tests see
 - [Automatic merge re-checks](#automatic-merge-re-checks)
 - [Inline Proof of Presence](#inline-proof-of-presence-compatibility-prototype)
 - [Auto-complete](#auto-complete)
+- [Explain this PR](#explain-this-pr)
 - [Inline Copilot Fix](#inline-copilot-fix)
 - [Restart recovery and worktree cleanup](#restart-recovery-and-worktree-cleanup)
 
@@ -101,7 +102,8 @@ title/tray/taskbar counts, notifications and automatic merge re-checks. It is
 off by default. The **Ignored drafts** filter lists them without attention
 actions; open a draft in Azure DevOps to publish it, or turn the setting off.
 Publishing restores normal classification on the next refresh. Existing Fix
-runs and their output are retained and are not cancelled by this option.
+runs and explanations, and their output, are retained and remain cancellable;
+**Explain** is unavailable for ignored drafts until the setting is turned off.
 
 Row actions use fixed **Review / Publish / PoP / Auto / Fix / Open** grid slots across
 every row. Compact, busy or missing actions keep their slot; enlarged buttons
@@ -227,6 +229,47 @@ It is still a cancel toggle, not disabled; the expanded row also retains
 Pending requests guard both controls, and failures/read-back mismatches show
 explicit feedback rather than a success state. Refresh, collapse and another
 PR selection do not reset the authoritative state or move neighboring rows.
+
+## Explain this PR
+
+Expand a PR and choose **Explain this PR** in **What does this PR do?** Copilot
+reads the actual changes and relevant repository context, then streams a brief
+summary: 1-3 short sentences identifying the component's role, the change and its
+consequence. For example, a dependency update should identify whether its module
+belongs to the product, a developer utility, test infrastructure or a pipeline.
+The model inspects relevant README files, consumers and build context rather than
+inferring benefits from version numbers. **Evidence and coverage** keeps inspected
+paths, revision identifiers and omissions separately, collapsed by default.
+Drafts are supported. This is separate from
+**Fix PR**: it does not start WSL, edit files, approve, publish or update ADO.
+
+Explain uses the native Windows Copilot SDK and its supported default model.
+Sign in with the native Windows Copilot CLI beforehand; the app reuses supported
+Copilot authentication, not your ADO token. Missing sign-in, model/access failures
+and ADO errors appear inline. One explanation runs at a time; **Cancel** stops it.
+Partial or failed responses are labeled and must not be treated as completed.
+Results stay in memory until the app exits; **Explain again** starts a fresh session.
+After a failure or cancellation, choose **Retry Explain** to start over.
+
+The displayed source and merge-base commits identify the code being explained.
+If the PR changes during the request, the result is marked failed. Copilot sees
+only app-provided read-only tools for that repository and those commits, not a
+shell, arbitrary URLs, local files, installed skills or MCP tools. Repository
+text is sent to Copilot for inference. AI explanations can be wrong; verify
+important details against the code.
+
+Coverage notes report unread changes, binaries, LFS pointers and size limits.
+Explain inventories at most 1,000 changes, permits 60 file/directory reads, and bounds
+text files to 80,000 characters, diffs to 24,000 characters and context windows to
+120 lines/16,000 characters. Directory listings include at most 200 names.
+If the model initially skips required diff or repository-content inspection, it
+gets one bounded follow-up to gather that evidence, otherwise an explicit error.
+Final summaries are limited to 80 words; an overlong answer gets one bounded
+compression attempt using the SDK's constrained JSON response, then an explicit
+error if it still fails the format.
+It times out after four minutes. Cross-repository
+forks and repository paths containing traversal, backslashes, control characters,
+`?` or `#` are rejected explicitly.
 
 ## Inline Copilot Fix
 
