@@ -20,15 +20,21 @@ Dev flags: `--mock` (fixture data), `--screenshot out.png [--size WxH] [--eval j
 No live approval, PR or auth requests are made:
 
 ```powershell
-dotnet run --project tests\AdoPrView.Tests
+dotnet build tests\AdoPrView.Tests -c Release -warnaserror
+dotnet run --project tests\AdoPrView.Tests -c Release --no-build
 node --test tests\approval-ui.test.cjs
 node --test tests\row-actions.browser.test.cjs
 powershell -NoProfile -ExecutionPolicy Bypass -File tests\install-guide.tests.ps1
 ```
 
+CI and the release package treat compiler warnings as errors (`-warnaserror`
+on the build and `dotnet publish`), so keep both projects warning-clean.
+
 The browser regression uses Node 22+ and the installed Microsoft Edge (or set
 `ROW_TEST_BROWSER` to another Chromium executable). Real mouse/keyboard input
 is used, with all URL launches and PR actions intercepted; no live PR is changed.
+It also renders hostile synthetic PR description/comment markdown through the
+vendored marked and DOMPurify and checks no script runs or native-bridge call is made.
 Native fake-HTTP/fake-clock checks cover periodic/forced restarts, target-change
 sweeps, retries, in-flight deduplication and fresh result handling. The install
 guide check parses every PowerShell block in INSTALL.md and runs its settings
