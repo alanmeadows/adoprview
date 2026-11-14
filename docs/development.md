@@ -56,6 +56,21 @@ dotnet run --project tests\AdoPrView.Tests
 Remove-Item Env:\ADOPRVIEW_TEST_FILTER, Env:\ADOPRVIEW_TEST_WSL_PREFLIGHT
 ```
 
+Direct reviewer approval has a focused offline native suite:
+
+```powershell
+$env:ADOPRVIEW_TEST_FILTER = 'Reviewer vote'
+dotnet run --project tests\AdoPrView.Tests -c Release
+Remove-Item Env:\ADOPRVIEW_TEST_FILTER
+```
+
+Its fake HTTP transport checks the authenticated reviewer-only payload, captured
+source/target revisions, latest iteration, monitoring eligibility, duplicate
+requests, nonretrying writes and explicit ambiguity on post-write races or
+read-back failure. The frontend and browser suites exercise one-click row and
+expanded actions, busy/error/confirmed states, provider coexistence and stable
+neighboring action targets. All approval writes in these checks are intercepted.
+
 `src\AdoPrView\wwwroot\index.html?mock=1` runs the UI in a browser against
 synthetic fixtures. The screenshots in [images](images) were captured from that
 mock UI with synthetic data.

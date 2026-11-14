@@ -76,6 +76,7 @@ public sealed class AdoClient
     public Task<JsonNode> GetAsync(string url, CancellationToken ct = default) => SendJsonAsync(HttpMethod.Get, url, null, ct);
     public Task<JsonNode> PatchAsync(string url, JsonNode body, CancellationToken ct = default) => SendJsonAsync(HttpMethod.Patch, url, body, ct);
     internal Task<JsonNode> PatchOnceAsync(string url, JsonNode body) => SendJsonAsync(HttpMethod.Patch, url, body, default, retry: false);
+    internal Task<JsonNode> PutOnceAsync(string url, JsonNode body) => SendJsonAsync(HttpMethod.Put, url, body, default, retry: false);
     public async Task DeleteAsync(string url, CancellationToken ct = default)
     {
         using var response = await SendAsync(() => new HttpRequestMessage(HttpMethod.Delete, url), ct, retry: false);

@@ -69,6 +69,10 @@ public sealed class Bridge(PrService prs, SettingsStore store, Func<string, Task
                 return null;
             case "generateApproval":
                 return await prs.RequestApprovalAsync(Str(p, "key"), Ui());
+            case "approve":
+                var expectedVote = p["expected"]?.Deserialize<ReviewVoteTarget>(Json)
+                    ?? throw new ArgumentException("Missing captured review revision. Refresh before approving.");
+                return await prs.ApproveAsync(Str(p, "key"), expectedVote);
             case "approvalSettings":
                 return Provider().GetSettings();
             case "approvalSettingsAction":
