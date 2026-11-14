@@ -53,8 +53,11 @@ jobs:
         with:
           node-version: lts/*
 
+      - name: Build (warnings as errors)
+        run: dotnet build tests/AdoPrView.Tests -c Release -warnaserror
+
       - name: Native tests
-        run: dotnet run --project tests/AdoPrView.Tests -c Release
+        run: dotnet run --project tests/AdoPrView.Tests -c Release --no-build
 
       - name: Frontend tests
         run: node --test tests/approval-ui.test.cjs tests/row-actions.browser.test.cjs

@@ -611,6 +611,79 @@ test('real row hit testing and action identity across refreshes', { timeout: 900
       assert.equal(await evaluate('document.querySelector("#draftFilter").hidden'), true);
     });
 
+    await t.test('hostile PR description and thread comment markdown cannot run script or reach the native bridge', async () => {
+      await send('Emulation.setDeviceMetricsOverride', { width: 1600, height: 1000, deviceScaleFactor: 1, mobile: false });
+      await reset();
+      const key = 'sample-service-id:101';
+      const evil = where => {
+        const mark = `__xss.push('${where}:`;
+        const bridge = `chrome.webview.postMessage(JSON.stringify({id:1,method:'openUrl',params:{url:'https://evil.example/${where}'}}));`
+          + `MockHost.rpc('openUrl',{url:'https://evil.example/${where}'});rpc('startCopilot',{key:'${key}'});`;
+        return [
+          `**${where} bold** with a [benign ${where} link](https://example.com/${where}).`,
+          `<script>${mark}script');${bridge}</script>`,
+          `<img src="missing-${where}.png" onerror="${mark}img');${bridge}">`,
+          `<details open ontoggle="${mark}details');${bridge}"><summary>s</summary>x</details>`,
+          `<svg><animate onbegin="${mark}svg');${bridge}" attributeName="x" dur="1s"></animate></svg>`,
+          `<iframe srcdoc="<script>parent.${mark}iframe');</script>"></iframe>`,
+          `<form action="javascript:${mark}form')"><button formaction="javascript:${mark}formaction')">go</button></form>`,
+          `<a href="javascript:${mark}href')">raw js link</a>`,
+          `[markdown js link](javascript:${mark}mdlink'))`,
+          `<a href="data:text/html,<script>alert(1)</script>">data link</a>`,
+        ].join('\n\n');
+      };
+      const prepared = await evaluate(`(()=>{
+        const libs={marked:typeof window.marked?.parse,purify:typeof window.DOMPurify?.sanitize,supported:window.DOMPurify?.isSupported};
+        if(libs.marked!=='function'||libs.purify!=='function')return libs;
+        window.__xss=[];window.bridge=[];window.sanitized=[];
+        window.chrome=window.chrome||{};
+        window.chrome.webview={postMessage:m=>window.bridge.push(m),addEventListener(){}};
+        if(!window.realSanitize)window.realSanitize=DOMPurify.sanitize;
+        DOMPurify.sanitize=(html,cfg)=>{window.sanitized.push(String(html));return window.realSanitize.call(DOMPurify,html,cfg);};
+        const snap=structuredClone(S.snap),pr=snap.prs.find(p=>p.key==='${key}');
+        pr.description=${JSON.stringify(evil('desc'))};
+        pr.threads=[{id:1,status:'active',author:'Hostile Commenter',isBot:false,isAgency:false,
+          content:${JSON.stringify(evil('thread'))},replies:0,filePath:null,line:null,updated:pr.updated,url:'#'}];
+        setSnapshot({...snap,orderRevision:(S.snap.orderRevision||0)+1});
+        window.calls=[];
+        return libs;
+      })()`);
+      assert.deepEqual(prepared, { marked: 'function', purify: 'function', supported: true }, 'Vendored marked and DOMPurify must be loaded');
+      await click(await point(key, '.row .title'));
+      await frame();
+      await evaluate('new Promise(resolve=>setTimeout(resolve,750))');
+      await frame();
+      const result = await evaluate(`(()=>{
+        const row=document.querySelector('[data-key="${key}"]');
+        const bodies={desc:row.querySelector('.detail .body.md'),thread:row.querySelector('.detail .thread .md')};
+        const inspect=el=>({
+          strong:el.querySelector('strong')?.textContent,
+          literalMarkdown:el.textContent.includes('**'),
+          links:[...el.querySelectorAll('a')].map(a=>({text:a.textContent,href:a.getAttribute('href'),target:a.getAttribute('target'),rel:a.getAttribute('rel')})),
+          hazards:[...el.querySelectorAll('script,iframe,object,embed,frame,frameset,base,meta,link,style')].map(n=>n.tagName),
+          badAttrs:[...el.querySelectorAll('*')].flatMap(n=>[...n.attributes].filter(a=>/^on/i.test(a.name)||/^\\s*(javascript|data|vbscript):/i.test(a.value)||a.name==='srcdoc'||a.name==='formaction').map(a=>n.tagName+' '+a.name)),
+        });
+        return {xss:window.__xss,bridge:window.bridge,calls:window.calls,
+          sanitizedHostile:window.sanitized.filter(h=>/onerror=/.test(h)&&/<script>/.test(h)).length,
+          desc:inspect(bodies.desc),thread:inspect(bodies.thread)};
+      })()`);
+      assert.deepEqual(result.xss, [], 'No hostile script, handler or URL may execute');
+      assert.deepEqual(result.bridge, [], 'Hostile content must not post native-bridge messages');
+      assert.deepEqual(result.calls, [], 'Rendering details must not issue privileged host requests');
+      assert.ok(result.sanitizedHostile >= 2, 'Both hostile markdown bodies must reach the real DOMPurify sanitizer');
+      for (const where of ['desc', 'thread']) {
+        const r = result[where];
+        assert.equal(r.strong, `${where} bold`, `${where}: real marked formatting must still render`);
+        assert.equal(r.literalMarkdown, false, `${where}: escape-only fallback must not be used`);
+        assert.deepEqual(r.hazards, [], `${where}: hazardous elements must be removed`);
+        assert.deepEqual(r.badAttrs, [], `${where}: event handlers and script URLs must be removed`);
+        assert.deepEqual(r.links.find(l => l.text === `benign ${where} link`),
+          { text: `benign ${where} link`, href: `https://example.com/${where}`, target: '_blank', rel: 'noopener' });
+        for (const l of r.links) assert.ok(l.href === null || /^https:\/\/example\.com\//.test(l.href), `${where}: unexpected link ${l.href}`);
+      }
+      await evaluate(`DOMPurify.sanitize=window.realSanitize;delete window.chrome.webview;`);
+    });
+
     await send('Browser.close', {}, false);
   } finally {
     socket?.close();
