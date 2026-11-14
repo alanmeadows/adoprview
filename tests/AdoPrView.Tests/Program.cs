@@ -349,6 +349,63 @@ await Test("hidden and error rows do not create arrival notifications", () =>
     return Task.CompletedTask;
 });
 
+foreach (var notifications in new[] { false, true })
+foreach (var sound in new[] { false, true })
+await Test($"chime and close-to-tray are independent: notifications={notifications}, sound={sound}", () =>
+{
+    var settings = new AppSettings { Notifications = notifications, Sound = sound };
+    var human = Pr(); human.Lane = Lane.NeedsHuman;
+    var pending = new Dictionary<string, Lane> { [human.Key] = human.Lane };
+    var delivery = MainWindow.DrainNotices([human], pending, settings, headlessCapture: false);
+    Check(delivery.PlayHumanSound == sound && delivery.Notices.Length == 1 && pending.Count == 0,
+        "Tray notifications changed chime eligibility or consumed the notice incorrectly");
+    Check(MainWindow.ShouldKeepInTray(settings, false, false, System.Windows.WindowState.Normal) == notifications &&
+        MainWindow.ShouldKeepInTray(settings, false, false, System.Windows.WindowState.Maximized) == notifications,
+        "Sound changed normal close-to-tray behavior");
+    Check(!MainWindow.ShouldKeepInTray(settings, true, false, System.Windows.WindowState.Normal) &&
+        !MainWindow.ShouldKeepInTray(settings, false, true, System.Windows.WindowState.Normal) &&
+        !MainWindow.ShouldKeepInTray(settings, false, false, System.Windows.WindowState.Minimized),
+        "Explicit exit, headless or minimized-close behavior changed");
+    pending[human.Key] = human.Lane;
+    Check(!MainWindow.DrainNotices([human], pending, settings, headlessCapture: true).PlayHumanSound, "Headless capture would play sound");
+    return Task.CompletedTask;
+});
+
+await Test("queued human arrivals use the current mute setting at delivery without replaying on unmute", () =>
+{
+    var human = Pr(); human.Lane = Lane.NeedsHuman;
+    var settings = new AppSettings { Notifications = true, Sound = true };
+    var pending = new Dictionary<string, Lane> { [human.Key] = human.Lane };
+    settings.Sound = false;
+    var delivery = MainWindow.DrainNotices([human], pending, settings, headlessCapture: false);
+    Check(!delivery.PlayHumanSound && delivery.Notices.Length == 1 && settings.Notifications, "Queued mute suppressed the tray notice or played sound");
+    settings.Sound = true;
+    Check(!MainWindow.DrainNotices([human], pending, settings, headlessCapture: false).PlayHumanSound, "Unmute replayed a consumed arrival");
+    settings.Sound = false;
+    pending[human.Key] = human.Lane;
+    settings.Sound = true;
+    Check(MainWindow.DrainNotices([human], pending, settings, headlessCapture: false).PlayHumanSound, "Queued unmute did not use the current sound setting");
+    human.Lane = Lane.Blocked; pending[human.Key] = human.Lane;
+    Check(!MainWindow.DrainNotices([human], pending, settings, headlessCapture: false).PlayHumanSound, "Blocked arrival played the human chime");
+    pending[human.Key] = Lane.NeedsHuman;
+    Check(MainWindow.DrainNotices([human], pending, settings, headlessCapture: false).Notices.Length == 0, "Stale queued lane produced a notification");
+    return Task.CompletedTask;
+});
+
+await Test("queued chimes coalesce and discard hidden, error and removed arrivals", () =>
+{
+    var human = Pr(); human.Lane = Lane.NeedsHuman;
+    var another = Pr(id: 456); another.Lane = Lane.NeedsHuman;
+    var pending = new Dictionary<string, Lane> { [human.Key] = human.Lane, [another.Key] = another.Lane };
+    var delivery = MainWindow.DrainNotices([human, another], pending, new AppSettings(), headlessCapture: false);
+    Check(delivery.PlayHumanSound && delivery.Notices.Length == 2 && pending.Count == 0, "Arrivals were not coalesced");
+    pending[human.Key] = human.Lane; pending[another.Key] = another.Lane; pending["removed"] = Lane.NeedsHuman;
+    human = Pr(hidden: true); human.Lane = Lane.NeedsHuman; another.Error = "Offline error";
+    delivery = MainWindow.DrainNotices([human, another], pending, new AppSettings(), headlessCapture: false);
+    Check(!delivery.PlayHumanSound && delivery.Notices.Length == 0 && pending.Count == 0, "Ineligible arrivals were delivered or retained");
+    return Task.CompletedTask;
+});
+
 await Test("custom chime is an original, non-clipping mono PCM wave under one second", () =>
 {
     var wave = HumanAttentionSound.CreateWave();

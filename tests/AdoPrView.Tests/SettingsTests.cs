@@ -17,7 +17,52 @@ static class SettingsTests
             Check(store.Current.Repos.Count == 0 && store.Current.Whitelist.Count == 0 && store.Current.ReviewBot is null &&
                 store.Current.FixSkill is null && store.Current.FixReviewerModels.Count == 0 && store.Current.ApprovalProvider is null, "New settings were seeded");
             Check(!File.Exists(path), "Loading created a settings file");
+            Check(store.Current.Notifications && store.Current.Sound, "New settings should enable notifications and sound");
         }));
+        foreach (var notifications in new[] { false, true })
+        {
+            await test($"legacy sound migration preserves notifications={notifications} without rewriting the file", () => InDir(dir =>
+            {
+                var path = Path.Combine(dir, "settings.json");
+                var text = JsonSerializer.Serialize(new { notifications, futureTop = "KEEP" });
+                File.WriteAllText(path, text);
+                var store = new SettingsStore(path);
+                Check(store.Current.Sound == notifications, "Legacy sound behavior changed");
+                Check(File.ReadAllText(path) == text, "Loading rewrote legacy settings");
+                store.Update(s => s.Notifications = !notifications);
+                var reloaded = new SettingsStore(path);
+                Check(reloaded.Current.Sound == notifications && reloaded.Current.Notifications == !notifications,
+                    "Changing tray notifications changed the independent sound preference");
+                Check(reloaded.Current.Extra!["futureTop"].GetString() == "KEEP", "Migration dropped unknown fields");
+            }));
+            foreach (var sound in new[] { false, true })
+                await test($"independent notification/sound settings round-trip through the bridge: {notifications}/{sound}", () => InDir(dir =>
+                {
+                    var path = Path.Combine(dir, "settings.json");
+                    File.WriteAllText(path, JsonSerializer.Serialize(new { notifications = !sound, SoUnD = sound, futureTop = "KEEP" }));
+                    var store = new SettingsStore(path);
+                    Check(store.Current.Sound == sound, "Explicit case-insensitive sound setting was ignored");
+                    using var http = new HttpClient();
+                    var service = new PrService(new AdoClient(http, _ => Task.FromResult(new AuthenticationHeaderValue("Bearer", "offline"))), store);
+                    string? reply = null;
+                    var bridge = new Bridge(service, store, text => { reply = text; return Task.CompletedTask; }, _ => { });
+                    var form = JsonSerializer.SerializeToNode(store.Current, Bridge.Json)!.AsObject();
+                    form["notifications"] = notifications;
+                    form["sound"] = sound;
+                    bridge.HandleAsync(new JsonObject { ["id"] = 1, ["method"] = "saveSettings",
+                        ["params"] = new JsonObject { ["settings"] = form } }.ToJsonString()).GetAwaiter().GetResult();
+                    Check(reply is not null && !reply.Contains("\"error\""), "Settings save failed: " + reply);
+                    var reloaded = new SettingsStore(path);
+                    Check(reloaded.Current.Notifications == notifications && reloaded.Current.Sound == sound, "Independent settings did not persist");
+                    Check(reloaded.Current.Extra!["futureTop"].GetString() == "KEEP", "Settings save dropped unknown fields");
+                    form.Remove("sound");
+                    form["notifications"] = !notifications;
+                    bridge.HandleAsync(new JsonObject { ["id"] = 2, ["method"] = "saveSettings",
+                        ["params"] = new JsonObject { ["settings"] = form.DeepClone() } }.ToJsonString()).GetAwaiter().GetResult();
+                    Check(reply is not null && !reply.Contains("\"error\""), "Older settings save failed: " + reply);
+                    Check(new SettingsStore(path).Current.Sound == sound, "Older settings clients reset the sound preference");
+                }));
+        }
         await test("settings save preserves unknown fields at every level and personal choices", () => InDir(dir =>
         {
             var path = Path.Combine(dir, "settings.json");

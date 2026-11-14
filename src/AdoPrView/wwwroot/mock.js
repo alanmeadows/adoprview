@@ -132,7 +132,7 @@ Fixes AB#1234`;
     whitelist: ['riley', 'Sample Build Service'],
     reviewBot: { name: 'Review Bot', authorId: '00000000-0000-4000-8000-0000000000b0', organization: org },
     hidden: ['sample-deploy-id:1001'],
-    refreshSeconds: 120, mergeCheckMinutes: 10, notifications: true,
+    refreshSeconds: 120, mergeCheckMinutes: 10, notifications: true, sound: true,
     autoComplete: { mergeStrategy: 'squash', deleteSourceBranch: true, transitionWorkItems: true },
     triageInstructions: null,
     wslDistro: null, wslRepoDirectories: {},

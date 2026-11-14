@@ -74,6 +74,7 @@ public sealed class AppSettings
     public int RefreshSeconds { get; set; } = 120;
     public int MergeCheckMinutes { get; set; } = 10;
     public bool Notifications { get; set; } = true;
+    public bool Sound { get; set; } = true;
     public AutoCompleteOptions AutoComplete { get; set; } = new();
     public string? TriageInstructions { get; set; }
     public string? WslDistro { get; set; }
@@ -123,8 +124,13 @@ public sealed class SettingsStore
         { throw new SettingsLoadException($"Settings could not be read from {path}: {ex.Message}. The file was not changed.", ex); }
         try
         {
-            return JsonSerializer.Deserialize<AppSettings>(text, Json)
+            using var document = JsonDocument.Parse(text);
+            var settings = document.RootElement.Deserialize<AppSettings>(Json)
                 ?? throw new SettingsLoadException($"Settings at {path} are empty (null). The file was not changed; fix or move it, then restart.");
+            // Older versions used Notifications for both tray behavior and the chime.
+            if (!document.RootElement.EnumerateObject().Any(p => p.Name.Equals("sound", StringComparison.OrdinalIgnoreCase)))
+                settings.Sound = settings.Notifications;
+            return settings;
         }
         catch (JsonException ex)
         { throw new SettingsLoadException($"Settings at {path} are not valid: {ex.Message}. The file was not changed; fix or move it, then restart.", ex); }

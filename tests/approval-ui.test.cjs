@@ -40,6 +40,38 @@ function setup() {
   return { hooks, pr, window, elements, dialogs };
 }
 
+test('settings expose and save independent tray notifications and chime controls in every combination', async () => {
+  for (const notifications of [false, true]) for (const sound of [false, true]) {
+    const { hooks, window, elements } = setup();
+    Object.assign(hooks.S.settings, { notifications, sound, futureSetting: 'KEEP' });
+    hooks.renderDrawer();
+    const html = elements.get('#drawerBody').innerHTML;
+    assert.match(html, /id="notifications"[^>]*\/> Tray notifications \(closing the window keeps it in the tray\)/);
+    assert.match(html, /id="sound"[^>]*\/> Play chime for new Needs Human PRs/);
+    assert.equal(/id="notifications" checked/.test(html), notifications);
+    assert.equal(/id="sound" checked/.test(html), sound);
+    for (const id of ['refreshSeconds', 'mergeCheckMinutes', 'triageInstructions', 'wslDistro', 'mergeStrategy',
+      'notifications', 'sound', 'deleteSourceBranch', 'transitionWorkItems']) {
+      if (!elements.has('#' + id)) elements.set('#' + id, { value: '', checked: false });
+    }
+    elements.get('#notifications').checked = !notifications;
+    elements.get('#sound').checked = !sound;
+    let calls = 0;
+    window.MockHost.rpc = async (method, p) => {
+      assert.equal(method, 'saveSettings');
+      assert.equal(p.settings.notifications, !notifications);
+      assert.equal(p.settings.sound, !sound);
+      assert.equal(p.settings.futureSetting, 'KEEP');
+      calls++;
+      return p.settings;
+    };
+    await hooks.onDrawerAction('save', {});
+    assert.equal(calls, 1);
+    assert.equal(hooks.S.settings.notifications, !notifications);
+    assert.equal(hooks.S.settings.sound, !sound);
+  }
+});
+
 test('only rows with a provider offer expose the approval action; existing actions remain', () => {
   const { hooks, pr } = setup();
   const html = hooks.actionButtons(pr);
