@@ -41,7 +41,8 @@ public sealed class PrView
     public bool IsHidden { get; init; }
     public bool IsActive { get; set; } = true;
     public ApprovalOffer? Approval { get; set; }
-    public bool IsDraft { get; init; }
+    public bool IsDraft { get; set; }
+    public bool IsIgnoredDraft { get; set; }
     public DateTimeOffset Created { get; init; }
     public DateTimeOffset Updated { get; set; }
     public string Description { get; init; } = "";

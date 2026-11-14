@@ -138,7 +138,7 @@ test('real row hit testing and action identity across refreshes', { timeout: 900
       await frame();
       await evaluate(`S.expanded.clear();S.lane=null;S.repo='';S.q='';S.scope='all';
         S.rowOrder=[];S.orderRevision=null;S.laneRetained.clear();S.runs.clear();S.busy.clear();closeRowMenu();
-        window.holdLog=false;S.settings.hidden=['sample-deploy-id:1001'];S.hideUndo=[];
+        window.holdLog=false;S.settings.hidden=['sample-deploy-id:1001'];S.settings.ignoreDrafts=false;S.hideUndo=[];
         window.confirmations=[];window.confirmResult=true;window.autoFailure=false;S.autoCompleteErrors.clear();
         setSnapshot(structuredClone(window.baseline));${race ? 'window.raceFixture();' : ''}render();window.calls=[];`);
       await frame();
@@ -575,6 +575,40 @@ test('real row hit testing and action identity across refreshes', { timeout: 900
       assert.deepEqual((await calls()).filter(c => c.method === 'cancelCopilot'), [{ method: 'cancelCopilot', key, runId: 'offline-101' }]);
       assert.match(await evaluate(`document.querySelector('#runShelf').textContent`), /worktree retained/);
       assert.ok((await calls()).every(c => !['copy', 'triage', 'openUrl'].includes(c.method)), 'Fix PR must not launch/focus/copy another UI');
+    });
+
+    await t.test('ignored drafts stay outside attention while their existing Fix controls remain accessible', async () => {
+      await reset(true);
+      const key = 'sample-service-id:101';
+      await click(await point(key, '.row [data-act="triage"]')); await frame();
+      await move(10, 10); await evaluate('document.activeElement?.blur()'); await frame();
+      await evaluate(`S.settings.ignoreDrafts=true;
+        setSnapshot({...S.snap,prs:S.snap.prs.map(p=>p.key==='${key}'?{...p,isDraft:true,isIgnoredDraft:true}:p)});
+        render();`);
+      await frame();
+      assert.equal(await evaluate(`!!document.querySelector('#rows [data-key="${key}"]')`), false);
+      assert.match(await evaluate(`document.querySelector('#runShelf').textContent`), /Ignored draft/);
+      assert.equal(await evaluate(`document.querySelector('#draftFilter').hidden`), false);
+      await click(await point(key, '.run-heading')); await frame();
+      assert.equal(await evaluate(`document.querySelector('#runShelf [data-act="cancelRun"]').hidden`), false);
+      const filterPoint = await evaluate(`(()=>{
+        const r=document.querySelector('#draftFilter').getBoundingClientRect();
+        return {x:r.x+r.width/2,y:r.y+r.height/2};
+      })()`);
+      await click(filterPoint); await frame();
+      assert.equal(await evaluate('S.scope'), 'drafts');
+      assert.equal(await evaluate('S.lane'), null);
+      assert.deepEqual(await evaluate(`[...document.querySelectorAll('#laneCounters .n')].map(e=>e.textContent)`), ['0', '0', '0', '0']);
+      assert.deepEqual(await evaluate(`[...document.querySelectorAll('#rows [data-key="${key}"] .row [data-act]')].map(e=>e.dataset.act)`), ['open']);
+      await click(await point(key, '.row [data-act="open"]')); await frame();
+      assert.deepEqual((await calls()).filter(c => c.method === 'openUrl'),
+        [{ method: 'openUrl', url: 'https://dev.azure.com/contoso/Sample/_git/sample-service/pullrequest/101' }]);
+      await click(await point(key, '.copilot-run [data-act="cancelRun"]')); await frame();
+      assert.deepEqual((await calls()).filter(c => c.method === 'cancelCopilot'), [{ method: 'cancelCopilot', key, runId: 'offline-101' }]);
+      await move(10, 10); await evaluate('document.activeElement?.blur()'); await frame();
+      await evaluate(`S.settings.ignoreDrafts=false;S.snap.prs.forEach(p=>p.isIgnoredDraft=false);render();`);
+      assert.equal(await evaluate('S.scope'), 'all');
+      assert.equal(await evaluate('document.querySelector("#draftFilter").hidden'), true);
     });
 
     await send('Browser.close', {}, false);

@@ -40,6 +40,11 @@ public sealed partial class PrService
 
     void Publish(Snapshot s)
     {
+        foreach (var pr in s.Prs)
+        {
+            pr.IsIgnoredDraft = _store.Current.IgnoreDrafts && pr.IsDraft;
+            if (pr.IsIgnoredDraft) Classify(pr);
+        }
         if (_approval is not null)
         {
             s.ApprovalProvider = new(_approval.Name, _approval.LinkUrl, _approval.LinkLabel);
@@ -55,9 +60,9 @@ public sealed partial class PrService
     internal static IEnumerable<(PrView Pr, Lane? Previous)> GetLaneChanges(Snapshot previous, Snapshot current)
     {
         if (previous.LastRefresh is null || current.Error is not null) yield break;
-        var oldLanes = previous.Prs.Where(p => !p.IsHidden && p.Error is null)
+        var oldLanes = previous.Prs.Where(p => !p.IsHidden && !p.IsIgnoredDraft && p.Error is null)
             .ToDictionary(p => p.Key, p => p.Lane, StringComparer.OrdinalIgnoreCase);
-        foreach (var pr in current.Prs.Where(p => !p.IsHidden && p.Error is null))
+        foreach (var pr in current.Prs.Where(p => !p.IsHidden && !p.IsIgnoredDraft && p.Error is null))
         {
             Lane? old = oldLanes.TryGetValue(pr.Key, out var lane) ? lane : null;
             if (old != pr.Lane) yield return (pr, old);
@@ -69,6 +74,8 @@ public sealed partial class PrService
         foreach (var change in GetLaneChanges(previous, current))
             LaneChanged?.Invoke(change.Pr, change.Previous);
     }
+
+    public void ApplyMonitoringSettings() => Publish(Current);
 
     static string Esc(string s) => Uri.EscapeDataString(s);
     static string Api(string org, string project) => $"https://dev.azure.com/{Esc(org)}/{Esc(project)}/_apis/";
@@ -147,9 +154,9 @@ public sealed partial class PrService
                             _store.Update(_ => { repo.RepoId = rid; repo.ProjectId = pid; });
                         }
                         var key = $"{S(pr["repository"]?["id"])}:{S(pr["pullRequestId"])}";
-                        if (hidden.Contains(key))
+                        if (hidden.Contains(key) || settings.IgnoreDrafts && B(pr["isDraft"]))
                         {
-                            results.Add(Minimal(repo, pr, me.Id));
+                            results.Add(Minimal(repo, pr, me.Id, hidden: hidden.Contains(key)));
                             continue;
                         }
                         var id = I(pr["pullRequestId"])!.Value;
@@ -221,9 +228,10 @@ public sealed partial class PrService
     public PopTarget GetPopTarget(string key)
     {
         var pr = Find(key);
-        if (_store.Current.Hidden.Contains(key, StringComparer.OrdinalIgnoreCase) ||
+        if (pr.IsIgnoredDraft || _store.Current.IgnoreDrafts && pr.IsDraft ||
+            _store.Current.Hidden.Contains(key, StringComparer.OrdinalIgnoreCase) ||
             !_store.Current.Repos.Any(r => r.Key == $"{pr.Org}/{pr.Project}/{pr.Repo}".ToLowerInvariant()))
-            throw new InvalidOperationException("This PR is hidden or its repository is no longer monitored. Refresh the dashboard.");
+            throw new InvalidOperationException("This PR is hidden, an ignored draft, or its repository is no longer monitored. Refresh the dashboard.");
         return PopTarget.FromPr(pr);
     }
 
@@ -265,6 +273,7 @@ public sealed partial class PrService
             IsHidden = hidden,
             IsActive = S(pr["status"]) == "active",
             IsDraft = B(pr["isDraft"]),
+            IsIgnoredDraft = _store.Current.IgnoreDrafts && B(pr["isDraft"]),
             Created = D(pr["creationDate"]),
             Updated = D(pr["creationDate"]),
             Description = S(pr["description"]),
@@ -284,6 +293,8 @@ public sealed partial class PrService
             !S(pr["repository"]?["id"]).Equals(expected.RepoId, StringComparison.OrdinalIgnoreCase) ||
             !S(pr["repository"]?["project"]?["id"]).Equals(expected.ProjectId, StringComparison.OrdinalIgnoreCase)))
             throw new InvalidOperationException("ADO returned a different PR identity; the result was not applied.");
+        if (_store.Current.IgnoreDrafts && B(pr["isDraft"]))
+            return Minimal(repo, pr, meId, hidden: _store.Current.Hidden.Contains($"{S(pr["repository"]?["id"])}:{prId}", StringComparer.OrdinalIgnoreCase));
         var repoId = S(pr["repository"]?["id"]);
         var projectId = S(pr["repository"]?["project"]?["id"]);
         var artifact = Esc($"vstfs:///CodeReview/CodeReviewId/{projectId}/{prId}");
@@ -556,6 +567,11 @@ public sealed partial class PrService
         v.Waiting.Clear();
         v.HumanActions.Clear();
         v.Gates.Clear();
+        if (v.IsIgnoredDraft)
+        {
+            v.Lane = Lane.Waiting;
+            return;
+        }
         // Merge
         if (v.MergeRecheckPending || MergeInFlight(v.MergeStatus))
         {
@@ -679,7 +695,8 @@ public sealed partial class PrService
 
     ApprovalOffer? EvaluateApproval(PrView pr)
     {
-        if (_approval is null || pr.IsHidden || !pr.IsActive || pr.Error is not null) return null;
+        if (_approval is null || pr.IsHidden || !pr.IsActive || pr.IsIgnoredDraft ||
+            _store.Current.IgnoreDrafts && pr.IsDraft || pr.Error is not null) return null;
         try { return _approval.Evaluate(pr); }
         catch { return null; }
     }
@@ -688,6 +705,7 @@ public sealed partial class PrService
     {
         if (_approval is null) throw new InvalidOperationException("No approval provider is enabled.");
         var pr = Find(key);
+        await EnsureNotIgnoredDraftAsync(pr);
         if (EvaluateApproval(pr) is null) throw new InvalidOperationException($"{_approval.Name} is not available for this PR.");
         var result = await _approval.RequestAsync(pr, new ApprovalHost(this, pr.Key, ui));
         if (result.RefreshPr)
@@ -705,17 +723,31 @@ public sealed partial class PrService
     {
         public string Key => key;
         public async Task<PrView> RefreshPrAsync() { await svc.RefreshOneAsync(key); return svc.Find(key); }
-        public bool IsHidden() => svc._store.Current.Hidden.Contains(key, StringComparer.OrdinalIgnoreCase);
-        public Task RemoveReviewerAsync(PrView pr, string reviewerId)
+        public bool IsHidden() => !svc.Monitored(svc.Find(key));
+        public async Task RemoveReviewerAsync(PrView pr, string reviewerId)
         {
             if (!pr.Key.Equals(key, StringComparison.OrdinalIgnoreCase)) throw new InvalidOperationException("Reviewer changes are limited to the requested PR.");
+            await svc.EnsureNotIgnoredDraftAsync(pr);
             if (!Guid.TryParse(reviewerId, out var id)) throw new ArgumentException("Reviewer id must be a GUID.");
-            return svc._ado.DeleteAsync($"{Api(pr.Org, pr.Project)}git/repositories/{Esc(pr.RepoId)}/pullrequests/{pr.Id}/reviewers/{id}?api-version=7.1");
+            await svc._ado.DeleteAsync($"{Api(pr.Org, pr.Project)}git/repositories/{Esc(pr.RepoId)}/pullrequests/{pr.Id}/reviewers/{id}?api-version=7.1");
         }
         public Task<T> OnUiThreadAsync<T>(Func<System.Windows.Window?, T> action) => ui.OnUiThreadAsync(action);
     }
     async Task<string> MeIdFor(PrView pr) => (await GetMeAsync(pr.Org)).Id;
     string PrApi(PrView pr) => $"{Api(pr.Org, pr.Project)}git/repositories/{pr.RepoId}/pullrequests/{pr.Id}?api-version=7.1";
+
+    async Task EnsureNotIgnoredDraftAsync(PrView pr)
+    {
+        if (!_store.Current.IgnoreDrafts) return;
+        if (pr.IsDraft) throw new InvalidOperationException("Draft PRs are ignored. Publish in Azure DevOps or turn off Ignore draft PRs first.");
+        var fresh = await _ado.GetAsync(PrApi(pr));
+        if (I(fresh["pullRequestId"]) != pr.Id ||
+            !S(fresh["repository"]?["id"]).Equals(pr.RepoId, StringComparison.OrdinalIgnoreCase))
+            throw new InvalidOperationException("ADO did not confirm the selected PR identity.");
+        if (fresh["isDraft"] is null) throw new InvalidOperationException("ADO did not confirm whether this PR is a draft. No action was taken.");
+        if (B(fresh["isDraft"]))
+            throw new InvalidOperationException("This PR is now a draft and is ignored. Refresh the dashboard.");
+    }
 
     public async Task<PrView> SetAutoCompleteAsync(string key, bool enable)
     {
@@ -727,6 +759,7 @@ public sealed partial class PrService
             try
             {
                 var pr = Find(key);
+                await EnsureNotIgnoredDraftAsync(pr);
                 var opts = _store.Current.AutoComplete;
                 JsonNode body = enable
                     ? new JsonObject
@@ -755,6 +788,7 @@ public sealed partial class PrService
     public async Task PublishAsync(string key)
     {
         var pr = Find(key);
+        await EnsureNotIgnoredDraftAsync(pr);
         await _ado.PatchAsync(PrApi(pr), new JsonObject { ["isDraft"] = false });
         await RefreshOneAsync(key);
     }
@@ -762,6 +796,7 @@ public sealed partial class PrService
     public async Task RequeueAsync(string key, string evaluationId)
     {
         var pr = Find(key);
+        await EnsureNotIgnoredDraftAsync(pr);
         await _ado.PatchAsync($"{Api(pr.Org, pr.Project)}policy/evaluations/{evaluationId}?api-version=7.1-preview", new JsonObject());
         await RefreshOneAsync(key);
     }
@@ -807,12 +842,16 @@ public sealed partial class PrService
         var pr = Find(key);
         void CheckAvailable()
         {
-            if (!pr.IsActive || _store.Current.Hidden.Contains(key, StringComparer.OrdinalIgnoreCase) ||
+            if (!Monitored(pr) ||
                 !_store.Current.Repos.Any(r => r.Key == $"{pr.Org}/{pr.Project}/{pr.Repo}".ToLowerInvariant()))
                 throw new InvalidOperationException("This PR is no longer active and monitored. Refresh before starting a fix.");
         }
         CheckAvailable();
         var fresh = await _ado.GetAsync(PrApi(pr));
+        if (_store.Current.IgnoreDrafts && fresh["isDraft"] is null)
+            throw new InvalidOperationException("ADO did not confirm whether this PR is a draft. No Copilot run was started.");
+        if (_store.Current.IgnoreDrafts && B(fresh["isDraft"]))
+            throw new InvalidOperationException("This PR is now a draft and is ignored. No Copilot run was started.");
         if (I(fresh["pullRequestId"]) != pr.Id ||
             !S(fresh["repository"]?["id"]).Equals(pr.RepoId, StringComparison.OrdinalIgnoreCase) ||
             !S(fresh["repository"]?["project"]?["id"]).Equals(pr.ProjectId, StringComparison.OrdinalIgnoreCase) ||

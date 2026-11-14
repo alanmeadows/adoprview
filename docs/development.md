@@ -34,6 +34,11 @@ sweeps, retries, in-flight deduplication and fresh result handling. The install
 guide check parses every PowerShell block in INSTALL.md and runs its settings
 merge against a disposable folder.
 
+Draft-monitoring regressions use fake HTTP responses to cover opt-in persistence,
+skipped detail reads and writes, publication/back-to-draft transitions, and stale
+notification delivery. Frontend checks cover the Ignored drafts filter, deferred
+snapshots and retained Fix controls without starting a live Fix.
+
 The opt-in WSL preflight regression uses a disposable `/tmp` checkout and fake
 CLI executables. It checks non-login discovery, quoted paths, inherited child
 PATH and dependency diagnostics without starting a Fix or contacting ADO:
