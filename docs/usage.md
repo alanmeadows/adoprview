@@ -165,9 +165,16 @@ re-check is queued.
 Already queued/notSet evaluations are never cancelled. Deferred work is picked
 up after those finish or a failed PR read recovers. Restart failures appear in
 the row's Merge details and status line and retry on a subsequent normal refresh
-(at least one refresh interval later); accepted requests await ADO's fresh result.
-If ADO keeps returning an old stale preview, another restart waits for the merge
-interval. Ref-read failures are visible and retried on the next refresh.
+(at least one refresh interval later). Accepted requests can show **Checking**
+for up to one merge interval while awaiting ADO's fresh result. If ADO still
+returns an old or unverified terminal preview, the row shows **Retry needed**
+instead; cadence retries do not renew Checking unless ADO reports queued/notSet
+or returns a current-target preview. The stale/unverified warning remains until
+a verified result arrives, and otherwise human-only requirements can appear in
+**Needs Human** without claiming the merge preview is clean. Observed failures,
+policy rejection and conflicts are shown immediately, not hidden by local request
+grace. Genuinely queued/notSet evaluations stay Checking regardless of age.
+Ref-read failures are visible and retried on the next refresh.
 Existing merge options are preserved. No merge, branch push, policy change or
 auto-complete change is part of these automatic checks.
 

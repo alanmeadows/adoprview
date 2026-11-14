@@ -48,6 +48,30 @@ for (var mask = 1; mask < 8; mask++)
     });
 }
 
+foreach (var (status, label) in new[] { ("failure", "Failed"), ("rejectedByPolicy", "Rejected"), ("conflicts", "Conflicts") })
+    await Test("merge classifier gives terminal " + status + " precedence over local pending", () =>
+    {
+        var pr = Pr(mergeStatus: status, autoCompleteBy: null);
+        pr.MergeRecheckPending = true;
+        pr.MergeStale = true;
+        pr.MergeFailure = "Offline failure";
+        PrService.Classify(pr);
+        Check(pr.Lane == Lane.Blocked && pr.Waiting.Count == 0 && pr.Gates["merge"].Label == label,
+            "Local accepted-request state masked an observed terminal problem");
+        return Task.CompletedTask;
+    });
+
+await Test("merge classifier retains stale warning without hiding human-only actions", () =>
+{
+    var pr = Pr(autoCompleteBy: null);
+    pr.MergeStale = true;
+    pr.Policies.Add(Policy("pop", "rejected"));
+    PrService.Classify(pr);
+    Check(pr.Lane == Lane.NeedsHuman && pr.Waiting.Count == 0 && pr.Gates["merge"].Label == "Stale" &&
+        pr.Gates["merge"].State == "warn" && pr.HumanActions.Count == 2, "Stale preview was treated as clean or running");
+    return Task.CompletedTask;
+});
+
 foreach (var status in new[] { "queued", "running", "rejected" })
     await Test("native reviewer policy " + status + " is a human approval requirement", () =>
     {
