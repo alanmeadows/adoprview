@@ -3,6 +3,21 @@ using System.Text;
 using System.Text.Json.Nodes;
 using AdoPrView;
 
+if (args is ["--diagnostics-probe", var diagnosticRoot, var mode])
+{
+    var log = new AppDiagnostics(diagnosticRoot, _ => Environment.Exit(9));
+    log.RegisterProcessHandlers();
+    if (mode == "early-exit") Environment.Exit(7);
+    if (mode == "unobserved")
+    {
+        AppDiagnosticsTests.CreateUnobservedTask();
+        GC.Collect();
+        GC.WaitForPendingFinalizers();
+    }
+    log.Complete("probe-returned");
+    return;
+}
+
 const string BotId = "00000000-0000-4000-8000-0000000000b0";
 var bot = new ReviewBotSettings { Name = "Review bot", AuthorId = BotId };
 var tests = 0;
@@ -505,6 +520,7 @@ await CopilotRecoveryTests.Run(Test);
 await PopPaneTests.Run(Test);
 await AutoCompleteTests.Run(Test);
 await ExplainTests.Run(Test);
+await AppDiagnosticsTests.Run(Test);
 
 Console.WriteLine($"{tests} offline tests passed. No live HTTP or approval requests were made.");
 
