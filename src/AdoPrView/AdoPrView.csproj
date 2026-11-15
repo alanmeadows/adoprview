@@ -22,7 +22,8 @@
   <ItemGroup>
     <PackageReference Include="DiffPlex" Version="1.9.0" />
     <PackageReference Include="GitHub.Copilot.SDK" Version="1.0.29" />
-    <PackageReference Include="Microsoft.Web.WebView2" Version="1.0.4314.35" />
+    <!-- Newer WPF SDKs close the host window on website window.close(): MicrosoftEdge/WebView2Feedback#5737. -->
+    <PackageReference Include="Microsoft.Web.WebView2" Version="1.0.3537.50" />
     <InternalsVisibleTo Include="AdoPrView.Tests" />
   </ItemGroup>
 

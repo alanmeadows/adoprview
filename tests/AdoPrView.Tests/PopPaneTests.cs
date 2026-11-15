@@ -102,7 +102,8 @@ static class PopPaneTests
         });
         await test("PoP Check status reads captured PR and actual policies, updates gates without reordering, and rejects swapped identity", ReadPolicy);
         if (Environment.GetEnvironmentVariable("ADOPRVIEW_TEST_POP_WEBVIEW") == "1")
-            await test("Native PoP WebView2 reuses isolated surface, handles inline auth popup and navigation failure with intercepted fake pages", NativeBrowser);
+            foreach (var state in new[] { WindowState.Normal, WindowState.Maximized })
+                await test($"Native PoP WebView2 isolates website closes, reuses surfaces and handles navigation failure ({state})", () => NativeBrowser(state));
     }
 
     static async Task ReadPolicy()
@@ -141,7 +142,7 @@ static class PopPaneTests
         catch (InvalidOperationException ex) { Check(ex.Message.Contains("identity"), "Wrong identity failure"); }
     }
 
-    static Task NativeBrowser()
+    static Task NativeBrowser(WindowState state)
     {
         var done = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         var thread = new Thread(() =>
@@ -164,10 +165,19 @@ static class PopPaneTests
             var divider = PopBrowserPane.CreateDivider();
             Grid.SetRow(divider, 1); layout.Children.Add(divider);
             Grid.SetRow(pane, 2); layout.Children.Add(pane);
-            var window = new Window { Title = "ADO PR View - offline PoP fixture", Width = 1250, Height = 900, Content = layout,
+            var window = new Window { Title = "ADO PR View - offline PoP fixture", Width = 1250, Height = 900, WindowState = state, Content = layout,
                 Background = new System.Windows.Media.SolidColorBrush(System.Windows.Media.Color.FromRgb(0x0e, 0x10, 0x14)) };
+            var hostCloseRequests = 0;
+            var fixtureClosing = false;
+            window.Closing += (_, e) =>
+            {
+                if (fixtureClosing) return;
+                hostCloseRequests++;
+                e.Cancel = true;
+                window.Hide();
+            };
             var surfaces = new List<CoreWebView2>();
-            var popupReady = new TaskCompletionSource<CoreWebView2>();
+            var popupReady = new TaskCompletionSource<CoreWebView2>(TaskCreationOptions.RunContinuationsAsynchronously);
             pane.SurfaceCreated += core =>
             {
                 surfaces.Add(core);
@@ -179,7 +189,7 @@ static class PopPaneTests
                     e.Response = core.Environment.CreateWebResourceResponse(new MemoryStream(Encoding.UTF8.GetBytes(html)), error ? 503 : 200, error ? "Unavailable" : "OK", "Content-Type: text/html; charset=utf-8");
                 };
                 core.NewWindowRequested += (_, e) => Check(e.Handled, "Popup escaped into an external window");
-                if (surfaces.Count > 1) popupReady.TrySetResult(core);
+                if (surfaces.Count > 1) core.NavigationCompleted += (_, _) => popupReady.TrySetResult(core);
             };
             window.Loaded += async (_, _) =>
             {
@@ -203,7 +213,13 @@ static class PopPaneTests
                     var child = await popupReady.Task.WaitAsync(TimeSpan.FromSeconds(15));
                     Check(pane.Popup is not null && child.Environment.UserDataFolder == core.Environment.UserDataFolder &&
                         !child.Settings.IsWebMessageEnabled && !child.Settings.AreHostObjectsAllowed, "Popup isolation/session mismatch");
-                    pane.ClosePopup();
+                    var popupClosed = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+                    child.WindowCloseRequested += (_, _) => popupClosed.TrySetResult();
+                    await child.ExecuteScriptAsync("window.close();");
+                    await popupClosed.Task.WaitAsync(TimeSpan.FromSeconds(15));
+                    await window.Dispatcher.InvokeAsync(() => { }, DispatcherPriority.ApplicationIdle);
+                    Check(pane.Popup is null && pane.Session.IsOpen, "Website close did not close only the popup");
+                    Check(hostCloseRequests == 0 && window.IsVisible && window.WindowState == state, "Website popup close reached the dashboard window");
                     await Navigate(core, () => { core.Navigate("https://dev.azure.com/offline-error"); return Task.CompletedTask; });
                     Check(pane.NavigationStatus.Contains("503"), "Navigation error hidden");
                     result = new("ok", "Offline ADO reports PoP satisfied.");
@@ -223,6 +239,18 @@ static class PopPaneTests
                         Check(divider.Focusable && divider.KeyboardIncrement > 0, "Resize affordance is not keyboard accessible");
                         CaptureWindow(window, Path.ChangeExtension(shot, ".narrow.native.png"));
                     }
+                    var paneClosed = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+                    pane.OpenChanged += open => { if (!open) paneClosed.TrySetResult(); };
+                    // Chromium permits script-closing a top-level page only with a single history entry.
+                    await core.CallDevToolsProtocolMethodAsync("Page.resetNavigationHistory", "{}");
+                    await core.ExecuteScriptAsync("window.close();");
+                    await paneClosed.Task.WaitAsync(TimeSpan.FromSeconds(15));
+                    await window.Dispatcher.InvokeAsync(() => { }, DispatcherPriority.ApplicationIdle);
+                    Check(hostCloseRequests == 0 && window.IsVisible && window.WindowState == state, "Website pane close reached the dashboard window");
+                    Check(!pane.Session.IsOpen && pane.Visibility == Visibility.Collapsed, "Website close did not close the PoP pane");
+                    Check(reads.Count == 3 && reads[^1].Id == 456, "Website pane close did not recheck the captured PR");
+                    await Navigate(core, () => pane.OpenAsync(target));
+                    Check(window.IsVisible && dashboard.IsVisible && pane.Session.IsOpen, "Dashboard or pane unusable after website close");
                 }
                 catch (Exception ex) { failure = ex; }
                 finally
@@ -230,7 +258,9 @@ static class PopPaneTests
                     var exited = new TaskCompletionSource();
                     var environment = pane.Browser.CoreWebView2?.Environment;
                     if (environment is not null) environment.BrowserProcessExited += (_, _) => exited.TrySetResult();
+                    fixtureClosing = true;
                     pane.Dispose(); window.Close();
+                    if (window.IsVisible) failure ??= new Exception("Deliberate host close was suppressed.");
                     if (environment is not null) await Task.WhenAny(exited.Task, Task.Delay(10000));
                     try { if (Directory.Exists(directory)) Directory.Delete(directory, recursive: true); }
                     catch (IOException ex) { failure ??= new Exception("Could not clean the synthetic PoP browser profile.", ex); }

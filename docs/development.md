@@ -44,6 +44,31 @@ powershell -NoProfile -ExecutionPolicy Bypass -File tests\install-guide.tests.ps
 CI and the release package treat compiler warnings as errors (`-warnaserror`
 on the build and `dotnet publish`), so keep both projects warning-clean.
 
+CI and release checks also enable the native PoP browser regression. To run it
+locally with the installed WebView2 Evergreen Runtime:
+
+```powershell
+$env:ADOPRVIEW_TEST_FILTER = 'Native PoP'
+$env:ADOPRVIEW_TEST_POP_WEBVIEW = '1'
+dotnet run --project tests\AdoPrView.Tests -c Release
+Remove-Item Env:\ADOPRVIEW_TEST_FILTER, Env:\ADOPRVIEW_TEST_POP_WEBVIEW
+```
+
+It uses intercepted synthetic HTTPS responses and disposable browser profiles,
+never real sign-in or PR writes. Website popup/page `window.close()` must leave
+the host visible in both normal and maximized states, close only the intended
+surface, and leave the pane reusable. The fixture emulates close-to-tray so an
+unexpected host close cannot pass merely because the process remains alive.
+
+The WebView2 **SDK** stays on 1.0.3537.50 pending
+[MicrosoftEdge/WebView2Feedback#5737](https://github.com/MicrosoftEdge/WebView2Feedback/issues/5737):
+1.0.4314.35's built-in WPF close handler calls `Window.Close()` before the app's
+`WindowCloseRequested` handler. The regression reproduces the dashboard hide
+with that SDK and passes with 1.0.3537.50. This does not pin or downgrade the
+Evergreen **browser runtime**. Run the native regression before any SDK upgrade.
+Actual tenant sign-in and the earlier reported 0.1.1 incident remain unverified
+by these offline checks.
+
 The browser regression uses Node 22+ and the installed Microsoft Edge (or set
 `ROW_TEST_BROWSER` to another Chromium executable). Real mouse/keyboard input
 is used, with all URL launches and PR actions intercepted; no live PR is changed.
