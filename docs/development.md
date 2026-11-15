@@ -17,6 +17,10 @@ Dev flags: `--mock` (fixture data), `--screenshot out.png [--size WxH] [--eval j
 
 The pinned `GitHub.Copilot.SDK` package downloads and verifies its matching
 Windows Copilot runtime at build time. Explain uses this native runtime.
+Explain explicitly selects the bundled `runtimes\win-<process architecture>\native`
+stdio wrapper, not the OS architecture: the x64 release also runs under Windows
+ARM64 emulation. SDK 1.0.29's default resolver uses the OS architecture instead.
+Missing or empty runtime files fail explicitly; there is no global CLI fallback.
 Release packaging includes the runtime's redistribution license and the SDK,
 DiffPlex and Microsoft.Extensions license texts under `licenses`.
 The retained upstream texts come from [DiffPlex 1.9.0](https://github.com/mmanela/diffplex/blob/3cb6415c331a0af2f2686154cb77169ef29b63ce/License.txt),
@@ -28,6 +32,10 @@ Review these texts when updating the dependencies or their bundled runtime.
 Explain's native fake-HTTP/fake-model checks and frontend checks run in the
 ordinary offline suites. The browser mock simulates Explain interactions;
 it does not contact a model or establish live ADO endpoint compatibility.
+The native suite also checks the actual runtime binaries' PE architecture without
+starting Copilot or authenticating. To check a published folder, set
+`ADOPRVIEW_TEST_PUBLISH_DIRECTORY` to its absolute path and run the native suite
+with `ADOPRVIEW_TEST_FILTER` set to `Explain runtime`.
 
 ## Offline checks
 

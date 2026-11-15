@@ -1,10 +1,13 @@
 using System.Net;
 using System.Net.Http.Headers;
 using System.Reflection;
+using System.Reflection.PortableExecutable;
+using System.Runtime.InteropServices;
 using System.Text;
 using System.Text.Json;
 using System.Text.Json.Nodes;
 using AdoPrView;
+using GitHub.Copilot;
 
 #pragma warning disable GHCP001
 
@@ -19,6 +22,70 @@ static class ExplainTests
 
     public static async Task Run(Func<string, Func<Task>, Task> test)
     {
+        await test("Explain runtime selects the packaged process architecture rather than the OS or another payload", () =>
+        {
+            var directory = Path.Combine(Path.GetTempPath(), "ado-explain-runtime-" + Guid.NewGuid().ToString("N"));
+            try
+            {
+                foreach (var (architecture, rid) in new[] { (Architecture.X64, "win-x64"), (Architecture.Arm64, "win-arm64") })
+                {
+                    var native = Path.Combine(directory, "runtimes", rid, "native");
+                    Directory.CreateDirectory(native);
+                    foreach (var name in new[] { "copilot-runtime.exe", "runtime.node", "copilot_runtime.dll" })
+                        File.WriteAllText(Path.Combine(native, name), "offline fixture");
+                    var options = ExplainModel.ClientOptions("isolated-home", directory, architecture);
+                    Check(options.Connection is StdioRuntimeConnection connection &&
+                        connection.Path == Path.Combine(native, "copilot-runtime.exe"), "SDK default OS-based resolution was not overridden");
+                    Check(options.BaseDirectory == "isolated-home" && options.WorkingDirectory == "isolated-home" &&
+                        options.UseLoggedInUser == true && options.LogLevel == CopilotLogLevel.Error, "Runtime selection changed isolation/auth options");
+                    Check(options.Environment is not null && !options.Environment.ContainsKey("COPILOT_CLI_PATH") &&
+                        !options.Environment.ContainsKey("NODE_OPTIONS"), "Ambient runtime overrides inherited");
+                }
+            }
+            finally { if (Directory.Exists(directory)) Directory.Delete(directory, recursive: true); }
+            return Task.CompletedTask;
+        });
+        await test("Explain runtime rejects missing empty or incomplete matching payload without architecture or PATH fallback", async () =>
+        {
+            var directory = Path.Combine(Path.GetTempPath(), "ado-explain-runtime-" + Guid.NewGuid().ToString("N"));
+            try
+            {
+                var native = Path.Combine(directory, "runtimes", "win-x64", "native");
+                Directory.CreateDirectory(native);
+                var names = new[] { "copilot-runtime.exe", "runtime.node", "copilot_runtime.dll" };
+                foreach (var name in names) File.WriteAllText(Path.Combine(native, name), "offline fixture");
+                await Throws<InvalidOperationException>(() => Task.FromResult(ExplainModel.ClientOptions("offline", directory, Architecture.Arm64)));
+                foreach (var name in names)
+                {
+                    var path = Path.Combine(native, name);
+                    File.Delete(path);
+                    await Throws<InvalidOperationException>(() => Task.FromResult(ExplainModel.ClientOptions("offline", directory, Architecture.X64)));
+                    File.WriteAllText(path, "");
+                    await Throws<InvalidOperationException>(() => Task.FromResult(ExplainModel.ClientOptions("offline", directory, Architecture.X64)));
+                    File.WriteAllText(path, "offline fixture");
+                }
+                await Throws<PlatformNotSupportedException>(() => Task.FromResult(ExplainModel.ClientOptions("offline", directory, Architecture.X86)));
+            }
+            finally { Directory.Delete(directory, recursive: true); }
+        });
+        await test("Explain runtime options select real matching native binaries from build or publish output", () =>
+        {
+            var directory = Environment.GetEnvironmentVariable("ADOPRVIEW_TEST_PUBLISH_DIRECTORY") ?? AppContext.BaseDirectory;
+            var options = ExplainModel.ClientOptions("offline-unused-home", directory, RuntimeInformation.ProcessArchitecture);
+            Check(options.Connection is StdioRuntimeConnection, "Explain no longer uses the explicit stdio runtime");
+            var connection = (StdioRuntimeConnection)options.Connection!;
+            var native = Path.GetDirectoryName(connection.Path)!;
+            var machine = RuntimeInformation.ProcessArchitecture == Architecture.X64 ? Machine.Amd64 : Machine.Arm64;
+            foreach (var name in new[] { "copilot-runtime.exe", "runtime.node", "copilot_runtime.dll" })
+            {
+                using var stream = File.OpenRead(Path.Combine(native, name));
+                using var pe = new PEReader(stream);
+                Check(pe.PEHeaders.CoffHeader.Machine == machine, "Selected native binary does not match the process architecture: " + name);
+            }
+            using var client = new CopilotClient(options);
+            Console.WriteLine($"Runtime payload verified: process={RuntimeInformation.ProcessArchitecture}, OS={RuntimeInformation.OSArchitecture}, path={connection.Path}");
+            return Task.CompletedTask;
+        });
         await test("Explain captures draft identity, immutable source/common-base and every change page using GET only", async () =>
         {
             using var f = new Fixture();
