@@ -45,6 +45,37 @@ calls used see [DESIGN.md](DESIGN.md); for building and tests see
 - The current refresh interval is shown in the status bar and is configurable
   in Settings (default: 2 minutes; merge re-check: 10 minutes).
 
+### Startup, exit and error logs
+
+Lifecycle diagnostics are written to
+`%LOCALAPPDATA%\AdoPrView\Diagnostics\<session>\events.jsonl`.
+Each session records UTC timestamps, a unique session ID, process ID, version/build,
+window visibility/state, close-to-tray, explicit tray Exit, shutdown teardown,
+Windows session ending and application/process exit. Handled WPF dispatcher errors,
+unobserved task exceptions, terminating unhandled exceptions and dashboard WebView
+process failures have distinct records. Existing error dialogs and exception
+handling behavior are unchanged.
+
+Records are flushed to disk immediately. Each session has at most two 512 KiB log
+files (`events.jsonl` and `events.previous.jsonl`); the ten most recent inactive
+sessions are retained in addition to live instances. Concurrent instances have
+separate locked sessions and are not mistaken for terminated processes.
+Inspection and retention use a separate maintenance lock; a concurrent startup
+records `prior-session-inspection-deferred` if another instance is maintaining
+the history, and a later startup resumes maintenance.
+An incomplete prior initialization is recorded as `prior-session-unavailable`,
+without inferring an exit or preventing inspection of other sessions.
+The next start reports a prior session without a clean completion record as
+`prior-session-without-clean-end`. This is evidence of an **unclean or unknown
+exit, not proof of a crash**: forced termination, power loss, native failures and
+some OS shutdowns may leave no final exception. Exits before this logging was
+installed cannot be reconstructed from these files.
+
+Exceptions include types, error codes and method-only stack frames, not messages,
+source paths, exception data, credentials, PR/code content or settings. Logging
+failure displays a warning rather than preventing the app from running or claiming
+the evidence was saved.
+
 ## Lanes
 
 Every PR gets one lane label, and the header counters show how many PRs are in
