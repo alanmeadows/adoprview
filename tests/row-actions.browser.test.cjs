@@ -942,6 +942,13 @@ test('real row hit testing and action identity across refreshes', { timeout: 900
           const ratio=await evaluate(`window.themeContrast(document.querySelector(${JSON.stringify(selector)}))`);
           assert.ok(ratio>=4.5,`${theme} ${selector}: contrast ${ratio.toFixed(2)}`);
         }
+        for (const selector of ['#repoUrl','#refreshSeconds','#triageInstructions']) {
+          const focus=await evaluate(`(()=>{
+            const e=document.querySelector(${JSON.stringify(selector)});e.focus({preventScroll:true});
+            const c=getComputedStyle(e);return {active:document.activeElement===e,style:c.outlineStyle,width:c.outlineWidth};
+          })()`);
+          assert.deepEqual(focus,{active:true,style:'solid',width:'2px'},`${theme}: form focus remains visible on ${selector}`);
+        }
         const primary = await evaluate(`(()=>{const b=document.querySelector('.btn.primary');const r=b.getBoundingClientRect();return {x:r.x+r.width/2,y:r.y+r.height/2,background:getComputedStyle(b).backgroundColor};})()`);
         await move(primary.x,primary.y); await frame();
         const hovered = await evaluate(`({background:getComputedStyle(document.querySelector('.btn.primary')).backgroundColor,ratio:window.themeContrast(document.querySelector('.btn.primary'))})`);
