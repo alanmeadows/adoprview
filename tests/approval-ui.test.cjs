@@ -568,6 +568,24 @@ test('Ready retains partial coverage warning without claiming all gates are gree
   assert.ok(!elements.get('#rows').innerHTML.includes('All gates green'));
 });
 
+test('Needs Human keeps pending merge diagnostics without promising all machine work is complete', () => {
+  const { hooks, pr, elements } = setup();
+  pr.mergeStatus = 'queued';
+  pr.mergeRecheckPending = true;
+  pr.mergeRecheckRequestedAt = '2026-01-01T00:00:00Z';
+  pr.gates.merge = { state: 'pending', label: 'Queued', detail: 'ADO reports a queued merge evaluation; human actions can proceed.' };
+  hooks.setSnapshot({ ...hooks.S.snap, prs: [pr] });
+  assert.match(elements.get('#rows').innerHTML, /Human actions available; merge preview may still be pending or unverified/);
+  assert.doesNotMatch(elements.get('#rows').innerHTML, /Only human actions remain/);
+  assert.match(elements.get('#rows').innerHTML, /Queued/);
+  assert.match(hooks.actionButtons(pr), /data-act="pop"/);
+  assert.match(hooks.actionButtons(pr), /data-act="autocomplete"/);
+  const detail = hooks.renderDetail(pr);
+  assert.match(detail, /Triggered .*merge status comes from the PR read/);
+  assert.match(detail, /<dt>Merge status<\/dt><dd>queued/);
+  assert.doesNotMatch(detail, /awaiting ADO result/);
+});
+
 test('addressed review bot finding leaves only PoP plus human sign-off', () => {
   const { hooks, pr, elements } = setup();
   pr.id = 4242;

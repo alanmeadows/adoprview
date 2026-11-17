@@ -136,14 +136,16 @@ real launch.
 
 ## Classification ("lanes", sorted top → bottom)
 
-1. **Needs Human** — nothing agent-fixable or automated/in-progress remains;
-   human reviewer approval (+1), Proof of Presence, and enabling auto-complete
+1. **Needs Human** — no observed blockers or other pending automated gates;
+   pending/unverified merge information does not hide available human work.
+   Human reviewer approval (+1), Proof of Presence, and enabling auto-complete
    belong here, in any combination. Publishing a draft also remains a human
    action. The human can be you or another reviewer; it is not an ownership lane.
 2. **Blocked** — merge conflicts, failed build/status check, unresolved
    comments, open review-bot findings, missing work-item link, rejecting vote.
    These are what "Triage" hands to Copilot.
-3. **Waiting** — automated builds/checks or merge evaluation are pending
+3. **Waiting** — other automated builds/checks/review-bot gates are pending,
+   or merge verification remains with no available human work
    (human actions stay highlighted so you can do them early). Automated review-
    enforcement statuses saying *Missing Approvals* or *Waiting on reviewer(s)
    to approve*, or *Additional human sign-off is required* are human requirements,
@@ -151,7 +153,8 @@ real launch.
    unknown review-status waits stay Waiting;
    broken/failed automation stays Blocked. Optional reviewers with no vote do
    not create a requirement; rejecting / waiting-for-author votes stay Blocked.
-4. **Ready** — every blocking policy approved (auto-complete will merge).
+4. **Ready** — no outstanding actions or observed merge uncertainty
+   (auto-complete can complete when ADO's policies allow).
 
 The optional review bot is identified only by the configured `reviewBot`
 identity ID; its display name is a label. It applies only to PRs in its
@@ -209,7 +212,7 @@ refresh. Unchanged refs do not create new sweep generations.
 
 One automatic eligibility rule excludes observed `conflicts` from cadence,
 forced sweeps and retries, and is checked again after the fresh pre-write GET.
-Conflict observations clear stale local pending state and consume deferred sweep
+Conflict observations consume deferred sweep
 generations without erasing real error diagnostics. Normal read-only refreshes
 still observe source-push recomputation; non-conflict results restore ordinary
 eligibility. Deliberate manual Re-check Merge is not subject to this exclusion.
@@ -217,14 +220,17 @@ eligibility. Deliberate manual Re-check Merge is not subject to this exclusion.
 Full refresh, single-PR refresh and manual merge restarts share the refresh gate.
 Writes are sequential and use AdoClient's shared throttle. A fresh PR read
 revalidates active/in-flight state, then a single non-transport-retried PATCH
-resends only the existing `mergeOptions`, never completion options. Local accepted
-request state prevents old terminal snapshots from immediately causing another
-restart. Fresh terminal results at the current target clear pending state; old
-stale results retry after the merge cadence. Failed writes retain their error and
+resends only the existing `mergeOptions`, never completion options. One subsequent
+PR GET observes the result; PATCH is a trigger, not a separately polled operation.
+No local pending timer masks authoritative PR reads. Request timestamps and
+cadence prevent old stale results from immediately causing another restart.
+Post-trigger read failures are reported independently of write acceptance and
+do not accelerate retries. Failed writes retain their error and
 retry no earlier than the next normal refresh interval, after another fresh PR
-read. Raw queued/notSet jobs are never cancelled, even if they take longer.
+read. Raw queued/notSet statuses are never restarted; notSet is unset, not proof
+of a running job.
 
-The status line reports actual submitted/checking/error counts. Merge gate
+The status line reports actual submitted/queued/unknown/error counts. Merge gate
 tooltips and expanded details show target-read failures, last request time,
 pending outcomes and explicit retry failures. Stale alone never claims a job was
 queued. None of this changes approval, policy or auto-complete behavior, and

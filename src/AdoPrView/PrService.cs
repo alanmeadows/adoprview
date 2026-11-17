@@ -207,7 +207,7 @@ public sealed partial class PrService
                    ?? new RepoRef { Org = existing.Org, Project = existing.Project, Repo = existing.Repo, RepoId = existing.RepoId, ProjectId = existing.ProjectId };
         var me = await GetMeAsync(repo.Org);
         var updated = await BuildAsync(repo, existing.Id, me.Id, new(), PopTarget.FromPr(existing));
-        ApplyMergeCheckState(updated, fresh: true);
+        ApplyMergeCheckState(updated);
         Classify(updated);
         ReplaceOne(updated);
         return updated;
@@ -245,7 +245,7 @@ public sealed partial class PrService
             var repo = new RepoRef { Org = target.Org, Project = target.Project, ProjectId = target.ProjectId, Repo = target.Repo, RepoId = target.RepoId };
             var me = await GetMeAsync(repo.Org);
             var updated = await BuildAsync(repo, target.Id, me.Id, new(), target);
-            ApplyMergeCheckState(updated, fresh: true);
+            ApplyMergeCheckState(updated);
             Classify(updated);
             ReplaceOne(updated);
             return PopPolicyResult.FromPr(updated);
@@ -576,13 +576,7 @@ public sealed partial class PrService
             return;
         }
         // Merge
-        if (MergeInFlight(v.MergeStatus) || v.MergeRecheckPending && !MergeFailed(v.MergeStatus))
-        {
-            v.Waiting.Add("Merge evaluation");
-            v.Gates["merge"] = new("pending", "Checking", v.MergeRecheckRequestedAt is { } at
-                ? $"Merge re-check requested {at:u}; awaiting ADO's result" : "ADO merge evaluation is in progress");
-        }
-        else switch (v.MergeStatus)
+        switch (v.MergeStatus)
         {
             case "conflicts": v.Blockers.Add($"Merge conflicts with {v.TargetBranch}"); v.Gates["merge"] = new("fail", "Conflicts", $"Conflicts with {v.TargetBranch}"); break;
             case "failure": v.Blockers.Add("Merge failed: " + (v.MergeFailure ?? "unknown")); v.Gates["merge"] = new("fail", "Failed", v.MergeFailure); break;
@@ -593,7 +587,8 @@ public sealed partial class PrService
                     : v.MergeStale ? new("warn", "Stale", $"{v.TargetBranch} moved or the preview target is missing; awaiting scheduled re-check")
                     : new("ok", "Clean");
                 break;
-            default: v.Waiting.Add("Merge evaluation"); v.Gates["merge"] = new("pending", "Checking"); break;
+            case "queued": v.Gates["merge"] = new("pending", "Queued", "ADO reports a queued merge evaluation; human actions can proceed."); break;
+            default: v.Gates["merge"] = new("warn", "Unknown", "ADO has not reported a completed merge preview."); break;
         }
         var mergeErrors = new[] { v.Gates["merge"].Detail, v.MergeCheckError, v.MergeRecheckError }.Where(s => !string.IsNullOrEmpty(s));
         v.Gates["merge"] = v.Gates["merge"] with { Detail = string.Join("; ", mergeErrors) };
@@ -687,6 +682,10 @@ public sealed partial class PrService
         else v.Gates["autocomplete"] = new("ok", string.IsNullOrEmpty(v.MergeStrategy) ? "Set" : v.MergeStrategy, $"Set by {v.AutoCompleteBy}");
 
         if (v.IsDraft) v.HumanActions.Add("publish");
+
+        if (v.Blockers.Count == 0 && v.Waiting.Count == 0 && v.HumanActions.Count == 0 &&
+            v.Gates["merge"].State is "pending" or "warn")
+            v.Waiting.Add("Merge preview is pending or unverified");
 
         v.Lane = v.Blockers.Count > 0 ? Lane.Blocked
             : v.Waiting.Count > 0 ? Lane.Waiting

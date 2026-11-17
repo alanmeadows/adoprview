@@ -30,8 +30,9 @@ table sorted by what they are waiting on: **Needs Human**, **Blocked**,
 
 ![Two PRs needing reviewer approval, each with an enlarged +1 button; one also needs PoP](docs/images/needs-human-review.png)
 
-The app found no remaining automated work it could see, and the PR still needs
-reviewer approval. The **+1** button is enlarged on these rows. Any approver can
+The PR needs reviewer approval, with no observed blockers or other pending
+automated gates. A pending or unverified merge preview remains visible without
+hiding available human work. The **+1** button is enlarged on these rows. Any approver can
 give it, so watched PRs show it too; it is amber only on your own PRs. The +1
 can appear alongside finishing steps, like PoP on the second row.
 
@@ -45,8 +46,8 @@ in any combination, or alongside +1 when a review is also still needed, as on
 the draft. They are amber on your PRs; a watched PR shows the same steps without
 amber.
 
-Needs Human is the app's verified, human-only state for what it read from ADO;
-it is not a guarantee that every policy is known or green.
+Needs Human highlights available human work; it is not a guarantee that the
+merge preview is current or complete, or that every policy is known or green.
 
 ### Inline Copilot Fix
 

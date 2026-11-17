@@ -58,6 +58,7 @@ public sealed class PrView
     public string? CurrentTargetCommit { get; set; }
     public string? MergeCheckError { get; set; }
     public DateTimeOffset? MergeRecheckRequestedAt { get; set; }
+    // Compatibility field: observed ADO queued status, not client request state.
     public bool MergeRecheckPending { get; set; }
     public string? MergeRecheckError { get; set; }
     public string? AutoCompleteBy { get; init; }

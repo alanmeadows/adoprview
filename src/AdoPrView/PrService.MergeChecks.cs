@@ -14,8 +14,6 @@ public sealed partial class PrService
     {
         public DateTimeOffset? RequestedAt;
         public DateTimeOffset NextAttempt;
-        public bool Awaiting;
-        public bool PreviewTimedOut;
         public bool DetectionFailed;
         public string? Error;
     }
@@ -26,10 +24,9 @@ public sealed partial class PrService
     readonly Dictionary<string, long> _mergeSweepHandled = new(StringComparer.OrdinalIgnoreCase);
     long _mergeSweep;
 
-    static bool MergeInFlight(string status) => status is "queued" or "notSet";
+    static bool MergeRestartDeferred(string status) => status is "queued" or "notSet";
     static bool MergeConflicted(string status) => status == "conflicts";
-    static bool MergeFailed(string status) => status is "conflicts" or "failure" or "rejectedByPolicy";
-    static bool AutomaticMergeCheckEligible(PrView pr) => !MergeConflicted(pr.MergeStatus) && !MergeInFlight(pr.MergeStatus);
+    static bool AutomaticMergeCheckEligible(PrView pr) => !MergeConflicted(pr.MergeStatus) && !MergeRestartDeferred(pr.MergeStatus);
     TimeSpan MergeCadence => TimeSpan.FromMinutes(Math.Max(1, _store.Current.MergeCheckMinutes));
     bool Monitored(PrView pr) => pr.IsActive && !pr.IsHidden && !pr.IsIgnoredDraft && !(_store.Current.IgnoreDrafts && pr.IsDraft) &&
         !_store.Current.Hidden.Contains(pr.Key, StringComparer.OrdinalIgnoreCase) &&
@@ -56,28 +53,14 @@ public sealed partial class PrService
         return check;
     }
 
-    void ApplyMergeCheckState(PrView pr, bool fresh = false)
+    void ApplyMergeCheckState(PrView pr)
     {
         var check = CheckFor(pr);
         if (pr.MergeCheckError is not null) check.DetectionFailed = true;
-        var verified = fresh && !MergeInFlight(pr.MergeStatus) &&
-            pr.CurrentTargetCommit is not null && !pr.MergeStale;
-        if (verified) check.PreviewTimedOut = false;
-        if (MergeFailed(pr.MergeStatus) || verified)
-        {
-            check.Awaiting = false;
-            if (MergeConflicted(pr.MergeStatus)) _mergeSweepHandled[pr.Key] = _mergeSweep;
-        }
-        else if (fresh && check.Awaiting && !MergeInFlight(pr.MergeStatus) && _time.GetUtcNow() >= check.NextAttempt)
-        {
-            check.Awaiting = false;
-            check.PreviewTimedOut = true;
-        }
+        if (MergeConflicted(pr.MergeStatus)) _mergeSweepHandled[pr.Key] = _mergeSweep;
         pr.MergeRecheckRequestedAt = check.RequestedAt;
-        pr.MergeRecheckPending = check.Awaiting;
-        var error = string.Join(" ", new[] { check.Error,
-            check.PreviewTimedOut ? "ADO has not returned a preview for the current target." : null }.Where(e => e is not null));
-        pr.MergeRecheckError = error.Length == 0 ? null : error + (MergeConflicted(pr.MergeStatus)
+        pr.MergeRecheckPending = pr.MergeStatus == "queued";
+        pr.MergeRecheckError = check.Error is null ? null : check.Error + (MergeConflicted(pr.MergeStatus)
             ? " Automatic re-checks are paused while ADO reports conflicts."
             : $" Retrying on a later refresh (not before {check.NextAttempt:u}).");
     }
@@ -121,15 +104,16 @@ public sealed partial class PrService
         // Sequential writes plus AdoClient's shared throttle bound the sweep.
         foreach (var pr in prs.Where(p => p.Error is null && Monitored(p)))
         {
-            ApplyMergeCheckState(pr, fresh: true);
+            ApplyMergeCheckState(pr);
             var check = CheckFor(pr);
             var sweep = _mergeSweepHandled.GetValueOrDefault(pr.Key) < _mergeSweep;
-            var retryNeeded = check.Error is not null || check.PreviewTimedOut;
+            var retryNeeded = check.Error is not null;
             var retry = retryNeeded && now >= check.NextAttempt;
             var recovered = check.DetectionFailed && pr.MergeCheckError is null;
-            if (AutomaticMergeCheckEligible(pr) && !pr.MergeRecheckPending &&
+            var due = check.RequestedAt is null || now >= check.NextAttempt;
+            if (AutomaticMergeCheckEligible(pr) &&
                 (!retryNeeded || now >= check.NextAttempt) &&
-                (sweep || retry || pr.MergeStale && (periodic || recovered)))
+                (sweep || retry || pr.MergeStale && due && (periodic || recovered || check.RequestedAt is not null)))
             {
                 try
                 {
@@ -148,16 +132,16 @@ public sealed partial class PrService
         }
         if (periodic) _lastMergeCheck = now;
         var visible = prs.Where(p => p.Error is null && Monitored(p)).ToList();
-        var pending = visible.Count(p => p.MergeRecheckPending || MergeInFlight(p.MergeStatus));
+        var pending = visible.Count(p => p.MergeStatus == "queued");
+        var unknown = visible.Count(p => p.MergeStatus is not ("queued" or "succeeded" or "conflicts" or "failure" or "rejectedByPolicy"));
         var failed = visible.Count(p => p.MergeRecheckError is not null || p.MergeCheckError is not null);
         var reason = moved ? "target branch advanced" : force ? "forced sweep" : deferredSweep ? "deferred sweep" : retried ? "retry" : "scheduled stale checks";
-        return $"Merge re-check: {requested} requested ({reason}), {pending} checking, {failed} with re-check/target errors";
+        return $"Merge re-check: {requested} requested ({reason}), {pending} queued, {unknown} unknown, {failed} with re-check/target errors";
     }
 
     void RecordMergeFailure(PrView pr, Exception ex)
     {
         var check = CheckFor(pr);
-        check.Awaiting = false;
         check.NextAttempt = _time.GetUtcNow().AddSeconds(Math.Max(30, _store.Current.RefreshSeconds));
         check.Error = $"Merge re-check failed: {ex.Message}.";
     }
@@ -183,10 +167,10 @@ public sealed partial class PrService
         ReadMergeFields(pr, cur);
         if (!Monitored(pr)) return new(false, $"!{pr.Id} is an ignored draft or no longer monitored; no merge re-check requested.");
         if (!pr.IsActive) return new(false, $"!{pr.Id} is no longer active; no merge re-check requested.");
-        if (MergeInFlight(pr.MergeStatus)) return new(false, $"!{pr.Id} already has a merge evaluation in progress; it was not restarted.");
+        if (MergeRestartDeferred(pr.MergeStatus)) return new(false, $"!{pr.Id} reports merge status {pr.MergeStatus}; it was not restarted.");
         if (automatic && !AutomaticMergeCheckEligible(pr))
         {
-            ApplyMergeCheckState(pr, fresh: true);
+            ApplyMergeCheckState(pr);
             return new(false, $"!{pr.Id} has merge conflicts; automatic re-checks are paused.");
         }
         // Do not retry a write inside HttpClient: the next refresh revalidates
@@ -195,20 +179,26 @@ public sealed partial class PrService
         var result = await _ado.PatchOnceAsync(PrApi(pr), new JsonObject { ["mergeOptions"] = mergeOptions });
         ReadMergeFields(pr, result);
         var check = CheckFor(pr);
-        // Repeated acceptance of the same unverified terminal preview is not
-        // evidence of running work, and must not renew the expired request grace.
-        var keepWarning = automatic && check.PreviewTimedOut && !MergeInFlight(pr.MergeStatus) &&
-            (pr.CurrentTargetCommit is null || pr.MergeStale);
         check.RequestedAt = _time.GetUtcNow();
         check.NextAttempt = check.RequestedAt.Value + MergeCadence;
-        check.Awaiting = !MergeFailed(pr.MergeStatus) && !keepWarning;
-        check.PreviewTimedOut = keepWarning;
         check.Error = null;
         _mergeSweepHandled[pr.Key] = _mergeSweep;
-        return new(true, $"Merge re-check requested for !{pr.Id}; " + (MergeFailed(pr.MergeStatus)
-            ? $"ADO reports {pr.MergeStatus}."
-            : keepWarning ? "ADO still reports an unverified preview for the current target."
-            : "awaiting ADO's result."));
+        // PATCH is a trigger, not a client-side operation to poll. Read the PR
+        // once; a read failure must not turn an accepted write into a failed one.
+        try
+        {
+            var observed = await _ado.GetAsync(PrApi(pr));
+            if (string.IsNullOrEmpty(S(observed["status"])) || observed["mergeStatus"] is null)
+                throw new AdoException("ADO did not return the PR's active and merge status.");
+            ReadMergeFields(pr, observed);
+        }
+        catch (Exception ex)
+        {
+            var warning = $"Merge re-check was accepted, but PR read-back failed: {ex.Message}.";
+            pr.MergeCheckError = string.Join(" ", new[] { pr.MergeCheckError, warning }.Where(e => e is not null));
+            return new(true, warning);
+        }
+        return new(true, $"Merge re-check requested for !{pr.Id}; ADO reports {pr.MergeStatus}.");
     }
 
     public async Task<MergeRecheckResult> RestartMergeAsync(string key)
@@ -220,12 +210,12 @@ public sealed partial class PrService
             if (!Monitored(existing)) return new(false, $"!{existing.Id} is hidden or no longer monitored; no merge re-check requested.");
             var repo = _store.Current.Repos.First(r => r.Key == $"{existing.Org}/{existing.Project}/{existing.Repo}".ToLowerInvariant());
             var pr = await BuildAsync(repo, existing.Id, (await GetMeAsync(repo.Org)).Id, new());
-            ApplyMergeCheckState(pr, fresh: true);
+            ApplyMergeCheckState(pr);
             MergeRecheckResult result;
             try
             {
-                result = pr.MergeRecheckPending || MergeInFlight(pr.MergeStatus)
-                    ? new(false, $"!{pr.Id} already has a merge evaluation in progress; it was not restarted.")
+                result = MergeRestartDeferred(pr.MergeStatus)
+                    ? new(false, $"!{pr.Id} reports merge status {pr.MergeStatus}; it was not restarted.")
                     : await RequestMergeCheckAsync(pr);
             }
             catch (Exception ex)
