@@ -1,10 +1,8 @@
 using System.IO;
 using System.Collections.Concurrent;
-using System.Runtime.InteropServices;
 using System.Text.Json.Nodes;
 using System.Windows;
 using System.Windows.Controls;
-using System.Windows.Interop;
 using System.Windows.Media;
 using System.Windows.Media.Imaging;
 using System.Windows.Shell;
@@ -48,7 +46,7 @@ public sealed class MainWindow : Window, IApprovalUi
         _pop = new PopBrowserPane(_prs.RefreshPopAsync);
 
         Title = "ADO PR View";
-        Background = new SolidColorBrush(Color.FromRgb(0x0e, 0x10, 0x14));
+        AppTheme.ApplyWindow(this, _web, _store.Current.Theme);
         var layout = new Grid();
         var tableRow = new RowDefinition { Height = new GridLength(1, GridUnitType.Star), MinHeight = 180 };
         var dividerRow = new RowDefinition { Height = new GridLength(0) };
@@ -95,7 +93,7 @@ public sealed class MainWindow : Window, IApprovalUi
         menu.Items.Add("Exit", null, (_, _) => { _shutdownReason = "tray-exit"; _quitting = true; Close(); });
         _tray.ContextMenuStrip = menu;
 
-        SourceInitialized += (_, _) => ApplyDarkTitleBar();
+        SourceInitialized += (_, _) => ApplyTheme(_store.Current.Theme);
         Loaded += async (_, _) => await InitAsync();
         StateChanged += (_, _) => _diagnostics.Record("window-state", WindowState.ToString());
         IsVisibleChanged += (_, _) => _diagnostics.Record("window-visibility", IsVisible ? "visible" : "hidden");
@@ -166,7 +164,6 @@ public sealed class MainWindow : Window, IApprovalUi
         await _web.EnsureCoreWebView2Async(env);
         var core = _web.CoreWebView2;
         core.ProcessFailed += (_, e) => _diagnostics.Record("webview-process-failed", e.ProcessFailedKind.ToString());
-        _web.DefaultBackgroundColor = System.Drawing.Color.FromArgb(0x0e, 0x10, 0x14);
         core.Settings.AreDevToolsEnabled = true;
         core.Settings.IsStatusBarEnabled = false;
         core.Settings.AreBrowserAcceleratorKeysEnabled = true;
@@ -179,7 +176,7 @@ public sealed class MainWindow : Window, IApprovalUi
                 System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo(e.Uri) { UseShellExecute = true });
         };
 
-        _bridge = new Bridge(_prs, _store, PostAsync, Kick, _approval, this, HandleCopilotAsync, HandlePopAsync, HandleExplainAsync);
+        _bridge = new Bridge(_prs, _store, PostAsync, Kick, _approval, this, HandleCopilotAsync, HandlePopAsync, HandleExplainAsync, ApplyTheme);
         _copilot.Changed += run => _ = _bridge.PushCopilotRunAsync(RunForUi(run));
         _explain.Changed += state => _ = _bridge.PushExplanationAsync(state);
         core.WebMessageReceived += (_, e) =>
@@ -199,7 +196,7 @@ public sealed class MainWindow : Window, IApprovalUi
                 }
         };
 
-        core.Navigate("https://app.local/index.html" + (_opts.Mock ? "?mock=1" : ""));
+        core.Navigate(AppTheme.DashboardUri(_store.Current.Theme, _opts.Mock));
         if (!_opts.Mock) _ = RecoverCopilotAsync();
         if (!_opts.Mock) _ = PollLoopAsync();
         if (_opts.ScreenshotPath != null) _ = CaptureAsync();
@@ -357,15 +354,10 @@ public sealed class MainWindow : Window, IApprovalUi
         Close();
     }
 
-    [DllImport("dwmapi.dll")] static extern int DwmSetWindowAttribute(IntPtr hwnd, int attr, ref int value, int size);
-
-    void ApplyDarkTitleBar()
+    void ApplyTheme(string theme)
     {
-        var hwnd = new WindowInteropHelper(this).Handle;
-        var on = 1;
-        DwmSetWindowAttribute(hwnd, 20, ref on, sizeof(int));          // immersive dark mode
-        var caption = 0x00140f0e;                                      // COLORREF (BGR) #0e0f14
-        DwmSetWindowAttribute(hwnd, 35, ref caption, sizeof(int));     // caption color (Win11)
+        AppTheme.ApplyWindow(this, _web, theme);
+        _pop.ApplyTheme(theme);
     }
 
     void RestorePlacement()

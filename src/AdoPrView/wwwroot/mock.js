@@ -130,6 +130,7 @@ Fixes AB#1234`;
   ];
 
   const settings = {
+    theme: window.AppTheme.effective(new URLSearchParams(location.search).get('theme')),
     repos: [
       { org, project, repo: 'sample-service' }, { org, project, repo: 'sample-operator' },
       { org, project, repo: 'sample-api' }, { org, project, repo: 'sample-deploy' },
@@ -233,6 +234,10 @@ Fixes AB#1234`;
         }
         case 'hide': settings.hidden.push(p.key); return settings;
         case 'unhide': settings.hidden = settings.hidden.filter((h) => h !== p.key); return settings;
+        case 'setTheme':
+          if (!window.AppTheme.supported.includes(p.theme)) throw new Error('Unsupported theme.');
+          settings.theme = p.theme;
+          return settings;
         case 'saveSettings': Object.assign(settings, p.settings); return settings;
         case 'discoverRepos': return [{ org, project, repo: 'sample-tools' }];
         case 'addRepo': case 'addRepos': case 'removeRepo': return settings;

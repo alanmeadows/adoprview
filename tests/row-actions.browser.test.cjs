@@ -1,7 +1,7 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const { spawn } = require('node:child_process');
-const { mkdtemp, rm } = require('node:fs/promises');
+const { mkdtemp, rm, mkdir, writeFile } = require('node:fs/promises');
 const { once } = require('node:events');
 const path = require('node:path');
 const os = require('node:os');
@@ -303,7 +303,9 @@ test('real row hit testing and action identity across refreshes', { timeout: 900
         busy:b.disabled,detail:row.querySelector('[data-auto-complete-state]')?.textContent,
         other:document.querySelector('[data-key="${neighbor}"] .row [data-slot="auto"] button').dataset.act
       };})()`);
-      assert.deepEqual(await state(), {same:true,act:'cancelAuto',grey:'rgb(180, 186, 200)',pressed:'true',busy:false,detail:'squash · by Offline Reviewer',other:'autocomplete'});
+      const neutralText = await evaluate(`getComputedStyle(document.documentElement).getPropertyValue('--text2').trim()`);
+      const neutralRgb = await evaluate(`(()=>{const e=document.createElement('span');e.style.color=${JSON.stringify(neutralText)};document.body.appendChild(e);const c=getComputedStyle(e).color;e.remove();return c;})()`);
+      assert.deepEqual(await state(), {same:true,act:'cancelAuto',grey:neutralRgb,pressed:'true',busy:false,detail:'squash · by Offline Reviewer',other:'autocomplete'});
       assert.equal(await evaluate('!!S.pendingSnapshot'),true,'Unrelated table updates should still be deferred');
       await move(10,10); await frame();
       await click(await point(key,'.row .title')); await frame();
@@ -830,6 +832,140 @@ test('real row hit testing and action identity across refreshes', { timeout: 900
         for (const l of r.links) assert.ok(l.href === null || /^https:\/\/example\.com\//.test(l.href), `${where}: unexpected link ${l.href}`);
       }
       await evaluate(`DOMPurify.sanitize=window.realSanitize;delete window.chrome.webview;`);
+    });
+
+    await t.test('all three themes apply to real components, states, contrast and saved reloads', async () => {
+      const navigate = async url => {
+        await evaluate('delete window.__ready');
+        await send('Page.navigate', { url });
+        await evaluate(`new Promise((resolve,reject)=>{
+          const deadline=Date.now()+10000;
+          const check=()=>window.__ready?resolve():Date.now()>deadline?reject(Error('UI did not boot')):setTimeout(check,20);check();
+        })`);
+        await frame();
+      };
+      await navigate(pathToFileURL(root).href + '?mock=1');
+      assert.equal(await evaluate('document.documentElement.dataset.theme'), 'github', 'Missing preference defaults to GitHub');
+      await evaluate(`openDrawer();document.querySelector('#theme').focus();`);
+      for (const expected of ['light','dark']) {
+        await send('Input.dispatchKeyEvent',{type:'keyDown',key:'ArrowDown',code:'ArrowDown',windowsVirtualKeyCode:40});
+        await send('Input.dispatchKeyEvent',{type:'keyUp',key:'ArrowDown',code:'ArrowDown',windowsVirtualKeyCode:40});
+        await evaluate(`new Promise((resolve,reject)=>{
+          const deadline=Date.now()+5000;
+          const check=()=>!S.themeBusy?resolve():Date.now()>deadline?reject(Error('Theme save did not settle')):requestAnimationFrame(check);check();
+        })`);
+        assert.deepEqual(await evaluate(`({theme:S.settings.theme,focus:document.activeElement.id})`),
+          {theme:expected,focus:'theme'},'Keyboard theme selection preserves focus for the next arrow key');
+      }
+      await evaluate('closeDrawer()');
+      const screenshotDir = process.env.ADOPRVIEW_THEME_SCREENSHOTS;
+      if (screenshotDir) await mkdir(screenshotDir, { recursive: true });
+      const screenshot = async name => {
+        if (!screenshotDir) return;
+        const { data } = await send('Page.captureScreenshot', { format: 'png' });
+        await writeFile(path.join(screenshotDir, name + '.png'), Buffer.from(data, 'base64'));
+      };
+      for (const [theme, background] of [['github','rgb(255, 255, 255)'],['light','rgb(243, 245, 251)'],['dark','rgb(14, 16, 20)']]) {
+        await evaluate('openDrawer()');
+        await evaluate(`new Promise((resolve,reject)=>{
+          const select=document.querySelector('#theme');
+          const old=window.MockHost.rpc.bind(window.MockHost);
+          window.themeCalls=[];
+          window.MockHost.rpc=async(method,p)=>{
+            window.themeCalls.push({method,...p});
+            if(method==='setTheme')try{return await old(method,p);}finally{window.MockHost.rpc=old;}
+            throw Error('Theme change must not invoke '+method);
+          };
+          document.querySelector('#refreshSeconds').value='777';
+          select.value='${theme}';
+          select.dispatchEvent(new Event('change',{bubbles:true}));
+          const check=()=>S.themeBusy?requestAnimationFrame(check):resolve();
+          check();
+        })`);
+        await frame();
+        assert.deepEqual(await evaluate('window.themeCalls'), [{method:'setTheme',theme}]);
+        assert.equal(await evaluate("document.querySelector('#refreshSeconds').value"),'777','Switching must preserve unfinished drawer edits');
+        assert.equal(await evaluate('getComputedStyle(document.body).backgroundColor'),background);
+        assert.equal(await evaluate('getComputedStyle(document.documentElement).colorScheme'),theme === 'dark' ? 'dark' : 'light');
+        assert.equal(await evaluate('document.activeElement?.id==="theme" || !!document.querySelector("#theme").focus'),true);
+        await evaluate(`document.querySelector('#theme').focus();`);
+        await frame();
+        assert.equal(await evaluate('getComputedStyle(document.activeElement).outlineStyle'),'solid');
+        await screenshot(theme + '-settings');
+
+        await evaluate(`closeDrawer();
+          window.themeFixture=structuredClone(S.snap);
+          S.expanded.add('sample-service-id:105');
+          const pr=S.snap.prs.find(p=>p.id===105);
+          pr.gates.checks={state:'human',label:'Needs review'};
+          pr.description+='\\n\\n> Review before merging.\\n\\n\`\`\`text\\nSynthetic code block\\n\`\`\`\\n\\n[A documentation link](https://example.com)';
+          pr.isDraft=true;
+          S.busy.add(pr.key+':approve');
+          for(const build of pr.failedBuilds)for(const task of build.tasks){
+            const key=logKey(pr,build.buildId,task.logId);
+            S.logs.set(key,'2026-01-01T10:00:00.000Z ##[error] Synthetic error\\n2026-01-01T10:00:01.000Z warning: Synthetic warning\\n2026-01-01T10:00:02.000Z --- PASS: Synthetic pass');
+            S.showTs.add(key);
+          }
+          S.runs.set('theme-run',{key:pr.key,runId:'theme-run',status:'failed',message:'Synthetic failed Fix; no process was started',output:'Synthetic CLI output\\nNo live commands',worktreePath:'/tmp/synthetic',worktreeRetained:true});
+          updateExplanation({key:pr.key,requestId:'theme-explain',sequence:1,status:'completed',message:'Synthetic summary',
+            output:'## Context\\nThe **offline component** renders \`code\` and [link](https://example.com).',coverage:['Synthetic fixture only']});
+          S.approvals.set(pr.key,{kind:'returned',message:'Synthetic response',response:'Synthetic provider output'});
+          renderRows();
+          document.querySelector('[data-key="sample-service-id:105"]').scrollIntoView({block:'start'});
+          toast('Synthetic error notification','error');`);
+        await frame();
+        const results = await evaluate(`(()=>{
+          const canvas=document.createElement('canvas');canvas.width=canvas.height=1;
+          const ctx=canvas.getContext('2d',{willReadFrequently:true});
+          const rgba=value=>{ctx.clearRect(0,0,1,1);ctx.fillStyle=value;ctx.fillRect(0,0,1,1);return [...ctx.getImageData(0,0,1,1).data].map((v,i)=>i===3?v/255:v);};
+          const blend=(a,b)=>a.slice(0,3).map((v,i)=>v*a[3]+b[i]*(1-a[3])).concat(1);
+          const bg=el=>{const chain=[];for(let n=el;n;n=n.parentElement)chain.unshift(n);return chain.reduce((c,n)=>blend(rgba(getComputedStyle(n).backgroundColor),c),[255,255,255,1]);};
+          const lum=c=>c.slice(0,3).map(v=>{v/=255;return v<=.04045?v/12.92:((v+.055)/1.055)**2.4;}).reduce((n,v,i)=>n+v*[.2126,.7152,.0722][i],0);
+          window.themeContrast=el=>{const b=bg(el),f=blend(rgba(getComputedStyle(el).color),b),l=[lum(b),lum(f)].sort((a,b)=>b-a);return (l[0]+.05)/(l[1]+.05);};
+          const scope=document.querySelector('[data-key="sample-service-id:105"]');
+          const selectors=['.title','.meta .id','.row-lane','.pill.ok','.pill.fail','.pill.human','.tag.draft','.card h3','.md','.md code','.md pre code','.md blockquote','.md a','.failed h3','.issues','.log','.log .e','.log .w','.log .s','.log .t','.run-output','.explain-output','.approval-response','.small'];
+          return selectors.map(selector=>{
+            const el=scope.querySelector(selector);
+            if(!el)return {selector,missing:true};
+            const cs=getComputedStyle(el);
+            return {selector,ratio:window.themeContrast(el),color:cs.color,background:cs.backgroundColor};
+          });
+        })()`);
+        for (const result of results) {
+          assert.ok(!result.missing, `${theme}: missing representative ${result.selector}`);
+          assert.ok(result.ratio >= 4.5, `${theme} ${result.selector}: contrast ${result.ratio.toFixed(2)} (${result.color} / ${result.background})`);
+        }
+        await screenshot(theme + '-details');
+        await evaluate(`openDrawer();`);
+        await frame();
+        for (const selector of ['.drawer h2','.help','.field label','.field input','.field select','.btn','.btn.primary']) {
+          const ratio=await evaluate(`window.themeContrast(document.querySelector(${JSON.stringify(selector)}))`);
+          assert.ok(ratio>=4.5,`${theme} ${selector}: contrast ${ratio.toFixed(2)}`);
+        }
+        const primary = await evaluate(`(()=>{const b=document.querySelector('.btn.primary');const r=b.getBoundingClientRect();return {x:r.x+r.width/2,y:r.y+r.height/2,background:getComputedStyle(b).backgroundColor};})()`);
+        await move(primary.x,primary.y); await frame();
+        const hovered = await evaluate(`({background:getComputedStyle(document.querySelector('.btn.primary')).backgroundColor,ratio:window.themeContrast(document.querySelector('.btn.primary'))})`);
+        assert.notEqual(hovered.background,primary.background,`${theme}: primary hover is visible`);
+        assert.ok(hovered.ratio>=4.5,`${theme}: primary hover contrast ${hovered.ratio}`);
+        await evaluate(`closeDrawer();`);
+        for (const width of [1600,900]) {
+          await send('Emulation.setDeviceMetricsOverride',{width,height:1000,deviceScaleFactor:1,mobile:false});
+          await frame();
+          assert.ok(await evaluate(`document.documentElement.scrollWidth<=innerWidth`), `${theme}: page itself should not overflow at ${width}`);
+          const tableScroll=await evaluate(`(()=>{const m=document.querySelector('main');m.scrollLeft=m.scrollWidth;return m.scrollLeft>0||m.scrollWidth<=m.clientWidth;})()`);
+          assert.equal(tableScroll,true,'Wide tables stay locally scrollable');
+          await screenshot(theme + '-' + width);
+        }
+        await evaluate(`openRowMenu({target:document.querySelector('[data-key="sample-service-id:105"] .title'),clientX:250,clientY:250,preventDefault(){}});`);
+        await frame();
+        assert.ok(await evaluate(`window.themeContrast(document.querySelector('#rowMenu button'))`)>=4.5,`${theme}: menu text contrast`);
+        await evaluate('closeRowMenu()');
+        const savedUrl=await evaluate('location.href');
+        await navigate(savedUrl);
+        assert.equal(await evaluate('S.settings.theme'),theme,'Saved mock hint survives reload (native persistence is covered separately)');
+        assert.equal(await evaluate('getComputedStyle(document.body).backgroundColor'),background);
+        await send('Emulation.setDeviceMetricsOverride',{width:1600,height:1000,deviceScaleFactor:1,mobile:false});
+      }
     });
 
     await send('Browser.close', {}, false);

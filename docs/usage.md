@@ -45,6 +45,23 @@ calls used see [DESIGN.md](DESIGN.md); for building and tests see
 - The current refresh interval is shown in the status bar and is configurable
   in Settings (default: 2 minutes; merge re-check: 10 minutes).
 
+### Themes
+
+Choose **Settings > Appearance > Theme**: **GitHub** (the default, inspired by
+GitHub's light web appearance), **Light Mode** (a softer indigo palette), or
+**Dark Mode**. Selection applies immediately and saves independently of other
+unfinished settings edits; no restart or separate Save is needed. A failed
+save restores the previous appearance and shows an error.
+
+The `theme` setting uses `github`, `light`, or `dark`. Existing settings without
+this key use GitHub; explicit choices and unrecognized settings are preserved.
+An unsupported theme from another version displays GitHub with a notice until
+you choose a supported theme. Themes cover the dashboard, Markdown/code/logs,
+settings and app-owned PoP framing, loading canvas and title bar (where Windows
+supports it). External ADO/sign-in pages, Windows security prompts, system
+dialogs and tray menus retain their own styling. No website CSS or OS-wide
+appearance setting is changed.
+
 ### Startup, exit and error logs
 
 Lifecycle diagnostics are written to

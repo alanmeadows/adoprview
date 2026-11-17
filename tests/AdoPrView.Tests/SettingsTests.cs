@@ -19,6 +19,59 @@ static class SettingsTests
             Check(!File.Exists(path), "Loading created a settings file");
             Check(!store.Current.IgnoreDrafts, "Draft ignoring must be opt-in");
             Check(store.Current.Notifications && store.Current.Sound, "New settings should enable notifications and sound");
+            Check(store.Current.Theme == "github", "New settings must default to GitHub");
+        }));
+        foreach (var original in new[] { "github", "light", "dark", "future-theme" })
+            await test($"theme bridge persists supported choices and preserves unrelated settings from {original}", () => InDir(dir =>
+            {
+                var path = Path.Combine(dir, "settings.json");
+                File.WriteAllText(path, JsonSerializer.Serialize(new { theme = original, refreshSeconds = 45,
+                    hidden = new[] { "offline:123" }, futureTop = new { preserve = true } }));
+                var store = new SettingsStore(path);
+                Check(store.Current.Theme == original, "Loading overwrote an explicit theme");
+                using var http = new HttpClient();
+                var service = new PrService(new AdoClient(http, _ => Task.FromResult(new AuthenticationHeaderValue("Bearer", "offline"))), store);
+                string? reply = null, applied = null;
+                var kicks = 0;
+                var bridge = new Bridge(service, store, text => { reply = text; return Task.CompletedTask; }, _ => kicks++, themeChanged: theme => applied = theme);
+                foreach (var theme in new[] { "dark", "light", "github" })
+                {
+                    bridge.HandleAsync(new JsonObject { ["id"] = 1, ["method"] = "setTheme",
+                        ["params"] = new JsonObject { ["theme"] = theme } }.ToJsonString()).GetAwaiter().GetResult();
+                    Check(reply is not null && !reply.Contains("\"error\"") && applied == theme, "Theme bridge failed: " + reply);
+                    var reloaded = new SettingsStore(path);
+                    Check(reloaded.Current.Theme == theme && reloaded.Current.RefreshSeconds == 45 &&
+                        reloaded.Current.Hidden.SequenceEqual(["offline:123"]) && reloaded.Current.Extra!["futureTop"].GetProperty("preserve").GetBoolean(),
+                        "Theme save changed unrelated/unknown settings");
+                }
+                Check(kicks == 0, "Appearance change refreshed PRs");
+                var before = File.ReadAllText(path);
+                applied = null;
+                bridge.HandleAsync("""{"id":2,"method":"setTheme","params":{"theme":"unsupported"}}""").GetAwaiter().GetResult();
+                Check(reply!.Contains("\"error\"") && applied is null && File.ReadAllText(path) == before,
+                    "Unsupported theme was accepted or applied");
+                // Older clients and stale general-settings forms cannot reset the independently saved theme.
+                store.SetTheme("dark");
+                bridge.HandleAsync("""{"id":3,"method":"saveSettings","params":{"settings":{"theme":"github","refreshSeconds":90}}}""")
+                    .GetAwaiter().GetResult();
+                Check(new SettingsStore(path).Current.Theme == "dark", "General settings save reset the selected theme");
+            }));
+        await test("theme legacy default does not rewrite settings and failed saves roll back before native application", () => InDir(dir =>
+        {
+            var path = Path.Combine(dir, "settings.json");
+            const string text = """{"refreshSeconds":45,"futureTop":"KEEP"}""";
+            File.WriteAllText(path, text);
+            var store = new SettingsStore(path);
+            Check(store.Current.Theme == "github" && File.ReadAllText(path) == text, "Legacy theme migration rewrote settings");
+            Directory.CreateDirectory(path + ".tmp");
+            using var http = new HttpClient();
+            var service = new PrService(new AdoClient(http, _ => Task.FromResult(new AuthenticationHeaderValue("Bearer", "offline"))), store);
+            string? reply = null;
+            var applied = false;
+            var bridge = new Bridge(service, store, value => { reply = value; return Task.CompletedTask; }, _ => { }, themeChanged: _ => applied = true);
+            bridge.HandleAsync("""{"id":1,"method":"setTheme","params":{"theme":"dark"}}""").GetAwaiter().GetResult();
+            Check(reply!.Contains("\"error\"") && !applied && store.Current.Theme == "github" && File.ReadAllText(path) == text,
+                "Failed theme save changed current settings, applied native chrome, or damaged the original file");
         }));
         foreach (var notifications in new[] { false, true })
         {

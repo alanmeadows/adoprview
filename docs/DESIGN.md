@@ -8,7 +8,7 @@ enough detail inline that you rarely need to click into ADO.
 
 ```
 ┌──────────────── AdoPrView.exe (.NET 10, WPF) ─────────────────┐
-│  MainWindow (dark title bar, taskbar overlay badge, tray icon) │
+│  MainWindow (themed title bar, taskbar overlay badge, tray icon)│
 │  └─ WebView2  ── https://app.local/ (wwwroot, offline assets)  │
 │        ▲  postMessage JSON-RPC  │  push events                 │
 │        │                        ▼                              │
@@ -19,7 +19,7 @@ enough detail inline that you rarely need to click into ADO.
 └────────────────────────────────────────────────────────────────┘
 ```
 
-* **Host:** WPF window hosting WebView2. Native pieces: dark immersive title
+* **Host:** WPF window hosting WebView2. Native pieces: theme-aware title
   bar, tray icon with balloon notifications when a PR newly needs human action or
   becomes blocked. A bespoke four-note chime plays once per update when one or
   more PRs enter Needs Human, even in the foreground. Initial load, unchanged
@@ -29,6 +29,11 @@ enough detail inline that you rarely need to click into ADO.
 * **UI:** plain HTML/CSS/JS (no build step) served from a WebView2 virtual host.
   `marked` + `DOMPurify` are vendored for safe Markdown descriptions.
   `?mock=1` runs the UI in any browser against fixture data for fast iteration.
+  Semantic CSS palettes provide GitHub (light, default), Light Mode and Dark
+  Mode. Native settings own the selection; a derived navigation hint applies
+  it before first paint. A dedicated transactional theme RPC saves independently
+  of unfinished settings edits and updates app-owned native chrome. External
+  PoP/sign-in content and Windows system surfaces are not restyled.
 * **Auth:** `AZURE_DEVOPS_EXT_PAT` → `AZURE_DEVOPS_PAT` → `az account
   get-access-token --resource 499b84ac-…` (cached until expiry). Tokens never
   reach the UI.

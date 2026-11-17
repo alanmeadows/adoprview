@@ -24,7 +24,7 @@ function onHostMessage(m) {
   } else if (m.event === 'snapshot') {
     setSnapshot(m.data);
   } else if (m.event === 'settings') {
-    S.settings = m.data; render();
+    S.settings = m.data; applySavedTheme(); render();
   } else if (m.event === 'toast') {
     toast(m.data.text, m.data.kind);
   } else if (m.event === 'copilotRun') {
@@ -66,6 +66,7 @@ const S = {
   explanations: new Map(),
   rowMenu: null,
   drawer: false,
+  themeBusy: false,
   discovered: null,
 };
 
@@ -1130,6 +1131,13 @@ function renderDrawer() {
   const titles = new Map(S.snap.prs.map((p) => [p.key.toLowerCase(), p]));
   const disc = S.discovered;
   $('#drawerBody').innerHTML = `
+    <div class="section">
+      <h4>Appearance</h4>
+      <p class="help" id="themeHelp">Changes apply and save immediately. GitHub uses GitHub's light web appearance.</p>
+      <div class="field"><label for="theme">Theme</label><select id="theme" aria-describedby="themeHelp" ${S.themeBusy ? 'disabled' : ''}>
+        ${[['github', 'GitHub'], ['light', 'Light Mode'], ['dark', 'Dark Mode']].map(([value, label]) => `<option value="${value}" ${AppTheme.effective(st.theme) === value ? 'selected' : ''}>${label}</option>`).join('')}
+      </select></div>
+    </div>
     ${S.snap.approvalProviderError ? `<div class="section"><h4>Approval provider</h4><p class="help error">${esc(S.snap.approvalProviderError)}</p></div>` : ''}
     ${S.snap.approvalProvider && S.approvalSettings ? `<div class="section">
       <h4>${esc(providerName())}</h4>
@@ -1196,6 +1204,40 @@ async function saveSettings(patch) {
   const st = { ...S.settings, ...patch };
   S.settings = await rpc('saveSettings', { settings: st });
   render();
+}
+
+function applySavedTheme() {
+  AppTheme.apply(S.settings?.theme);
+  AppTheme.remember(S.settings?.theme);
+}
+
+async function changeTheme(select) {
+  if (S.themeBusy) return;
+  const previous = S.settings?.theme;
+  const selected = select.value;
+  const hadFocus = document.activeElement === select;
+  S.themeBusy = true;
+  select.disabled = true;
+  AppTheme.apply(selected);
+  try {
+    const saved = await rpc('setTheme', { theme: selected });
+    if (saved?.theme !== selected) throw new Error('The host did not confirm the selected theme.');
+    S.settings = saved;
+    applySavedTheme();
+  } catch (e) {
+    AppTheme.apply(previous);
+    select.value = AppTheme.effective(previous);
+    toast('Theme was not saved: ' + (e.message || String(e)), 'error');
+  } finally {
+    S.themeBusy = false;
+    const current = $('#theme');
+    if (current) {
+      current.value = AppTheme.effective(S.settings?.theme);
+      current.disabled = false;
+      if (hadFocus && S.drawer && document.activeElement === document.body)
+        current.focus({ preventScroll: true });
+    }
+  }
 }
 
 async function onDrawerAction(act, el) {
@@ -1330,6 +1372,9 @@ function wire() {
   $('#settingsBtn').addEventListener('click', openDrawer);
   $('#closeDrawer').addEventListener('click', closeDrawer);
   $('#scrim').addEventListener('click', closeDrawer);
+  $('#drawerBody').addEventListener('change', (e) => {
+    if (e.target.id === 'theme') changeTheme(e.target);
+  });
   document.addEventListener('keydown', (e) => {
     if (e.key === 'Escape' && S.rowMenu) { e.preventDefault(); closeRowMenu(); flushRowUpdates(); return; }
     const inInput = /INPUT|TEXTAREA|SELECT/.test(document.activeElement?.tagName) || document.activeElement?.isContentEditable;
@@ -1360,6 +1405,9 @@ async function boot() {
   else window.MockHost.onEvent = onHostMessage;
   const init = await rpc('init');
   S.settings = init.settings;
+  applySavedTheme();
+  if (S.settings.theme != null && !AppTheme.supported.includes(S.settings.theme))
+    toast('The saved theme is not supported by this version. Showing GitHub without changing your preference.', 'info');
   for (const run of init.runs || []) updateCopilotRun(run);
   for (const explanation of init.explanations || []) updateExplanation(explanation);
   setSnapshot(init.snapshot);
@@ -1373,4 +1421,4 @@ async function boot() {
   window.__ready = true;
 }
 
-boot().catch((e) => { document.body.insertAdjacentHTML('beforeend', `<pre style="color:#f55">${esc(e.stack || e)}</pre>`); });
+boot().catch((e) => { document.body.insertAdjacentHTML('beforeend', `<pre class="boot-error" role="alert">${esc(e.stack || e)}</pre>`); });

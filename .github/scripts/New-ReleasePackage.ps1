@@ -82,6 +82,7 @@ foreach ($component in $components) {
     }
 }
 Copy-Item -LiteralPath (Join-Path $root 'LICENSE') -Destination (Join-Path $stage 'LICENSE')
+$index.Add("- Primer primitives 11.10.0 (adapted light color tokens): licenses/Primer/LICENSE.txt")
 $notice = @"
 ADO PR View $version (self-contained Windows x64)
 
