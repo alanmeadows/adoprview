@@ -1,5 +1,6 @@
 using System.ComponentModel;
 using System.IO;
+using System.Runtime.InteropServices;
 using System.Text.Json;
 using System.Text.RegularExpressions;
 using GitHub.Copilot;
@@ -35,6 +36,33 @@ internal sealed class ExplainModel : IExplainModel
         return environment;
     }
 
+    internal static CopilotClientOptions ClientOptions(string home, string appDirectory, Architecture processArchitecture)
+    {
+        // SDK 1.0.29 resolves by OSArchitecture, which differs from the published process under emulation.
+        var rid = processArchitecture switch
+        {
+            Architecture.X64 => "win-x64",
+            Architecture.Arm64 => "win-arm64",
+            _ => throw new PlatformNotSupportedException($"Explain does not support process architecture '{processArchitecture}'."),
+        };
+        var native = Path.Combine(Path.GetFullPath(appDirectory), "runtimes", rid, "native");
+        foreach (var name in new[] { "copilot-runtime.exe", "runtime.node", "copilot_runtime.dll" })
+        {
+            var path = Path.Combine(native, name);
+            if (!File.Exists(path) || new FileInfo(path).Length == 0)
+                throw new InvalidOperationException($"Explain's bundled Copilot runtime file is missing or empty at '{path}'. Reinstall the complete application package.");
+        }
+        return new CopilotClientOptions
+        {
+            Connection = RuntimeConnection.ForStdio(Path.Combine(native, "copilot-runtime.exe")),
+            BaseDirectory = home,
+            WorkingDirectory = home,
+            Environment = ChildEnvironment(),
+            UseLoggedInUser = true,
+            LogLevel = CopilotLogLevel.Error,
+        };
+    }
+
     async Task<CopilotClient> ClientAsync(CancellationToken ct)
     {
         await _startup.WaitAsync(ct);
@@ -42,14 +70,7 @@ internal sealed class ExplainModel : IExplainModel
         {
             if (_client is not null) return _client;
             Directory.CreateDirectory(_home);
-            var client = new CopilotClient(new CopilotClientOptions
-            {
-                BaseDirectory = _home,
-                WorkingDirectory = _home,
-                Environment = ChildEnvironment(),
-                UseLoggedInUser = true,
-                LogLevel = CopilotLogLevel.Error,
-            });
+            var client = new CopilotClient(ClientOptions(_home, AppContext.BaseDirectory, RuntimeInformation.ProcessArchitecture));
             try
             {
                 await client.StartAsync(ct);
