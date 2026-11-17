@@ -60,6 +60,9 @@ Records are flushed to disk immediately. Each session has at most two 512 KiB lo
 files (`events.jsonl` and `events.previous.jsonl`); the ten most recent inactive
 sessions are retained in addition to live instances. Concurrent instances have
 separate locked sessions and are not mistaken for terminated processes.
+Inspection and retention use a separate maintenance lock; a concurrent startup
+records `prior-session-inspection-deferred` if another instance is maintaining
+the history, and a later startup resumes maintenance.
 An incomplete prior initialization is recorded as `prior-session-unavailable`,
 without inferring an exit or preventing inspection of other sessions.
 The next start reports a prior session without a clean completion record as

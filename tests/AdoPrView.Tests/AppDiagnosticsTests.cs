@@ -113,6 +113,40 @@ static class AppDiagnosticsTests
             Check(failures == 1, "Repeated failure notifications");
             using var brokenReporter = new AppDiagnostics(blocked, _ => throw new InvalidOperationException("Broken warning surface"));
             Check(!brokenReporter.Healthy && !brokenReporter.Record("window-shown"), "Reporting failure became success");
+            Directory.CreateDirectory(Path.Combine(root, "maintenance.lock"));
+            using var brokenMaintenance = new AppDiagnostics(root, _ => failures++);
+            Check(!brokenMaintenance.Healthy && failures == 2 && brokenMaintenance.Record("window-shown"),
+                "A maintenance access failure was mistaken for expected lock contention or blocked further logging");
+        }));
+
+        await test("Diagnostics serialize concurrent inspection and resume retention after maintenance contention", () => WithRoot(root =>
+        {
+            for (var i = 0; i < AppDiagnostics.RetainedSessions + 3; i++)
+            {
+                var directory = Path.Combine(root, $"20000101T000000{i:000}Z-" + Guid.NewGuid().ToString("N"));
+                Directory.CreateDirectory(directory);
+                File.WriteAllText(Path.Combine(directory, "session.lock"), "");
+                File.WriteAllText(Path.Combine(directory, "events.jsonl"), "{\"event\":\"startup\"}\n");
+            }
+            using (var maintenance = new FileStream(Path.Combine(root, "maintenance.lock"), FileMode.OpenOrCreate,
+                FileAccess.ReadWrite, FileShare.None))
+            {
+                using var active = new AppDiagnostics(root, _ => { });
+                using var concurrent = new AppDiagnostics(root, _ => { });
+                Check(active.Healthy && concurrent.Healthy &&
+                    HasEvent(active, "prior-session-inspection-deferred") && HasEvent(concurrent, "prior-session-inspection-deferred"),
+                    "Expected maintenance contention was treated as a logging failure or ignored");
+                Check(Directory.GetDirectories(root).Length == AppDiagnostics.RetainedSessions + 5,
+                    "A concurrent inspector pruned sessions without the maintenance lease");
+                active.Complete("window-close");
+                concurrent.Complete("window-close");
+            }
+            using var next = new AppDiagnostics(root, _ => { });
+            Check(next.Healthy && !HasEvent(next, "prior-session-inspection-deferred") &&
+                HasEvent(next, "prior-session-without-clean-end") &&
+                Directory.GetDirectories(root).Length == AppDiagnostics.RetainedSessions + 1,
+                "Inspection and bounded retention did not resume after maintenance contention");
+            next.Complete("window-close");
         }));
 
         await test("Diagnostics fatal record cannot be followed by a clean process-exit marker", () => WithRoot(root =>
@@ -125,6 +159,45 @@ static class AppDiagnosticsTests
                 !HasEvent(log, "process-exit-clean"), "Fatal exit classified as clean");
         }));
 
+        await test("Diagnostics fatal state survives later completion and remains unclean at next startup", () => WithRoot(root =>
+        {
+            using var log = new AppDiagnostics(root, _ => { });
+            log.Fatal(new InvalidOperationException("SECRET"), "appdomain-terminating");
+            log.Complete("application-run-returned");
+            log.ProcessExit();
+            Check(HasEvent(log, "fatal-unhandled") && HasEvent(log, "process-exit-without-completion") &&
+                !HasEvent(log, "session-ended") && !HasEvent(log, "process-exit-clean"), "Completion cleared fatal state");
+            using var next = new AppDiagnostics(root, _ => { });
+            Check(Events(next).Any(line => line.Contains("\"prior-session-without-clean-end\"") &&
+                line.Contains(log.SessionId)), "Next startup classified a fatal session as clean");
+            next.Complete("window-close");
+        }));
+
+        await test("Diagnostics timed-out probe is terminated and reaped before its session directory is deleted", async () =>
+        {
+            var root = Path.Combine(Path.GetTempPath(), "ado-diagnostics-" + Guid.NewGuid().ToString("N"));
+            Directory.CreateDirectory(root);
+            try
+            {
+                var timedOut = false;
+                try { await RunProbe(root, "hang", TimeSpan.FromMilliseconds(100)); }
+                catch (TimeoutException) { timedOut = true; }
+                Check(timedOut, "Hung probe did not preserve its timeout");
+                var directory = Directory.GetDirectories(root).Single();
+                using var record = JsonDocument.Parse(File.ReadLines(Path.Combine(directory, "events.jsonl")).First());
+                var pid = record.RootElement.GetProperty("pid").GetInt32();
+                try
+                {
+                    using var child = Process.GetProcessById(pid);
+                    Check(child.HasExited, "Timed-out probe was left running");
+                }
+                catch (ArgumentException) { } // Reaped processes may no longer be present.
+                using var lease = new FileStream(Path.Combine(directory, "session.lock"), FileMode.Open,
+                    FileAccess.ReadWrite, FileShare.None);
+            }
+            finally { Directory.Delete(root, true); }
+        });
+
         await test("Diagnostics real process-exit hook records clean return versus early exit without crashing installed app", async () =>
         {
             var root = Path.Combine(Path.GetTempPath(), "ado-diagnostics-" + Guid.NewGuid().ToString("N"));
@@ -134,18 +207,7 @@ static class AppDiagnosticsTests
                 foreach (var mode in new[] { "clean", "early-exit", "unobserved" })
                 {
                     var directory = Path.Combine(root, mode);
-                    var start = new ProcessStartInfo(Environment.ProcessPath!) { UseShellExecute = false,
-                        RedirectStandardOutput = true, RedirectStandardError = true };
-                    start.ArgumentList.Add("--diagnostics-probe");
-                    start.ArgumentList.Add(directory);
-                    start.ArgumentList.Add(mode);
-                    using var child = Process.Start(start)!;
-                    var stdout = child.StandardOutput.ReadToEndAsync();
-                    var stderr = child.StandardError.ReadToEndAsync();
-                    await child.WaitForExitAsync().WaitAsync(TimeSpan.FromSeconds(20));
-                    await Task.WhenAll(stdout, stderr);
-                    Check(child.ExitCode == (mode == "early-exit" ? 7 : 0), "Wrong probe exit");
-                    var lines = File.ReadAllLines(Path.Combine(Directory.GetDirectories(directory).Single(), "events.jsonl"));
+                    var lines = await RunProbe(directory, mode);
                     var last = JsonDocument.Parse(lines[^1]).RootElement.GetProperty("event").GetString();
                     Check(last == (mode == "early-exit" ? "process-exit-without-completion" : "process-exit-clean"),
                         "ProcessExit hook lost completion state");
@@ -159,6 +221,40 @@ static class AppDiagnosticsTests
             }
             finally { Directory.Delete(root, true); }
         });
+    }
+
+    static async Task<string[]> RunProbe(string directory, string mode, TimeSpan? exitTimeout = null)
+    {
+        var start = new ProcessStartInfo(Environment.ProcessPath!) { UseShellExecute = false,
+            RedirectStandardOutput = true, RedirectStandardError = true };
+        start.ArgumentList.Add("--diagnostics-probe");
+        start.ArgumentList.Add(directory);
+        start.ArgumentList.Add(mode);
+        using var child = Process.Start(start)!;
+        var ready = child.StandardOutput.ReadLineAsync();
+        var stderr = child.StandardError.ReadToEndAsync();
+        Task<string>? stdout = null;
+        try
+        {
+            Check(await ready.WaitAsync(TimeSpan.FromSeconds(20)) == "diagnostics-probe-ready", "Probe did not initialize diagnostics");
+            stdout = child.StandardOutput.ReadToEndAsync();
+            await child.WaitForExitAsync().WaitAsync(exitTimeout ?? TimeSpan.FromSeconds(20));
+            await Task.WhenAll(stdout, stderr);
+            Check(child.ExitCode == (mode == "early-exit" ? 7 : 0), "Wrong probe exit");
+            return File.ReadAllLines(Path.Combine(Directory.GetDirectories(directory).Single(), "events.jsonl"));
+        }
+        finally
+        {
+            if (!child.HasExited)
+            {
+                try { child.Kill(entireProcessTree: true); }
+                catch (InvalidOperationException) when (child.HasExited) { }
+            }
+            await child.WaitForExitAsync();
+            await ready;
+            if (stdout is not null) await stdout;
+            await stderr;
+        }
     }
 
     static Task WithRoot(Action<string> run)

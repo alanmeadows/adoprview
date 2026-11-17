@@ -24,6 +24,7 @@ internal sealed class AppDiagnostics : IDisposable
     bool failureReported;
     bool disposed;
     bool completed;
+    bool fatal;
 
     internal string SessionId { get; } = DateTime.UtcNow.ToString("yyyyMMdd'T'HHmmssfff'Z'") + "-" + Guid.NewGuid().ToString("N");
     internal string DirectoryPath { get; }
@@ -86,13 +87,17 @@ internal sealed class AppDiagnostics : IDisposable
     internal void Complete(string reason)
     {
         lock (gate)
+        {
+            if (fatal) return;
             completed = Record("session-ended", reason);
+        }
     }
 
     internal void Fatal(Exception? exception, string reason)
     {
         lock (gate)
         {
+            fatal = true;
             completed = false;
             Record("fatal-unhandled", reason, exception);
         }
@@ -112,6 +117,18 @@ internal sealed class AppDiagnostics : IDisposable
 
     void InspectPreviousSessions(string root)
     {
+        FileStream maintenance;
+        try
+        {
+            maintenance = new FileStream(Path.Combine(root, "maintenance.lock"), FileMode.OpenOrCreate,
+                FileAccess.ReadWrite, FileShare.None);
+        }
+        catch (IOException ex) when ((ex.HResult & 0xffff) is 32 or 33)
+        {
+            Record("prior-session-inspection-deferred", "another-instance-maintaining");
+            return;
+        }
+        using var maintenanceLease = maintenance;
         var inactive = new List<string>();
         foreach (var directory in Directory.GetDirectories(root).OrderDescending(StringComparer.Ordinal))
         {

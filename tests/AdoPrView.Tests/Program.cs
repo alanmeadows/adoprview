@@ -7,6 +7,8 @@ if (args is ["--diagnostics-probe", var diagnosticRoot, var mode])
 {
     var log = new AppDiagnostics(diagnosticRoot, _ => Environment.Exit(9));
     log.RegisterProcessHandlers();
+    Console.WriteLine("diagnostics-probe-ready");
+    if (mode == "hang") await Task.Delay(Timeout.InfiniteTimeSpan);
     if (mode == "early-exit") Environment.Exit(7);
     if (mode == "unobserved")
     {
