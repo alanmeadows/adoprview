@@ -168,7 +168,13 @@ static class PopPaneTests
                 Background = new System.Windows.Media.SolidColorBrush(System.Windows.Media.Color.FromRgb(0x0e, 0x10, 0x14)) };
             var closeRequests = 0;
             var finishing = false;
-            window.Closing += (_, e) => { if (!finishing) { closeRequests++; e.Cancel = true; } };
+            window.Closing += (_, e) =>
+            {
+                if (finishing) return;
+                closeRequests++;
+                e.Cancel = true;
+                window.Hide();
+            };
             var surfaces = new List<CoreWebView2>();
             var popupReady = new TaskCompletionSource<CoreWebView2>(TaskCreationOptions.RunContinuationsAsynchronously);
             pane.SurfaceCreated += core =>
@@ -211,14 +217,29 @@ static class PopPaneTests
                         var popupView = pane.Popup;
                         Check(pane.Popup is not null && child.Environment.UserDataFolder == core.Environment.UserDataFolder &&
                             !child.Settings.IsWebMessageEnabled && !child.Settings.AreHostObjectsAllowed, "Popup isolation/session mismatch");
+                        var popupClosed = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+                        child.WindowCloseRequested += (_, _) =>
+                        {
+                            Check(!popupView!.IsDisposed, "Popup disposed inside the WebView callback");
+                            popupClosed.TrySetResult();
+                        };
                         await child.ExecuteScriptAsync("setTimeout(() => { window.close(); window.close(); }, 20);");
-                        await WaitUntil(() => pane.Popup is null);
+                        await popupClosed.Task.WaitAsync(TimeSpan.FromSeconds(15));
+                        await window.Dispatcher.InvokeAsync(() => { }, DispatcherPriority.ApplicationIdle);
                         Check(popupView!.IsDisposed && closeRequests == 0 && window.IsVisible &&
-                            window.WindowState == state && pane.Session.IsOpen,
+                            dashboard.IsVisible && window.WindowState == state && pane.Session.IsOpen && pane.Popup is null,
                             "Website popup close reached the dashboard window instead of closing only the popup");
+                        var paneClosed = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+                        void Closed(object? sender, object args) => paneClosed.TrySetResult();
+                        core.WindowCloseRequested += Closed;
+                        // Chromium only permits a top-level script close with a single history entry.
+                        await core.CallDevToolsProtocolMethodAsync("Page.resetNavigationHistory", "{}");
                         await core.ExecuteScriptAsync("setTimeout(() => window.close(), 20);");
-                        await WaitUntil(() => !pane.Session.IsOpen);
-                        Check(closeRequests == 0 && window.IsVisible && window.WindowState == state && pane.Visibility == Visibility.Collapsed,
+                        await paneClosed.Task.WaitAsync(TimeSpan.FromSeconds(15));
+                        core.WindowCloseRequested -= Closed;
+                        await window.Dispatcher.InvokeAsync(() => { }, DispatcherPriority.ApplicationIdle);
+                        Check(closeRequests == 0 && window.IsVisible && dashboard.IsVisible && window.WindowState == state &&
+                            !pane.Session.IsOpen && pane.Visibility == Visibility.Collapsed,
                             "Website pane close reached the dashboard window or changed its state");
                         await Navigate(core, () => pane.OpenAsync(target));
                     }
@@ -236,6 +257,21 @@ static class PopPaneTests
                     await WaitUntil(() => pane.Browser.ContainsFocus);
                     await pane.CheckAfterReturnAsync();
                     Check(reads.Count == 5 && reads[^1].Id == 456, "Native host change lost website-to-dashboard policy recheck");
+                    var staleClose = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+                    void ChangeSelection(object? sender, object args)
+                    {
+                        pane.Session.Open(target);
+                        staleClose.TrySetResult();
+                    }
+                    core.WindowCloseRequested += ChangeSelection;
+                    await core.CallDevToolsProtocolMethodAsync("Page.resetNavigationHistory", "{}");
+                    await core.ExecuteScriptAsync("setTimeout(() => window.close(), 20);");
+                    await staleClose.Task.WaitAsync(TimeSpan.FromSeconds(15));
+                    core.WindowCloseRequested -= ChangeSelection;
+                    await window.Dispatcher.InvokeAsync(() => { }, DispatcherPriority.ApplicationIdle);
+                    Check(pane.Session.IsOpen && pane.Session.Selection!.Target == target && reads.Count == 5 &&
+                        closeRequests == 0 && window.IsVisible, "A stale website close affected a newer PR selection");
+                    await Navigate(core, () => { core.Navigate(target.Url); return Task.CompletedTask; });
                     var shot = Environment.GetEnvironmentVariable("ADOPRVIEW_POP_SCREENSHOT");
                     if (!string.IsNullOrEmpty(shot))
                     {

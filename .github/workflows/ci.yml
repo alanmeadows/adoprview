@@ -36,6 +36,8 @@ jobs:
         run: dotnet build tests/AdoPrView.Tests -c Release -warnaserror
 
       - name: Native tests
+        env:
+          ADOPRVIEW_TEST_POP_WEBVIEW: '1'
         run: dotnet run --project tests/AdoPrView.Tests -c Release --no-build
 
       - name: Frontend tests

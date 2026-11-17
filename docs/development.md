@@ -97,10 +97,16 @@ neighboring action targets. All approval writes in these checks are intercepted.
 synthetic fixtures. The screenshots in [images](images) were captured from that
 mock UI with synthetic data.
 
-The opt-in native PoP check intercepts all website requests with synthetic pages
+CI and release checks enable the native PoP regression with the installed
+WebView2 Evergreen Runtime; the WebView2 SDK is not downgraded.
+The same check can be enabled locally. It intercepts all website requests with synthetic pages
 and uses a disposable browser profile. It exercises sign-in popup/page
 `window.close()` in normal and maximized windows, captured-policy rechecks,
-host disposal and ordinary deliberate window close, without real sign-in or PR writes:
+stale-close selection isolation, host disposal and ordinary deliberate window close,
+without real sign-in or PR writes. The fixture emulates close-to-tray so an
+unexpected host close cannot pass merely because the process remains alive.
+These synthetic checks do not establish that the full tenant sign-in flow in
+[#15](https://github.com/alanmeadows/adoprview/issues/15) is resolved; human validation remains outstanding.
 
 ```powershell
 $env:ADOPRVIEW_TEST_FILTER = 'Native PoP WebView2'
