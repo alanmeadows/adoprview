@@ -1,6 +1,14 @@
-The two real cat photographs in VideoAssets are not AI generated.
-Their Wikimedia Commons file pages identify the source as the uploader's
-own work and apply CC0 1.0 Universal Public Domain Dedication:
+The eight real cat photographs in VideoAssets are not AI generated and are
+not covered by the application's MIT license. Five are CC0; three use the
+free Unsplash License. No Pixabay or Unsplash+ content is bundled.
+Source/license pages and actual photos verified 2026-11-18.
+Per-asset SHA-256 values for redistributed JPEGs are in VideoAssets/cats.json.
+The images are inputs to this code-explainer, not a standalone stock library.
+
+CC0 photographs
+---------------
+Their Wikimedia Commons pages identify the source as the uploader's own work
+and apply CC0 1.0 Universal Public Domain Dedication:
 https://creativecommons.org/publicdomain/zero/1.0/
 
 yawn.jpg
@@ -15,8 +23,60 @@ Source: https://commons.wikimedia.org/wiki/File:Ginger_kitten_with_an_orange_rub
 Downloaded derivative: 960px Wikimedia thumbnail, no additional modification.
 https://thumb.wikimedia.org/wikipedia/commons/thumb/9/95/Ginger_kitten_with_an_orange_rubber_rugby.jpg/960px-Ginger_kitten_with_an_orange_rubber_rugby.jpg
 
-Source/license pages and actual photos verified 2026-11-17.
-Per-asset SHA-256 values for the redistributed thumbnails are in
-VideoAssets/cats.json. Attribution is also shown on each cat scene.
+mischief.jpg
+Author: Sindugab
+Source: https://commons.wikimedia.org/wiki/File:Playing_time_of_our_cat.jpg
+Downloaded derivative: 960px Wikimedia thumbnail, no additional modification.
+https://thumb.wikimedia.org/wikipedia/commons/thumb/5/58/Playing_time_of_our_cat.jpg/960px-Playing_time_of_our_cat.jpg
+
+cuddle.jpg
+Author: N1kos.a98
+Source: https://commons.wikimedia.org/wiki/File:Erik_THE_cat.jpg
+Downloaded derivative: 960px Wikimedia thumbnail, no additional modification.
+https://thumb.wikimedia.org/wikipedia/commons/thumb/2/25/Erik_THE_cat.jpg/960px-Erik_THE_cat.jpg
+
+duo.jpg
+Author: Jeromi Mikhael
+Source: https://commons.wikimedia.org/wiki/File:A_black_and_an_orange_kitten_17.jpg
+Downloaded derivative: 1920px Wikimedia thumbnail, no additional modification.
+https://thumb.wikimedia.org/wikipedia/commons/thumb/5/5a/A_black_and_an_orange_kitten_17.jpg/1920px-A_black_and_an_orange_kitten_17.jpg
+
 CC0 does not require the generated video's source or license to be shared.
 The uploader's provenance claim is not an independent rights guarantee.
+
+Unsplash photographs
+--------------------
+Each individual source page explicitly identifies the photograph as free
+under the Unsplash License, not Unsplash+. The source photos were published
+in 2017-2018. Downloaded derivatives are 960px-wide quality-85 JPEGs from
+Unsplash's image CDN, with no crop. Rendering may crop, pan, overlay or animate
+the photos as part of a new narrated audiovisual explanation.
+
+cool.jpg
+Author: Raoul Droog
+Source: https://unsplash.com/photos/russian-blue-cat-wearing-yellow-sunglasses-yMSecCHsIBc
+Download: https://images.unsplash.com/photo-1533738363-b7f9aef128ce?fm=jpg&q=85&w=960&fit=max
+
+peek.jpg
+Author: Alexander London
+Source: https://unsplash.com/photos/brown-tabby-cat-on-white-stairs-mJaD10XeD7w
+Download: https://images.unsplash.com/photo-1495360010541-f48722b34f7d?fm=jpg&q=85&w=960&fit=max
+
+judge.jpg
+Author: Manja Vitolic
+Source: https://unsplash.com/photos/black-and-white-cat-lying-on-brown-bamboo-chair-inside-room-gKXKBY-C-Dk
+Download: https://images.unsplash.com/photo-1514888286974-6c03e2ca1dba?fm=jpg&q=85&w=960&fit=max
+
+Unsplash License: https://unsplash.com/license
+Longform text retrieved 2026-11-18:
+
+Unsplash grants you an irrevocable, nonexclusive, worldwide copyright license
+to download, copy, modify, distribute, perform, and use images from Unsplash
+for free, including for commercial purposes, without permission from or
+attributing the photographer or Unsplash. This license does not include the
+right to compile images from Unsplash to replicate a similar or competing
+service.
+
+The license summary additionally prohibits selling images without significant
+modification. This application neither sells unchanged photos nor replicates
+an image service. Attribution is retained here, not overlaid on video scenes.

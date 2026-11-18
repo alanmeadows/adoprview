@@ -385,8 +385,12 @@ in native memory, never sent to Copilot or the WebView.
 
 PR source is sent to Copilot for storyboard generation. Narration text is sent
 to the explicitly selected Azure Speech resource and billed to its subscription.
-Rendering and the bundled, attributed CC0 real-cat photos stay on this computer;
-the video is not uploaded or posted to TikTok. Captions are approximate phrase
+Rendering and the bundled real-cat photos stay on this computer. The curated
+catalog includes CC0 and free Unsplash-licensed photographs, with source/license
+notices in the application package and no on-screen credit callouts. Each photo
+has a visual description and suggested storytelling roles for Opus; it does not
+search the web or download new photos during generation.
+The video is not uploaded or posted to TikTok. Captions are approximate phrase
 timings within measured narration, not word-aligned transcripts. AI-generated
 claims still need checking against the code.
 

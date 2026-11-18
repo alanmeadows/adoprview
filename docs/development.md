@@ -49,6 +49,16 @@ not bundled FFmpeg or downloaded voice models. Azure Speech uses bounded REST
 requests authenticated by the user's Windows Azure CLI, independently of
 Copilot authentication. The model never receives Azure credentials or a shell.
 Cat provenance/license notices and verified thumbnail hashes ship with the app.
+The precurated `VideoAssets\cats.json` contains each photo's selection ID,
+visual description/storytelling hints, author, source, approved license and
+SHA-256. Opus receives only ID, description and framing hints; generation has
+no photo-search/download tool. The catalog is bounded to 2-8 assets. To replace
+or extend it within that bound, verify the original license, add the JPEG and
+manifest/notice entry, and set its full-photo and face crops in
+`VideoRenderer.Looks`. Update the release package's required-asset checks.
+Do not treat Google Images or a stock search's "free" label as reuse permission.
+The current set uses five CC0 photographs and three free Unsplash photographs,
+not Unsplash+ or Pixabay assets; their own licenses, not MIT, cover the photos.
 Opus directs a bounded animated storyboard rather than generated renderer code:
 6-10 scenes, 120-210 spoken words and 30-150 seconds of measured narration.
 The host draws at 15 fps (at most 2,250 frames), encodes H.264/AAC at 30 fps,

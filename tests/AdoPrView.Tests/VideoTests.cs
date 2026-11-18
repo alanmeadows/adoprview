@@ -127,6 +127,45 @@ static class VideoTests
             await renderer.PrepareDependenciesAsync(default);
             Check(checks == 2, "Successful dependencies were reinstalled/rechecked or concurrent setup was duplicated.");
         });
+        await test("Video cat catalog retries unsupported licenses and advertises every verified photo with its hint but not provenance", async () =>
+        {
+            var root = Temp();
+            try
+            {
+                var assets = Path.Combine(AppContext.BaseDirectory, "VideoAssets");
+                var cats = JsonSerializer.Deserialize<CatAsset[]>(await File.ReadAllTextAsync(Path.Combine(assets, "cats.json")), VideoStory.Json)!;
+                foreach (var cat in cats) File.Copy(Path.Combine(assets, cat.File), Path.Combine(root, cat.File));
+                var catalogPath = Path.Combine(root, "cats.json");
+                await File.WriteAllTextAsync(catalogPath, JsonSerializer.Serialize(cats.Select((cat, i) =>
+                    i == 0 ? cat with { License = "unsupported-stock-license" } : cat), Bridge.Json));
+                var renderer = new VideoRenderer(new UnusedVoice(allowPrepare: true), root, _ => Task.CompletedTask);
+                try
+                {
+                    await renderer.PrepareDependenciesAsync(default);
+                    throw new Exception("An unapproved photo license was accepted.");
+                }
+                catch (InvalidOperationException ex)
+                {
+                    Check(ex.InnerException is InvalidDataException && ex.Message.Contains("unsupported license") &&
+                        ex.Message.Contains("retry"), "Catalog rejection lost the dependency cause or retry instructions.");
+                }
+                await File.WriteAllTextAsync(catalogPath, JsonSerializer.Serialize(cats, Bridge.Json));
+                var resources = await renderer.PrepareAsync(default);
+                var advertised = JsonSerializer.Deserialize<JsonElement[]>(resources.Catalog)!;
+                Check(resources.CatIds.SequenceEqual(cats.Select(c => c.Id)) && advertised.Length == cats.Length,
+                    "The model did not receive the complete verified catalog.");
+                foreach (var (cat, item) in cats.Zip(advertised))
+                {
+                    Check(item.GetProperty("id").GetString() == cat.Id && item.GetProperty("description").GetString() == cat.Description,
+                        "A photo lost its model selection ID or storytelling hint.");
+                    Check(!item.TryGetProperty("author", out _) && !item.TryGetProperty("source", out _) &&
+                        !item.TryGetProperty("license", out _) && !item.TryGetProperty("file", out _),
+                        "Provenance or a filesystem path leaked into the creative catalog.");
+                    using var art = VideoRenderer.CatArt.Load(cat.Id, Path.Combine(root, cat.File));
+                }
+            }
+            finally { Directory.Delete(root, true); }
+        });
         await test("Video SDK selects exactly Opus 5.5 and inherits the source-only denied-permission policy", async () =>
         {
             using var f = new ExplainTests.Fixture();
@@ -263,10 +302,11 @@ static class VideoTests
         service.Changed += s => { if (!VideoService.Active(s.Status)) terminal.TrySetResult(s); };
         return terminal.Task.WaitAsync(TimeSpan.FromSeconds(10));
     }
-    sealed class UnusedVoice : IVideoVoice
+    sealed class UnusedVoice(bool allowPrepare = false) : IVideoVoice
     {
         public string Name => "Unused offline voice";
-        public Task PrepareAsync(CancellationToken ct) => throw new Exception("Local dependency setup must not contact a voice provider.");
+        public Task PrepareAsync(CancellationToken ct) => allowPrepare ? Task.CompletedTask :
+            throw new Exception("Local dependency setup must not contact a voice provider.");
         public Task<VideoSpeech> SpeakAsync(string text, CancellationToken ct) => throw new Exception("Local dependency setup must not synthesize narration.");
     }
     sealed class Model : IVideoModel

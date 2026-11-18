@@ -31,6 +31,8 @@ foreach ($required in 'AdoPrView.exe', 'AdoPrView.dll', 'hostfxr.dll', 'coreclr.
         'Microsoft.Web.WebView2.Core.dll', 'WebView2Loader.dll', 'wwwroot\index.html',
         'Microsoft.Windows.SDK.NET.dll', 'WinRT.Runtime.dll',
         'VideoAssets\cats.json', 'VideoAssets\yawn.jpg', 'VideoAssets\rugby.jpg', 'licenses\cat-photos.txt',
+        'VideoAssets\cool.jpg', 'VideoAssets\peek.jpg', 'VideoAssets\judge.jpg',
+        'VideoAssets\mischief.jpg', 'VideoAssets\cuddle.jpg', 'VideoAssets\duo.jpg',
         'DiffPlex.dll', 'GitHub.Copilot.SDK.dll', 'runtimes\win-x64\native\copilot-runtime.exe',
         'runtimes\win-x64\native\runtime.node', 'runtimes\win-x64\native\copilot_runtime.dll',
         'runtimes\win-x64\native\OneAuthInterop.LICENSE.txt') {
@@ -96,8 +98,9 @@ This package redistributes the following components under their own licenses:
 $($index -join "`n")
 - marked and DOMPurify: wwwroot/vendor/marked.min.js and purify.min.js keep
   their original license headers.
-- Real cat photographs: CC0 1.0, with authors, source URLs and provenance in
-  licenses/cat-photos.txt; redistributed thumbnail hashes in VideoAssets/cats.json.
+- Real cat photographs: CC0 1.0 and the free Unsplash License, with authors,
+  source URLs and license/provenance notices in licenses/cat-photos.txt;
+  redistributed JPEG hashes in VideoAssets/cats.json. These assets are not MIT.
 
 The Microsoft Edge WebView2 Runtime is not included; Windows provides it as
 the separately installed WebView2 Evergreen Runtime.

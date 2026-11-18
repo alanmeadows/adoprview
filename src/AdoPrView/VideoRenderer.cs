@@ -51,7 +51,7 @@ internal sealed class VideoRenderer(IVideoVoice voice, string? assetDirectory = 
             if (_dependenciesReady) return;
             _ = ExplainModel.ClientOptions(_assets, AppContext.BaseDirectory, RuntimeInformation.ProcessArchitecture);
             try { await PrepareAssetsAsync(ct); }
-            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or JsonException)
+            catch (Exception ex) when (ex is IOException or InvalidDataException or UnauthorizedAccessException or JsonException)
             {
                 throw new InvalidOperationException("Bundled real-cat catalog/photo dependency check failed: " + ex.Message +
                     " Reinstall the complete application package, then retry video setup.", ex);
@@ -92,7 +92,9 @@ internal sealed class VideoRenderer(IVideoVoice voice, string? assetDirectory = 
             throw new InvalidDataException("The real-cat catalog must contain 2-8 unique assets.");
         foreach (var cat in cats)
         {
-            if (cat.License != "CC0-1.0" || Path.GetFileName(cat.File) != cat.File ||
+            if (cat.License is not ("CC0-1.0" or "Unsplash"))
+                throw new InvalidDataException($"Cat photo '{cat.Id}' has unsupported license '{cat.License}'.");
+            if (Path.GetFileName(cat.File) != cat.File ||
                 cat.Id.Any(c => !char.IsAsciiLetterOrDigit(c) && c != '-') || cat.Source.Length > 300)
                 throw new InvalidDataException("The real-cat catalog has an invalid asset.");
             var file = Path.Combine(_assets, cat.File);
@@ -352,6 +354,12 @@ internal sealed class VideoRenderer(IVideoVoice voice, string? assetDirectory = 
     {
         ["yawn"] = new(new(40, 200, 880, 440), new(690, 415), 125),
         ["rugby"] = new(new(20, 10, 800, 820), new(415, 165), 130),
+        ["cool"] = new(new(100, 120, 860, 1100), new(600, 590), 330),
+        ["peek"] = new(new(110, 185, 740, 980), new(290, 385), 170),
+        ["judge"] = new(new(180, 20, 650, 630), new(475, 265), 190),
+        ["mischief"] = new(new(100, 120, 800, 540), new(520, 360), 185),
+        ["cuddle"] = new(new(0, 70, 920, 630), new(255, 390), 210),
+        ["duo"] = new(new(760, 310, 490, 320), new(1000, 460), 170),
     };
 
     internal static string Framing(string id) => Looks.TryGetValue(id, out var look) && look.Frame.Width > look.Frame.Height * 1.3f
