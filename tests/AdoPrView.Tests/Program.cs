@@ -3,6 +3,40 @@ using System.Text;
 using System.Text.Json.Nodes;
 using AdoPrView;
 
+if (args is ["--video-discovery-test", var discoveryResource, var discoveryRoot, var discoveryVoice])
+{
+    await VideoPilot.DiscoverAsync(discoveryResource, discoveryRoot, discoveryVoice);
+    return;
+}
+
+if (args is ["--video-speech-test", var speechResource, var speechRoot, var sampleVoice])
+{
+    await VideoPilot.SampleAsync(speechResource, speechRoot, sampleVoice);
+    return;
+}
+
+if (args is ["--video-pilot", var repoRoot, var pilotRoot, var pilotResource, var pilotVoice])
+{
+    using var speech = new AzureSpeech();
+    using var timeout = new CancellationTokenSource(TimeSpan.FromMinutes(40));
+    var connection = await speech.SelectAsync(pilotResource, pilotVoice, timeout.Token);
+    var result = await VideoPilot.RunAsync(repoRoot, pilotRoot, new AzureSpeechVoice(speech, () => connection), timeout.Token);
+    if (result.Status != "completed") Environment.ExitCode = 1;
+    return;
+}
+
+if (args is ["--video-model-check", var modelCheckRoot])
+{
+    await VideoPilot.CheckModelAsync(modelCheckRoot);
+    return;
+}
+
+if (args is ["--video-playback", var inputVideo, var playbackRoot])
+{
+    await VideoPlaybackProbe.RunAsync(inputVideo, playbackRoot);
+    return;
+}
+
 if (args is ["--diagnostics-probe", var diagnosticRoot, var mode])
 {
     var log = new AppDiagnostics(diagnosticRoot, _ => Environment.Exit(9));
@@ -569,6 +603,8 @@ await CopilotRecoveryTests.Run(Test);
 await PopPaneTests.Run(Test);
 await AutoCompleteTests.Run(Test);
 await ExplainTests.Run(Test);
+await VideoTests.Run(Test);
+await AzureSpeechTests.Run(Test);
 await AppDiagnosticsTests.Run(Test);
 
 Console.WriteLine($"{tests} offline tests passed. No live HTTP or approval requests were made.");

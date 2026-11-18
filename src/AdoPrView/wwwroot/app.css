@@ -295,6 +295,21 @@ main { flex: 1; overflow: auto; padding: 0 20px 28px; }
 .explain-details summary { cursor: pointer; font-size: 12px; }
 .explain-details summary:focus-visible { outline: 2px solid var(--accent2); outline-offset: 3px; }
 .explanation button:focus-visible, .explain-output:focus-visible { outline: 2px solid var(--accent2); outline-offset: 3px; }
+.pr-video h3 { flex-wrap: wrap; }
+.pr-video video { display: block; width: 100%; max-width: 960px; height: auto; aspect-ratio: 16 / 9; background: var(--surface); border-radius: 6px; }
+.video-path, .video-revision, .video-evidence, .video-coverage { overflow-wrap: anywhere; }
+.speech-dialog { background:var(--surface,var(--bg2)); color:var(--text); border:1px solid var(--border2); border-radius:var(--card-radius,12px); padding:24px; width:min(680px,calc(100vw - 48px)); max-height:85vh; overflow:auto; }
+.speech-dialog::backdrop { background:rgb(0 0 0 / 55%); }
+.speech-dialog h2 { margin:0 0 16px; font-size:20px; }
+.speech-dialog label { display:block; margin-top:14px; }
+.speech-dialog select,.speech-dialog input { display:block; width:100%; margin-top:6px; }
+.speech-dialog .field { flex-wrap:wrap; margin-top:16px; gap:8px; }
+.speech-dialog .speech-result { margin-top:12px; overflow-wrap:anywhere; }
+.video-loading { aspect-ratio: 16 / 9; max-width: 640px; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 12px; padding: 24px; background: var(--surface); border: 1px solid var(--border); border-radius: 6px; text-align: center; }
+.video-spinner { width: 36px; height: 36px; border: 3px solid var(--border2); border-top-color: var(--accent2); border-radius: 50%; animation: spin 1s linear infinite; }
+.speech-dialog .video-spinner { display:inline-block; width:16px; height:16px; vertical-align:middle; border-width:2px; }
+.pr-video button:focus-visible, .pr-video video:focus-visible { outline: 2px solid var(--accent2); outline-offset: 3px; }
+@media (prefers-reduced-motion: reduce) { .video-spinner { animation: none; } }
 
 .list { list-style: none; margin: 0; padding: 0; }
 .list li { display: flex; align-items: flex-start; gap: 8px; padding: 6px 0; border-bottom: 1px dashed #222735; font-size: 12.5px; color: var(--text2); }

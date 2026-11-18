@@ -377,6 +377,8 @@ static class ExplainTests
         readonly bool _dependencyOnly;
         public string? Mismatch, OriginalPath, ContentOverride;
         public string Kind = "edit";
+        public string FreshStatus = "active";
+        public bool FreshDraft = true;
         public bool MovedSource, MovedBase, Retargeted, BadPaging, WrongItem, DenyFiles, NewIteration, NetworkFailure;
         public Fixture(bool dependencyOnly = false)
         {
@@ -408,7 +410,7 @@ static class ExplainTests
             var source = MovedSource ? Target : Source;
             var iteration = new { id = NewIteration ? 5 : 4, sourceRefCommit = new { commitId = source }, commonRefCommit = new { commitId = MovedBase ? Target : Base }, targetRefCommit = new { commitId = Target } };
             if (uri.AbsolutePath.EndsWith("/pullrequests/123"))
-                result = new { pullRequestId = Mismatch == "pr" ? 999 : 123, title = Pr.Title, status = "active", isDraft = true,
+                result = new { pullRequestId = Mismatch == "pr" ? 999 : 123, title = Pr.Title, status = FreshStatus, isDraft = FreshDraft,
                     sourceRefName = "refs/heads/retry", targetRefName = Retargeted ? "refs/heads/other" : "refs/heads/main",
                     repository = new { id = Mismatch == "repo" ? ProjectId : RepoId, project = new { id = Mismatch == "project" ? RepoId : ProjectId } },
                     forkSource = Mismatch == "fork" ? new { repository = new { id = ProjectId } } : null,

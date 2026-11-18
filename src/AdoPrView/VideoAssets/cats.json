@@ -1,0 +1,20 @@
+[
+  {
+    "id": "yawn",
+    "file": "yawn.jpg",
+    "description": "A real fluffy cat lying on a wooden table, yawning dramatically. Useful as a brief waiting or relief reaction.",
+    "author": "Lemon tart",
+    "source": "https://commons.wikimedia.org/wiki/File:Cat_yawning_-_DSC00577.jpg",
+    "license": "CC0-1.0",
+    "sha256": "BDE62712E1F72BB24B9104BC4C92F95C72AFA3DF403DF5886B616F2E0298967F"
+  },
+  {
+    "id": "rugby",
+    "file": "rugby.jpg",
+    "description": "A real wide-eyed ginger kitten holding an orange rubber rugby ball. Portrait photo; useful as an alert, focused or ready-to-act reaction.",
+    "author": "Aiaikz",
+    "source": "https://commons.wikimedia.org/wiki/File:Ginger_kitten_with_an_orange_rubber_rugby.jpg",
+    "license": "CC0-1.0",
+    "sha256": "AD9443B29FBD58E9D42FA8473426BC0B887ED68481FD4CBC74A5824A3038A3B9"
+  }
+]

@@ -20,6 +20,8 @@ internal sealed class ExplainContext : IDisposable
     readonly string _prApi;
     readonly string _sourceRef;
     readonly string _targetRef;
+    readonly bool _requireActive;
+    readonly Func<bool>? _ignoreDrafts;
     readonly List<ExplainChange> _changes;
     readonly HashSet<int> _inspected = [];
     readonly HashSet<string> _omissions = new(StringComparer.Ordinal);
@@ -35,7 +37,7 @@ internal sealed class ExplainContext : IDisposable
     public int ContextReads { get; private set; }
 
     ExplainContext(AdoClient ado, PrView pr, string repoApi, string sourceRef, string targetRef,
-        ExplainRevision revision, List<ExplainChange> changes, bool capped)
+        ExplainRevision revision, List<ExplainChange> changes, bool capped, bool requireActive, Func<bool>? ignoreDrafts)
     {
         _ado = ado;
         _pr = pr;
@@ -43,6 +45,8 @@ internal sealed class ExplainContext : IDisposable
         _prApi = repoApi + "/pullrequests/" + pr.Id;
         _sourceRef = sourceRef;
         _targetRef = targetRef;
+        _requireActive = requireActive;
+        _ignoreDrafts = ignoreDrafts;
         Revision = revision;
         _changes = changes;
         if (capped) _omissions.Add($"Change inventory limited to {MaxChanges} entries; additional changes were not inspected.");
@@ -68,7 +72,16 @@ internal sealed class ExplainContext : IDisposable
             throw new InvalidOperationException("Explaining a cross-repository fork is not supported yet; no source content was read.");
     }
 
-    public static async Task<ExplainContext> CaptureAsync(AdoClient ado, PrView pr, CancellationToken ct)
+    static void CheckVideoEligibility(JsonNode fresh, bool requireActive, bool ignoreDrafts)
+    {
+        if (requireActive && S(fresh["status"]) != "active")
+            throw new InvalidOperationException("This PR is no longer active. Refresh before generating a video.");
+        if (ignoreDrafts && (fresh["isDraft"] is null || fresh["isDraft"]!.GetValue<bool>()))
+            throw new InvalidOperationException("This PR is a draft or its draft state is unknown. Refresh before generating a video.");
+    }
+
+    public static async Task<ExplainContext> CaptureAsync(AdoClient ado, PrView pr, CancellationToken ct,
+        bool requireActive = false, Func<bool>? ignoreDrafts = null)
     {
         if (!Regex.IsMatch(pr.Org, @"\A[a-zA-Z0-9][a-zA-Z0-9-]{0,49}\z") ||
             !Guid.TryParse(pr.ProjectId, out _) || !Guid.TryParse(pr.RepoId, out _) || pr.Id <= 0)
@@ -77,6 +90,7 @@ internal sealed class ExplainContext : IDisposable
         var prApi = repoApi + "/pullrequests/" + pr.Id;
         var fresh = await ado.GetAsync(prApi + "?api-version=7.1", ct);
         CheckIdentity(fresh, pr);
+        CheckVideoEligibility(fresh, requireActive, ignoreDrafts?.Invoke() == true);
         var sourceRef = S(fresh["sourceRefName"]);
         var targetRef = S(fresh["targetRefName"]);
         if (!sourceRef.StartsWith("refs/heads/", StringComparison.Ordinal) || !targetRef.StartsWith("refs/heads/", StringComparison.Ordinal))
@@ -115,7 +129,7 @@ internal sealed class ExplainContext : IDisposable
             skip = next;
         } while (more && changes.Count < MaxChanges);
         var context = new ExplainContext(ado, pr, repoApi, sourceRef, targetRef,
-            new(pr.Key, pr.Id, S(fresh["title"]), pr.Repo, source, common, id), changes, more);
+            new(pr.Key, pr.Id, S(fresh["title"]), pr.Repo, source, common, id), changes, more, requireActive, ignoreDrafts);
         try { await context.VerifyAsync(ct); return context; }
         catch { context.Dispose(); throw; }
     }
@@ -126,6 +140,7 @@ internal sealed class ExplainContext : IDisposable
             throw new InvalidOperationException("PR context could not be verified: " + failure.Message, failure);
         var fresh = await _ado.GetAsync(_prApi + "?api-version=7.1", ct);
         CheckIdentity(fresh, _pr);
+        CheckVideoEligibility(fresh, _requireActive, _ignoreDrafts?.Invoke() == true);
         var iterations = await _ado.GetAsync(_prApi + "/iterations?api-version=7.1", ct);
         var iteration = (iterations["value"] as JsonArray)?.OrderByDescending(n => n?["id"]?.GetValue<int>()).FirstOrDefault()
             ?? throw new InvalidDataException("ADO returned no PR iterations during verification.");
@@ -133,7 +148,7 @@ internal sealed class ExplainContext : IDisposable
             S(fresh["sourceRefName"]) != _sourceRef || S(fresh["targetRefName"]) != _targetRef ||
             (fresh["lastMergeSourceCommit"] is { } source && Commit(source) != Revision.SourceCommit) ||
             Commit(iteration["sourceRefCommit"]) != Revision.SourceCommit || Commit(iteration["commonRefCommit"]) != Revision.BaseCommit)
-            throw new InvalidOperationException("The PR revisions changed during explanation. The partial result is for the displayed pinned commits; refresh and explain again.");
+            throw new InvalidOperationException("The PR revisions changed during source inspection. The partial result is for the displayed pinned commits; refresh and retry.");
     }
 
     public string ListChanges(int page)

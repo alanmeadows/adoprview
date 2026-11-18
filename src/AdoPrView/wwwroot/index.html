@@ -56,6 +56,7 @@
     </div>
     <div class="empty" id="empty" hidden></div>
     <div id="runShelf" aria-label="Copilot runs for PRs outside the current table"></div>
+    <div id="videoShelf" aria-label="PR videos outside the current table"></div>
   </main>
 
   <aside class="drawer" id="drawer" hidden>
@@ -66,6 +67,10 @@
     <div class="drawer-body" id="drawerBody"></div>
   </aside>
   <div class="scrim" id="scrim" hidden></div>
+  <dialog id="speechDialog" class="speech-dialog" aria-labelledby="speechTitle">
+    <h2 id="speechTitle">Choose Azure Speech for TikTok videos</h2>
+    <div id="speechBody"></div>
+  </dialog>
   <div class="toasts" id="toasts"></div>
   <div id="rowMenu" class="row-menu" role="menu" hidden><button type="button" role="menuitem" data-menu-hide>Hide this PR...</button></div>
 

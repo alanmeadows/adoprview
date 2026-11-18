@@ -22,6 +22,12 @@ public sealed class MainWindow : Window, IApprovalUi
     readonly IApprovalProvider? _approval;
     readonly CopilotRunService _copilot = new();
     readonly ExplainService _explain;
+    readonly AzureSpeech _speech = new();
+    readonly VideoArtifacts _videoArtifacts = new();
+    readonly VideoRenderer _videoRenderer;
+    readonly VideoService _video;
+    CancellationTokenSource? _speechSetup;
+    Task<object>? _speechSetupWork;
     readonly ConcurrentDictionary<string, byte> _copilotStarting = new(StringComparer.OrdinalIgnoreCase);
     readonly Options _opts;
     readonly AppDiagnostics _diagnostics;
@@ -45,6 +51,12 @@ public sealed class MainWindow : Window, IApprovalUi
         (_approval, var approvalError) = ApprovalProviderLoader.Load(_store.Current.ApprovalProvider);
         _prs = new PrService(new AdoClient(), _store, _approval, approvalError);
         _explain = new ExplainService(_prs.GetExplainContextAsync);
+        _videoRenderer = new VideoRenderer(new AzureSpeechVoice(_speech, () => _store.Current.VideoSpeech), warning: message =>
+        {
+            _diagnostics.Record("video-cleanup-warning", message);
+            _ = _bridge?.PushToastAsync("error", message);
+        });
+        _video = new VideoService(_prs.GetVideoContextAsync, _prs.CheckVideoAvailable, _videoArtifacts, _videoRenderer);
         _pop = new PopBrowserPane(_prs.RefreshPopAsync);
 
         Title = "ADO PR View";
@@ -120,6 +132,12 @@ public sealed class MainWindow : Window, IApprovalUi
             _diagnostics.Record("shutdown-started", _shutdownReason);
             try
             {
+                _speechSetup?.Cancel();
+                if (_speechSetupWork is not null)
+                    try { await _speechSetupWork; } catch (Exception ex) { _diagnostics.Record("speech-setup-stopped", ex.Message); }
+                await _video.DisposeAsync();
+                _speechSetup?.Dispose();
+                _speech.Dispose();
                 await _explain.DisposeAsync();
                 await _copilot.DisposeAsync();
                 _pop.Dispose();
@@ -172,6 +190,7 @@ public sealed class MainWindow : Window, IApprovalUi
         core.Settings.AreBrowserAcceleratorKeysEnabled = true;
         core.Settings.IsZoomControlEnabled = true;
         core.SetVirtualHostNameToFolderMapping("app.local", Path.Combine(AppContext.BaseDirectory, "wwwroot"), CoreWebView2HostResourceAccessKind.Deny);
+        VideoMedia.Attach(core, _videoArtifacts, ex => _diagnostics.Record("video-media-failed", ex.Message));
         core.NewWindowRequested += (_, e) =>
         {
             e.Handled = true;
@@ -179,9 +198,10 @@ public sealed class MainWindow : Window, IApprovalUi
                 System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo(e.Uri) { UseShellExecute = true });
         };
 
-        _bridge = new Bridge(_prs, _store, PostAsync, Kick, _approval, this, HandleCopilotAsync, HandlePopAsync, HandleExplainAsync);
+        _bridge = new Bridge(_prs, _store, PostAsync, Kick, _approval, this, HandleCopilotAsync, HandlePopAsync, HandleExplainAsync, HandleVideoAsync);
         _copilot.Changed += run => _ = _bridge.PushCopilotRunAsync(RunForUi(run));
         _explain.Changed += state => _ = _bridge.PushExplanationAsync(state);
+        _video.Changed += state => _ = _bridge.PushVideoAsync(state);
         core.WebMessageReceived += (_, e) =>
         {
             if (!PopTarget.IsDashboardSource(e.Source)) return;
@@ -220,6 +240,50 @@ public sealed class MainWindow : Window, IApprovalUi
             return await _explain.CancelAsync(key, parameters["requestId"]?.GetValue<string>() ?? throw new ArgumentException("Missing explanation ID."));
         _prs.Find(key); // Reject keys that are not in the loaded dashboard before starting work.
         return _explain.Start(key);
+    }
+
+    async Task<object> HandleVideoAsync(string action, JsonObject parameters)
+    {
+        if (action == "listVideos") return _video.States;
+        if (action == "cancelSpeechSetup") { _speechSetup?.Cancel(); return new { cancelled = true }; }
+        if (action is "listSpeechSubscriptions" or "findSpeechResources" or "selectSpeechResource")
+        {
+            if (_speechSetupWork is { IsCompleted: false }) throw new InvalidOperationException("Speech setup is already checking Azure. Wait or cancel it first.");
+            if (_video.States.Any(s => VideoService.Active(s.Status))) throw new InvalidOperationException("Finish or cancel the current video before changing its Speech connection.");
+            _speechSetup?.Dispose();
+            _speechSetup = new CancellationTokenSource(TimeSpan.FromMinutes(5));
+            _speechSetupWork = SpeechSetupAsync(action, parameters, _speechSetup.Token);
+            try { return await _speechSetupWork; }
+            catch (OperationCanceledException)
+            {
+                throw new InvalidOperationException("Video setup was cancelled or reached its five-minute limit. Check Azure CLI sign-in and network access, then retry setup.");
+            }
+        }
+        var key = parameters["key"]?.GetValue<string>() ?? throw new ArgumentException("Missing PR key.");
+        if (action == "cancelVideo")
+            return await _video.CancelAsync(key, parameters["requestId"]?.GetValue<string>() ?? throw new ArgumentException("Missing video ID."));
+        _prs.CheckVideoAvailable(key);
+        if (_store.Current.VideoSpeech is null) throw new InvalidOperationException("Choose an Azure Speech resource before generating a video.");
+        return _video.Start(key);
+    }
+
+    async Task<object> SpeechSetupAsync(string action, JsonObject parameters, CancellationToken ct)
+    {
+        var epoch = parameters["epoch"]?.GetValue<int>() ?? 0;
+        if (_bridge is not null) await _bridge.PushSpeechSetupAsync(epoch,
+            "Checking bundled Copilot runtime, real-cat assets and Windows H.264/AAC encoders. No FFmpeg or voice-model download is needed.");
+        await _videoRenderer.PrepareDependenciesAsync(ct);
+        if (_bridge is not null) await _bridge.PushSpeechSetupAsync(epoch, action == "selectSpeechResource"
+            ? "Local dependencies ready. Verifying Azure Speech access with a short generic synthesis test..."
+            : "Local dependencies ready. Checking Azure CLI sign-in and accessible resources...");
+        if (action == "listSpeechSubscriptions") return await _speech.SubscriptionsAsync(ct);
+        if (action == "findSpeechResources")
+            return await _speech.FindAsync(parameters["subscription"]?.GetValue<string>() ?? "", ct);
+        var selected = await _speech.SelectAsync(parameters["resourceId"]?.GetValue<string>() ?? "",
+            parameters["voice"]?.GetValue<string>() ?? "", ct, testSynthesis: true);
+        ct.ThrowIfCancellationRequested();
+        _store.Update(s => s.VideoSpeech = selected);
+        return _store.Current;
     }
 
     async Task RecoverCopilotAsync()

@@ -63,7 +63,7 @@ internal sealed class ExplainModel : IExplainModel
         };
     }
 
-    async Task<CopilotClient> ClientAsync(CancellationToken ct)
+    internal async Task<CopilotClient> ClientAsync(CancellationToken ct)
     {
         await _startup.WaitAsync(ct);
         try
@@ -141,7 +141,7 @@ internal sealed class ExplainModel : IExplainModel
         OnPermissionRequest = (_, _) => Task.FromResult(PermissionDecision.Reject("Explain permits only the application's revision-scoped read-only PR tools.")),
     };
 
-    static AIFunction Tool(Delegate handler, string name, string description) =>
+    internal static AIFunction Tool(Delegate handler, string name, string description) =>
         CopilotTool.DefineTool(handler, new CopilotToolOptions { SkipPermission = true },
             new AIFunctionFactoryOptions { Name = name, Description = description });
 
@@ -182,12 +182,8 @@ internal sealed class ExplainModel : IExplainModel
         return text;
     }
 
-    public async Task<string> ExplainAsync(ExplainContext context, Action<string> delta, CancellationToken ct)
-    {
-        var client = await ClientAsync(ct);
-        var work = Path.Combine(_home, "work", Guid.NewGuid().ToString("N"));
-        Directory.CreateDirectory(work);
-        var tools = new AIFunctionDeclaration[]
+    internal static AIFunctionDeclaration[] SourceTools(ExplainContext context, CancellationToken ct) =>
+        new AIFunctionDeclaration[]
         {
             Tool(([Description("Zero-based page, 50 changes per page.")] int page) => context.ListChanges(page),
                 ToolNames[0], "List the captured PR changes against its merge base. Follow nextPage until null."),
@@ -201,6 +197,13 @@ internal sealed class ExplainModel : IExplainModel
                     context.ListDirectoryAsync(path, side, ct),
                 ToolNames[3], "List one directory level at a pinned commit to discover README files, components, module consumers and build/pipeline context. Start at / or the changed component. No URLs or repository/revision overrides."),
         };
+
+    public async Task<string> ExplainAsync(ExplainContext context, Action<string> delta, CancellationToken ct)
+    {
+        var client = await ClientAsync(ct);
+        var work = Path.Combine(_home, "work", Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(work);
+        var tools = SourceTools(context, ct);
         try
         {
             await using var session = await client.CreateSessionAsync(RestrictedSession(work, tools), ct);

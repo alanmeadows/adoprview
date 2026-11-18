@@ -15,6 +15,7 @@ calls used see [DESIGN.md](DESIGN.md); for building and tests see
 - [Inline Proof of Presence](#inline-proof-of-presence-compatibility-prototype)
 - [Auto-complete](#auto-complete)
 - [Explain this PR](#explain-this-pr)
+- [TikTok This PR](#tiktok-this-pr)
 - [Inline Copilot Fix](#inline-copilot-fix)
 - [Restart recovery and worktree cleanup](#restart-recovery-and-worktree-cleanup)
 
@@ -320,6 +321,67 @@ error if it still fails the format.
 It times out after four minutes. Cross-repository
 forks and repository paths containing traversal, backslashes, control characters,
 `?` or `#` are rejected explicitly.
+
+## TikTok This PR
+
+Expand an active, monitored PR and choose **TikTok This PR** beside Explain.
+Opus 5.5 inspects pinned diffs and full-file repository context, then creates a
+short landscape explainer with natural Azure Speech narration, captions,
+animated before/after or journey visuals, and real cats cast into the explanation.
+Opus directs bounded compositions, timed reveals, camera motion and recurring cat
+roles; it does not supply executable rendering code. Photo provenance remains in
+the bundled license/catalog files, not as on-screen origin callouts. This is bounded
+source inspection, not a local checkout, and never starts Fix or changes ADO.
+Copilot must provide the exact `claude-opus-5.5` model; there is no silent model
+or robotic voice fallback.
+
+On first use, choose a subscription and **Find compatible resources**. The app
+first checks its bundled Copilot runtime, real-cat catalog/hashes and Windows
+H.264/AAC encoders. Successful local checks are reused across generations; no
+FFmpeg installer or neural voice-model download is required. A failed component
+is named with repair/reinstall and retry guidance; generation cannot start with
+missing dependencies. Windows N may need Microsoft's Media Feature Pack.
+The app
+uses your installed Windows Azure CLI (`az`) and its existing `az login`,
+checks Speech-capable Cognitive Services accounts and available English neural
+voices, then verifies synthesis with a short generic phrase before saving your
+selection. **Ava HD** is preferred when available. Choose another available voice
+if desired. Missing `az`, sign-in, read permissions, Speech RBAC, network access
+or quota produce explicit errors. No resources are provisioned, keys fetched
+or role assignments changed. Discovery is limited to 100 candidate accounts
+per selected subscription; an exact account resource ID can also be supplied.
+Public Azure custom subdomain endpoints are currently supported, not sovereign
+cloud endpoints.
+
+Each user authenticates independently. Team members typically need
+**Cognitive Services Speech User** on the parent account and enough ARM read
+access to discover it; access to a Foundry project alone does not establish
+Speech access. Standard neural voices need no model deployment. Change the
+connection under **Settings > TikTok narration**. Only non-secret resource and
+voice identifiers are persisted; Azure CLI owns sign-in, and tokens are kept
+in native memory, never sent to Copilot or the WebView.
+
+PR source is sent to Copilot for storyboard generation. Narration text is sent
+to the explicitly selected Azure Speech resource and billed to its subscription.
+Rendering and the bundled, attributed CC0 real-cat photos stay on this computer;
+the video is not uploaded or posted to TikTok. Captions are approximate phrase
+timings within measured narration, not word-aligned transcripts. AI-generated
+claims still need checking against the code.
+
+Generation can take several minutes. The animated **Generating...** panel shows
+actual stages, with no invented percentage or ETA; the dashboard stays usable.
+One video runs at a time, duplicate starts are prevented, and **Cancel** remains
+available when its PR is filtered out or stops being monitored. Failures provide
+**Retry video**; partial output never becomes playable.
+
+Completed videos play inline with controls and seeking. **Copy MP4 path** copies
+the actual local file under `%LOCALAPPDATA%\AdoPrView\Videos\completed`.
+Private storyboards, inspected-path evidence, narration and scene images are
+retained under `Videos\jobs`; treat these as potentially sensitive code-derived
+artifacts. Results in the dashboard last until app exit; completed files remain
+on disk. Exiting cancels active work, and jobs are not resumed automatically.
+Files are validated as actual 1280x720 H.264/AAC media and published atomically.
+The player can read only host-registered completed MP4s, not arbitrary local files.
 
 ## Inline Copilot Fix
 

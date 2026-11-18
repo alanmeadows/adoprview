@@ -146,14 +146,46 @@ Fixes AB#1234`;
     approvalProvider: { name: 'Sample approval', linkUrl: null, linkLabel: null }, approvalProviderError: null };
   const runs = new Map();
   const explanations = new Map();
+  const videos = new Map();
   let explanationSequence = 0;
+  let videoSequence = 0;
 
   window.MockHost = {
     onEvent: null,
     async rpc(method, p) {
       await new Promise((r) => setTimeout(r, 150));
       switch (method) {
-        case 'init': return { settings, snapshot, runs: [...runs.values()], explanations: [...explanations.values()], version: 'mock' };
+        case 'init': return { settings, snapshot, runs: [...runs.values()], explanations: [...explanations.values()], videos: [...videos.values()], version: 'mock' };
+        case 'listSpeechSubscriptions': return [{ id: '00000000-0000-4000-8000-000000000001', name: 'Synthetic subscription (no Azure calls)' }];
+        case 'findSpeechResources': return [{ resourceId: '/subscriptions/00000000-0000-4000-8000-000000000001/resourceGroups/offline/providers/Microsoft.CognitiveServices/accounts/offline',
+          name: 'Synthetic Speech resource', region: 'offline', endpoint: 'https://offline.cognitiveservices.azure.com/',
+          compatible: true, voices: ['en-US-Andrew:DragonHDLatestNeural'], message: 'UI fixture only. No Azure access was tested.' }];
+        case 'selectSpeechResource': settings.videoSpeech = { resourceId: p.resourceId, voice: p.voice, region: 'offline' }; return settings;
+        case 'cancelSpeechSetup': return { cancelled: true };
+        case 'tiktokPr': {
+          const pr = prs.find(x => x.key === p.key);
+          if (!pr) throw new Error('Mock PR not found.');
+          if (['preparing', 'storyboarding', 'rendering', 'cancelling'].includes(videos.get(p.key)?.status))
+            return videos.get(p.key);
+          const state = { key: p.key, requestId: 'mock-video-' + (++videoSequence), sequence: videoSequence,
+            status: 'storyboarding', message: 'UI preview only: no model, voice engine or PR request is running.',
+            revision: null, evidence: [], coverage: [], model: 'claude-opus-5.5' };
+          videos.set(p.key, state);
+          setTimeout(() => {
+            if (videos.get(p.key)?.requestId !== state.requestId || videos.get(p.key)?.status !== 'storyboarding') return;
+            const done = { ...state, sequence: ++videoSequence, status: 'failed',
+              message: 'Preview finished. Real MP4 generation requires the native app and configured natural voice; this mock never pretends to create a video.' };
+            videos.set(p.key, done); this.onEvent?.({ event: 'prVideo', data: done });
+          }, 1600);
+          return state;
+        }
+        case 'cancelVideo': {
+          const state = videos.get(p.key);
+          if (!state || state.requestId !== p.requestId) throw new Error('This mock video is no longer current.');
+          const cancelled = { ...state, sequence: ++videoSequence, status: 'cancelled', message: 'Mock video cancelled.' };
+          videos.set(p.key, cancelled); this.onEvent?.({ event: 'prVideo', data: cancelled });
+          return cancelled;
+        }
         case 'explainPr': {
           const pr = prs.find(x => x.key === p.key);
           if (!pr) throw new Error('Mock PR not found.');

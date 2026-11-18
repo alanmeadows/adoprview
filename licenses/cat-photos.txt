@@ -1,0 +1,22 @@
+The two real cat photographs in VideoAssets are not AI generated.
+Their Wikimedia Commons file pages identify the source as the uploader's
+own work and apply CC0 1.0 Universal Public Domain Dedication:
+https://creativecommons.org/publicdomain/zero/1.0/
+
+yawn.jpg
+Author: Lemon tart
+Source: https://commons.wikimedia.org/wiki/File:Cat_yawning_-_DSC00577.jpg
+Downloaded derivative: 960px Wikimedia thumbnail, no additional modification.
+https://thumb.wikimedia.org/wikipedia/commons/thumb/9/93/Cat_yawning_-_DSC00577.jpg/960px-Cat_yawning_-_DSC00577.jpg
+
+rugby.jpg
+Author: Aiaikz
+Source: https://commons.wikimedia.org/wiki/File:Ginger_kitten_with_an_orange_rubber_rugby.jpg
+Downloaded derivative: 960px Wikimedia thumbnail, no additional modification.
+https://thumb.wikimedia.org/wikipedia/commons/thumb/9/95/Ginger_kitten_with_an_orange_rubber_rugby.jpg/960px-Ginger_kitten_with_an_orange_rubber_rugby.jpg
+
+Source/license pages and actual photos verified 2026-11-17.
+Per-asset SHA-256 values for the redistributed thumbnails are in
+VideoAssets/cats.json. Attribution is also shown on each cat scene.
+CC0 does not require the generated video's source or license to be shared.
+The uploader's provenance claim is not an independent rights guarantee.

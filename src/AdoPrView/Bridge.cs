@@ -10,7 +10,8 @@ namespace AdoPrView;
 /// JSON-RPC bridge between the WebView2 UI and the services.
 public sealed class Bridge(PrService prs, SettingsStore store, Func<string, Task> post, Action<bool> kickRefresh,
     IApprovalProvider? approval = null, IApprovalUi? approvalUi = null, Func<string, JsonObject, Task<object>>? copilotAction = null,
-    Func<string, Task<object>>? popAction = null, Func<string, JsonObject, Task<object>>? explainAction = null)
+    Func<string, Task<object>>? popAction = null, Func<string, JsonObject, Task<object>>? explainAction = null,
+    Func<string, JsonObject, Task<object>>? videoAction = null)
 {
     public static readonly JsonSerializerOptions Json = new(JsonSerializerDefaults.Web)
     {
@@ -23,6 +24,9 @@ public sealed class Bridge(PrService prs, SettingsStore store, Func<string, Task
     public Task PushToastAsync(string kind, string text) => post(JsonSerializer.Serialize(new { @event = "toast", data = new { kind, text } }, Json));
     public Task PushCopilotRunAsync(object run) => post(JsonSerializer.Serialize(new { @event = "copilotRun", data = run }, Json));
     public Task PushExplanationAsync(object state) => post(JsonSerializer.Serialize(new { @event = "explanation", data = state }, Json));
+    public Task PushVideoAsync(object state) => post(JsonSerializer.Serialize(new { @event = "prVideo", data = state }, Json));
+    public Task PushSpeechSetupAsync(int epoch, string message) => post(JsonSerializer.Serialize(new
+        { @event = "speechSetupProgress", data = new { epoch, message } }, Json));
 
     public async Task HandleAsync(string message)
     {
@@ -54,6 +58,7 @@ public sealed class Bridge(PrService prs, SettingsStore store, Func<string, Task
                 return new { settings = store.Current, snapshot = prs.Current,
                     runs = copilotAction is null ? Array.Empty<object>() : await copilotAction("listCopilot", p),
                     explanations = explainAction is null ? Array.Empty<object>() : await explainAction("listExplanations", p),
+                    videos = videoAction is null ? Array.Empty<object>() : await videoAction("listVideos", p),
                     version = typeof(Bridge).Assembly.GetName().Version?.ToString(3) };
             case "refresh":
                 kickRefresh(true);
@@ -110,6 +115,14 @@ public sealed class Bridge(PrService prs, SettingsStore store, Func<string, Task
             case "cancelExplanation":
                 if (explainAction is null) throw new InvalidOperationException("The native PR explanation service is unavailable.");
                 return await explainAction(method, p);
+            case "tiktokPr":
+            case "cancelVideo":
+            case "listSpeechSubscriptions":
+            case "findSpeechResources":
+            case "selectSpeechResource":
+            case "cancelSpeechSetup":
+                if (videoAction is null) throw new InvalidOperationException("The native PR video service is unavailable.");
+                return await videoAction(method, p);
             case "hide":
             case "unhide":
                 var key = Str(p, "key");

@@ -85,6 +85,7 @@ public sealed class AppSettings
     public string? FixSkill { get; set; }
     public List<string> FixReviewerModels { get; set; } = new();
     public ApprovalProviderSettings? ApprovalProvider { get; set; }
+    public SpeechConnection? VideoSpeech { get; set; }
     // Fields written by other versions or tools survive every save.
     [JsonExtensionData] public Dictionary<string, JsonElement>? Extra { get; set; }
 }
