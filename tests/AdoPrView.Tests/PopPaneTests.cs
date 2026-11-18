@@ -166,8 +166,17 @@ static class PopPaneTests
             Grid.SetRow(pane, 2); layout.Children.Add(pane);
             var window = new Window { Title = "ADO PR View - offline PoP fixture", Width = 1250, Height = 900, Content = layout,
                 Background = new System.Windows.Media.SolidColorBrush(System.Windows.Media.Color.FromRgb(0x0e, 0x10, 0x14)) };
+            var closeRequests = 0;
+            var finishing = false;
+            window.Closing += (_, e) =>
+            {
+                if (finishing) return;
+                closeRequests++;
+                e.Cancel = true;
+                window.Hide();
+            };
             var surfaces = new List<CoreWebView2>();
-            var popupReady = new TaskCompletionSource<CoreWebView2>();
+            var popupReady = new TaskCompletionSource<CoreWebView2>(TaskCreationOptions.RunContinuationsAsynchronously);
             pane.SurfaceCreated += core =>
             {
                 surfaces.Add(core);
@@ -179,7 +188,7 @@ static class PopPaneTests
                     e.Response = core.Environment.CreateWebResourceResponse(new MemoryStream(Encoding.UTF8.GetBytes(html)), error ? 503 : 200, error ? "Unavailable" : "OK", "Content-Type: text/html; charset=utf-8");
                 };
                 core.NewWindowRequested += (_, e) => Check(e.Handled, "Popup escaped into an external window");
-                if (surfaces.Count > 1) popupReady.TrySetResult(core);
+                if (surfaces.Count > 1) core.NavigationCompleted += (_, _) => popupReady.TrySetResult(core);
             };
             window.Loaded += async (_, _) =>
             {
@@ -199,18 +208,70 @@ static class PopPaneTests
                     Check(pane.CurrentOrigin == "Current origin: https://dev.azure.com", "Origin identity not visible");
                     await pane.CheckAsync();
                     Check(reads.Single() == target && pane.Session.Status.Contains("pending"), "Policy check not captured");
-                    await core.ExecuteScriptAsync("window.open('https://login.microsoftonline.com/offline-popup');");
-                    var child = await popupReady.Task.WaitAsync(TimeSpan.FromSeconds(15));
-                    Check(pane.Popup is not null && child.Environment.UserDataFolder == core.Environment.UserDataFolder &&
-                        !child.Settings.IsWebMessageEnabled && !child.Settings.AreHostObjectsAllowed, "Popup isolation/session mismatch");
-                    pane.ClosePopup();
+                    foreach (var state in new[] { WindowState.Normal, WindowState.Maximized })
+                    {
+                        window.WindowState = state;
+                        popupReady = new(TaskCreationOptions.RunContinuationsAsynchronously);
+                        await core.ExecuteScriptAsync("window.open('https://login.microsoftonline.com/offline-popup');");
+                        var child = await popupReady.Task.WaitAsync(TimeSpan.FromSeconds(15));
+                        var popupView = pane.Popup;
+                        Check(pane.Popup is not null && child.Environment.UserDataFolder == core.Environment.UserDataFolder &&
+                            !child.Settings.IsWebMessageEnabled && !child.Settings.AreHostObjectsAllowed, "Popup isolation/session mismatch");
+                        var popupClosed = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+                        child.WindowCloseRequested += (_, _) =>
+                        {
+                            Check(!popupView!.IsDisposed, "Popup disposed inside the WebView callback");
+                            popupClosed.TrySetResult();
+                        };
+                        await child.ExecuteScriptAsync("setTimeout(() => { window.close(); window.close(); }, 20);");
+                        await popupClosed.Task.WaitAsync(TimeSpan.FromSeconds(15));
+                        await window.Dispatcher.InvokeAsync(() => { }, DispatcherPriority.ApplicationIdle);
+                        Check(popupView!.IsDisposed && closeRequests == 0 && window.IsVisible &&
+                            dashboard.IsVisible && window.WindowState == state && pane.Session.IsOpen && pane.Popup is null,
+                            "Website popup close reached the dashboard window instead of closing only the popup");
+                        var paneClosed = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+                        void Closed(object? sender, object args) => paneClosed.TrySetResult();
+                        core.WindowCloseRequested += Closed;
+                        // Chromium only permits a top-level script close with a single history entry.
+                        await core.CallDevToolsProtocolMethodAsync("Page.resetNavigationHistory", "{}");
+                        await core.ExecuteScriptAsync("setTimeout(() => window.close(), 20);");
+                        await paneClosed.Task.WaitAsync(TimeSpan.FromSeconds(15));
+                        core.WindowCloseRequested -= Closed;
+                        await window.Dispatcher.InvokeAsync(() => { }, DispatcherPriority.ApplicationIdle);
+                        Check(closeRequests == 0 && window.IsVisible && dashboard.IsVisible && window.WindowState == state &&
+                            !pane.Session.IsOpen && pane.Visibility == Visibility.Collapsed,
+                            "Website pane close reached the dashboard window or changed its state");
+                        await Navigate(core, () => pane.OpenAsync(target));
+                    }
+                    window.WindowState = WindowState.Normal;
                     await Navigate(core, () => { core.Navigate("https://dev.azure.com/offline-error"); return Task.CompletedTask; });
                     Check(pane.NavigationStatus.Contains("503"), "Navigation error hidden");
                     result = new("ok", "Offline ADO reports PoP satisfied.");
                     await pane.CloseAsync();
-                    Check(pane.Visibility == Visibility.Collapsed && reads.Count == 2, "Close did not refresh actual policy");
+                    Check(pane.Visibility == Visibility.Collapsed && reads.Count == 4 && reads.All(t => t == target),
+                        "Close did not refresh only the captured policy");
                     await Navigate(core, () => pane.OpenAsync(PopTarget.FromPr(Pr(456))));
                     Check(ReferenceEquals(core, pane.Browser.CoreWebView2) && pane.Session.Selection!.Target.Id == 456, "Reopen did not reuse native pane with new identity");
+                    window.UpdateLayout();
+                    pane.Browser.Focus();
+                    await WaitUntil(() => pane.Browser.ContainsFocus);
+                    await pane.CheckAfterReturnAsync();
+                    Check(reads.Count == 5 && reads[^1].Id == 456, "Native host change lost website-to-dashboard policy recheck");
+                    var staleClose = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+                    void ChangeSelection(object? sender, object args)
+                    {
+                        pane.Session.Open(target);
+                        staleClose.TrySetResult();
+                    }
+                    core.WindowCloseRequested += ChangeSelection;
+                    await core.CallDevToolsProtocolMethodAsync("Page.resetNavigationHistory", "{}");
+                    await core.ExecuteScriptAsync("setTimeout(() => window.close(), 20);");
+                    await staleClose.Task.WaitAsync(TimeSpan.FromSeconds(15));
+                    core.WindowCloseRequested -= ChangeSelection;
+                    await window.Dispatcher.InvokeAsync(() => { }, DispatcherPriority.ApplicationIdle);
+                    Check(pane.Session.IsOpen && pane.Session.Selection!.Target == target && reads.Count == 5 &&
+                        closeRequests == 0 && window.IsVisible, "A stale website close affected a newer PR selection");
+                    await Navigate(core, () => { core.Navigate(target.Url); return Task.CompletedTask; });
                     var shot = Environment.GetEnvironmentVariable("ADOPRVIEW_POP_SCREENSHOT");
                     if (!string.IsNullOrEmpty(shot))
                     {
@@ -219,7 +280,7 @@ static class PopPaneTests
                         CaptureWindow(window, Path.ChangeExtension(shot, ".native.png"));
                         window.Width = 900; window.Height = 650;
                         window.UpdateLayout();
-                        Check(pane.Browser.ActualWidth > 700 && pane.Browser.ActualHeight > 120, "Framing crowds out the narrow browser viewport");
+                        Check(pane.Browser.Width > 700 && pane.Browser.Height > 120, "Framing crowds out the narrow browser viewport");
                         Check(divider.Focusable && divider.KeyboardIncrement > 0, "Resize affordance is not keyboard accessible");
                         CaptureWindow(window, Path.ChangeExtension(shot, ".narrow.native.png"));
                     }
@@ -230,7 +291,9 @@ static class PopPaneTests
                     var exited = new TaskCompletionSource();
                     var environment = pane.Browser.CoreWebView2?.Environment;
                     if (environment is not null) environment.BrowserProcessExited += (_, _) => exited.TrySetResult();
-                    pane.Dispose(); window.Close();
+                    pane.Dispose(); finishing = true; window.Close();
+                    if (!pane.Browser.IsDisposed) failure ??= new Exception("Native browser host did not dispose its child.");
+                    if (window.IsVisible) failure ??= new Exception("Deliberate host window close was suppressed.");
                     if (environment is not null) await Task.WhenAny(exited.Task, Task.Delay(10000));
                     try { if (Directory.Exists(directory)) Directory.Delete(directory, recursive: true); }
                     catch (IOException ex) { failure ??= new Exception("Could not clean the synthetic PoP browser profile.", ex); }
@@ -253,6 +316,13 @@ static class PopPaneTests
         core.NavigationCompleted += Completed;
         try { await navigate(); await ready.Task.WaitAsync(TimeSpan.FromSeconds(20)); }
         finally { core.NavigationCompleted -= Completed; }
+    }
+
+    static async Task WaitUntil(Func<bool> ready)
+    {
+        var deadline = DateTime.UtcNow.AddSeconds(10);
+        while (!ready() && DateTime.UtcNow < deadline) await Task.Delay(20);
+        Check(ready(), "Timed out waiting for the website's scoped close");
     }
 
     [StructLayout(LayoutKind.Sequential)]

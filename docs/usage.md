@@ -265,6 +265,9 @@ the app's dark palette with visible hover, keyboard-focus and disabled states.
 Drag the grip to resize, or focus it and use Up/Down. The pane shows the PR title/ID and current HTTPS
 origin, with Back, Reload, PR page, Check status and Close controls. Website
 sign-in popups stay inside this pane.
+When a website closes its sign-in popup or PoP page, only that popup or pane
+closes; the dashboard stays visible in its existing window state. The dashboard's
+own close button and tray Exit keep their normal behavior.
 
 Complete the normal ADO website's PoP banner yourself, including sign-in,
 security-key or Windows Hello prompts. **Check status**, returning focus from
