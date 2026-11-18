@@ -32,6 +32,7 @@
     <None Include="VideoAssets\**\*" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
     <None Include="..\..\licenses\cat-photos.txt" Link="licenses\cat-photos.txt" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
     <Resource Include="app.ico" />
+    <None Include="..\..\licenses\Primer\LICENSE.txt" Link="licenses\Primer\LICENSE.txt" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
   </ItemGroup>
 
 </Project>

@@ -8,7 +8,7 @@ enough detail inline that you rarely need to click into ADO.
 
 ```
 ┌──────────────── AdoPrView.exe (.NET 10, WPF) ─────────────────┐
-│  MainWindow (dark title bar, taskbar overlay badge, tray icon) │
+│  MainWindow (themed title bar, taskbar overlay badge, tray icon)│
 │  └─ WebView2  ── https://app.local/ (wwwroot, offline assets)  │
 │        ▲  postMessage JSON-RPC  │  push events                 │
 │        │                        ▼                              │
@@ -19,7 +19,7 @@ enough detail inline that you rarely need to click into ADO.
 └────────────────────────────────────────────────────────────────┘
 ```
 
-* **Host:** WPF window hosting WebView2. Native pieces: dark immersive title
+* **Host:** WPF window hosting WebView2. Native pieces: theme-aware title
   bar, tray icon with balloon notifications when a PR newly needs human action or
   becomes blocked. A bespoke four-note chime plays once per update when one or
   more PRs enter Needs Human, even in the foreground. Initial load, unchanged
@@ -29,6 +29,11 @@ enough detail inline that you rarely need to click into ADO.
 * **UI:** plain HTML/CSS/JS (no build step) served from a WebView2 virtual host.
   `marked` + `DOMPurify` are vendored for safe Markdown descriptions.
   `?mock=1` runs the UI in any browser against fixture data for fast iteration.
+  Semantic CSS palettes provide Light Mode (default, Primer-inspired) and Dark
+  Mode. Native settings own the selection; a derived navigation hint applies
+  it before first paint. A dedicated transactional theme RPC saves independently
+  of unfinished settings edits and updates app-owned native chrome. External
+  PoP/sign-in content and Windows system surfaces are not restyled.
 * **Auth:** `AZURE_DEVOPS_EXT_PAT` → `AZURE_DEVOPS_PAT` → `az account
   get-access-token --resource 499b84ac-…` (cached until expiry). Tokens never
   reach the UI.
@@ -371,7 +376,10 @@ older snapshot's hidden flag, determine row visibility after a restore.
 * Inline PoP prototype: a native resizable pane below the dashboard owns a
   separate WebView2 environment/profile (`PoPWebView2`), with Windows
   primary-account SSO enabled. HTTPS sign-in popups use additional unprivileged
-  WebView2 controls in the same pane/environment. There is no dashboard message
+  WebView2 controls in the same pane/environment. They use WinForms WebView2 inside WPF
+  `WindowsFormsHost`: the WPF WebView2 control's built-in website-close handler
+  closes its containing WPF Window. The PoP host instead defers website close
+  callbacks and closes only the still-current popup/pane. There is no dashboard message
   dispatcher, host object or `app.local` mapping on any website surface; web
   messages/host objects are disabled and dashboard RPC also verifies its source.
   Origin display omits URL paths/query/fragment. Local/non-HTTPS navigation,

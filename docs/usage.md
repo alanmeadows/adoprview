@@ -46,6 +46,25 @@ calls used see [DESIGN.md](DESIGN.md); for building and tests see
 - The current refresh interval is shown in the status bar and is configurable
   in Settings (default: 2 minutes; merge re-check: 10 minutes).
 
+### Themes
+
+Choose **Settings > Appearance > Theme**: **Light Mode** (the default, inspired
+by GitHub's light web appearance) or **Dark Mode**. Selection applies immediately
+and saves independently of other
+unfinished settings edits; no restart or separate Save is needed. A failed
+save restores the previous appearance and shows an error.
+
+The `theme` setting uses `light` or `dark`. Existing settings without this key
+use Light Mode. The former `github` value is read as `light` and written in its
+canonical form on the next settings save, without rewriting the file at load.
+Explicit supported choices and unrecognized settings are preserved.
+An unsupported theme from another version displays Light Mode with a notice until
+you choose a supported theme. Themes cover the dashboard, Markdown/code/logs,
+settings and app-owned PoP framing, loading canvas and title bar (where Windows
+supports it). External ADO/sign-in pages, Windows security prompts, system
+dialogs and tray menus retain their own styling. No website CSS or OS-wide
+appearance setting is changed.
+
 ### Startup, exit and error logs
 
 Lifecycle diagnostics are written to
@@ -249,6 +268,9 @@ the app's dark palette with visible hover, keyboard-focus and disabled states.
 Drag the grip to resize, or focus it and use Up/Down. The pane shows the PR title/ID and current HTTPS
 origin, with Back, Reload, PR page, Check status and Close controls. Website
 sign-in popups stay inside this pane.
+When a website closes its sign-in popup or PoP page, only that popup or pane
+closes; the dashboard stays visible in its existing window state. The dashboard's
+own close button and tray Exit keep their normal behavior.
 
 Complete the normal ADO website's PoP banner yourself, including sign-in,
 security-key or Windows Hello prompts. **Check status**, returning focus from

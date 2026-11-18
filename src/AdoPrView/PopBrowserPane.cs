@@ -3,16 +3,18 @@ using System.IO;
 using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Input;
+using System.Windows.Forms.Integration;
 using System.Windows.Markup;
 using System.Windows.Media;
 using Microsoft.Web.WebView2.Core;
-using Microsoft.Web.WebView2.Wpf;
+using WebView2 = Microsoft.Web.WebView2.WinForms.WebView2;
 
 namespace AdoPrView;
 
 public sealed class PopBrowserPane : Border, IDisposable
 {
     readonly WebView2 browser = new();
+    readonly WindowsFormsHost browserHost;
     readonly Grid browserArea = new();
     readonly TextBlock title = new(), origin = new(), policy = new(), navigation = new();
     readonly Button back, reload, check, closePopup;
@@ -21,9 +23,9 @@ public sealed class PopBrowserPane : Border, IDisposable
         <Style xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation" TargetType="Button">
           <Setter Property="FontFamily" Value="Segoe UI"/>
           <Setter Property="FontSize" Value="12"/>
-          <Setter Property="Background" Value="#1c212b"/>
-          <Setter Property="Foreground" Value="#b4bac8"/>
-          <Setter Property="BorderBrush" Value="#2e3544"/>
+          <Setter Property="Background" Value="{DynamicResource Theme.Control}"/>
+          <Setter Property="Foreground" Value="{DynamicResource Theme.Text}"/>
+          <Setter Property="BorderBrush" Value="{DynamicResource Theme.Border}"/>
           <Setter Property="BorderThickness" Value="1"/>
           <Setter Property="Padding" Value="10,5"/>
           <Setter Property="Template">
@@ -39,14 +41,13 @@ public sealed class PopBrowserPane : Border, IDisposable
           </Setter>
           <Style.Triggers>
             <Trigger Property="IsMouseOver" Value="True">
-              <Setter Property="Background" Value="#242a36"/>
-              <Setter Property="Foreground" Value="#e7e9ef"/>
-              <Setter Property="BorderBrush" Value="#7e879a"/>
+              <Setter Property="Background" Value="{DynamicResource Theme.Hover}"/>
+              <Setter Property="BorderBrush" Value="{DynamicResource Theme.Border}"/>
             </Trigger>
-            <Trigger Property="IsPressed" Value="True"><Setter Property="Background" Value="#2e3544"/></Trigger>
-            <Trigger Property="IsKeyboardFocused" Value="True"><Setter Property="BorderBrush" Value="#7c83ff"/></Trigger>
+            <Trigger Property="IsPressed" Value="True"><Setter Property="Background" Value="{DynamicResource Theme.Active}"/></Trigger>
+            <Trigger Property="IsKeyboardFocused" Value="True"><Setter Property="BorderBrush" Value="{DynamicResource Theme.Focus}"/></Trigger>
             <Trigger Property="IsEnabled" Value="False">
-              <Setter Property="Foreground" Value="#7e879a"/><Setter Property="Opacity" Value="0.5"/>
+              <Setter Property="Foreground" Value="{DynamicResource Theme.Muted}"/><Setter Property="Opacity" Value="0.7"/>
             </Trigger>
           </Style.Triggers>
         </Style>
@@ -55,6 +56,7 @@ public sealed class PopBrowserPane : Border, IDisposable
     CoreWebView2Environment? environment;
     Task? initialization;
     WebView2? popup;
+    WindowsFormsHost? popupHost;
     bool browserUsed, disposed;
 
     public event Action<bool>? OpenChanged;
@@ -70,13 +72,14 @@ public sealed class PopBrowserPane : Border, IDisposable
     public PopBrowserPane(Func<PopTarget, Task<PopPolicyResult>> refresh, string? userDataDirectory = null)
     {
         session = new(refresh);
+        ApplyTheme("light");
         this.userDataDirectory = userDataDirectory ?? Path.Combine(SettingsStore.Dir, "PoPWebView2");
         Visibility = Visibility.Collapsed;
         Margin = new Thickness(12, 0, 12, 12);
-        BorderBrush = new SolidColorBrush(Color.FromRgb(0x2e, 0x35, 0x44));
+        SetResourceReference(BorderBrushProperty, "Theme.Border");
         BorderThickness = new Thickness(1);
         CornerRadius = new CornerRadius(10);
-        Background = new SolidColorBrush(Color.FromRgb(0x12, 0x15, 0x1b));
+        SetResourceReference(BackgroundProperty, "Theme.Subtle");
         var root = new DockPanel();
         var header = new StackPanel { Margin = new Thickness(12, 8, 12, 8) };
         var heading = new DockPanel();
@@ -121,31 +124,37 @@ public sealed class PopBrowserPane : Border, IDisposable
         foreach (var text in new[] { title, origin, notice, policy, navigation })
         {
             text.FontFamily = new FontFamily("Segoe UI");
-            text.Foreground = new SolidColorBrush(Color.FromRgb(0xb4, 0xba, 0xc8));
+            text.SetResourceReference(TextBlock.ForegroundProperty, "Theme.Text");
         }
-        title.Foreground = new SolidColorBrush(Color.FromRgb(0xe7, 0xe9, 0xef));
-        notice.Foreground = navigation.Foreground = new SolidColorBrush(Color.FromRgb(0x7e, 0x87, 0x9a));
+        notice.SetResourceReference(TextBlock.ForegroundProperty, "Theme.Muted");
+        navigation.SetResourceReference(TextBlock.ForegroundProperty, "Theme.Muted");
         var headerFrame = new Border
         {
-            Background = new SolidColorBrush(Color.FromRgb(0x16, 0x1a, 0x22)),
             CornerRadius = new CornerRadius(9, 9, 0, 0), Child = header,
         };
+        headerFrame.SetResourceReference(BackgroundProperty, "Theme.Surface");
         DockPanel.SetDock(headerFrame, Dock.Top);
         root.Children.Add(headerFrame);
-        browserArea.Children.Add(browser);
+        // WPF WebView2 automatically closes its containing Window on website window.close().
+        // A WinForms control has no such owner-close handler; keep these remote surfaces inline.
+        browserHost = new WindowsFormsHost { Child = browser };
+        browserArea.Children.Add(browserHost);
         // Keep the rectangular HWND inset; WPF rounded corners cannot clip WebView2.
-        root.Children.Add(new Border
+        var browserFrame = new Border
         {
             Margin = new Thickness(8, 0, 8, 8), BorderThickness = new Thickness(1),
-            BorderBrush = new SolidColorBrush(Color.FromRgb(0x3c, 0x45, 0x58)),
             Child = browserArea,
-        });
+        };
+        browserFrame.SetResourceReference(BorderBrushProperty, "Theme.Border");
+        root.Children.Add(browserFrame);
         Child = root;
         session.Changed += UpdatePolicy;
         UpdatePolicy();
     }
 
     CoreWebView2? Active => (popup ?? browser).CoreWebView2;
+
+    internal void ApplyTheme(string theme) => AppTheme.ApplyResources(this, theme);
 
     Button Button(string label, Action click)
     {
@@ -167,11 +176,11 @@ public sealed class PopBrowserPane : Border, IDisposable
             <ControlTemplate xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation" TargetType="GridSplitter">
               <Grid Background="Transparent">
                 <Border x:Name="Grip" xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
-                        Width="56" Height="3" CornerRadius="1.5" Background="#434b60"/>
+                        Width="56" Height="3" CornerRadius="1.5" Background="{DynamicResource Theme.Border}"/>
               </Grid>
               <ControlTemplate.Triggers>
-                <Trigger Property="IsMouseOver" Value="True"><Setter TargetName="Grip" Property="Background" Value="#7c83ff"/></Trigger>
-                <Trigger Property="IsKeyboardFocused" Value="True"><Setter TargetName="Grip" Property="Background" Value="#7c83ff"/></Trigger>
+                <Trigger Property="IsMouseOver" Value="True"><Setter TargetName="Grip" Property="Background" Value="{DynamicResource Theme.Focus}"/></Trigger>
+                <Trigger Property="IsKeyboardFocused" Value="True"><Setter TargetName="Grip" Property="Background" Value="{DynamicResource Theme.Focus}"/></Trigger>
               </ControlTemplate.Triggers>
             </ControlTemplate>
             """),
@@ -255,7 +264,8 @@ public sealed class PopBrowserPane : Border, IDisposable
             }
             var captured = session.Selection;
             var child = popup = new WebView2();
-            browserArea.Children.Add(child);
+            popupHost = new WindowsFormsHost { Child = child };
+            browserArea.Children.Add(popupHost);
             try
             {
                 await child.EnsureCoreWebView2Async(environment);
@@ -279,7 +289,17 @@ public sealed class PopBrowserPane : Border, IDisposable
                 }
             }
         };
-        core.WindowCloseRequested += (_, _) => { if (view == popup) ClosePopup(); else _ = GuardTaskAsync(CloseAsync); };
+        core.WindowCloseRequested += (_, _) =>
+        {
+            var captured = session.Selection;
+            // Dispose only after the WebView callback returns, and never close a newer surface/selection.
+            _ = Dispatcher.BeginInvoke(new Action(() =>
+            {
+                if (disposed || session.Selection != captured) return;
+                if (view == popup) ClosePopup();
+                else if (view == browser && session.IsOpen) _ = GuardTaskAsync(CloseAsync);
+            }));
+        };
         core.LaunchingExternalUriScheme += (_, e) =>
         {
             e.Cancel = true;
@@ -287,7 +307,7 @@ public sealed class PopBrowserPane : Border, IDisposable
         };
         core.DownloadStarting += (_, e) => { e.Cancel = true; navigation.Text = "Downloads are disabled in this PoP pane."; };
         core.ProcessFailed += (_, _) => navigation.Text = "The embedded website process failed. Reload or use Open in Edge (external).";
-        view.GotKeyboardFocus += (_, _) => browserUsed = true;
+        view.Enter += (_, _) => browserUsed = true;
         if (!allowBlank) SurfaceCreated?.Invoke(core);
         UpdateNavigation();
     }
@@ -309,10 +329,10 @@ public sealed class PopBrowserPane : Border, IDisposable
     {
         if (popup is not null)
         {
-            var child = popup;
             popup = null;
-            browserArea.Children.Remove(child);
-            child.Dispose();
+            browserArea.Children.Remove(popupHost!);
+            popupHost!.Dispose();
+            popupHost = null;
         }
         closePopup.Visibility = Visibility.Collapsed;
         UpdateNavigation();
@@ -364,6 +384,6 @@ public sealed class PopBrowserPane : Border, IDisposable
         if (disposed) return;
         disposed = true;
         ClosePopup();
-        browser.Dispose();
+        browserHost.Dispose();
     }
 }

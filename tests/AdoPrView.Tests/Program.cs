@@ -594,6 +594,7 @@ await MergeChecksTests.Run(Test);
 await ReviewerVoteTests.Run(Test);
 await ApprovalProviderTests.Run(Test);
 await SettingsTests.Run(Test);
+await ThemeTests.Run(Test);
 await ReviewBotScopeTests.Run(Test);
 await BuildCacheScopeTests.Run(Test);
 await CopilotSourceTests.Run(Test);
