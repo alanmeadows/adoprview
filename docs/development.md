@@ -97,5 +97,23 @@ neighboring action targets. All approval writes in these checks are intercepted.
 synthetic fixtures. The screenshots in [images](images) were captured from that
 mock UI with synthetic data.
 
+CI and release checks enable the native PoP regression with the installed
+WebView2 Evergreen Runtime; the WebView2 SDK is not downgraded.
+The same check can be enabled locally. It intercepts all website requests with synthetic pages
+and uses a disposable browser profile. It exercises sign-in popup/page
+`window.close()` in normal and maximized windows, captured-policy rechecks,
+stale-close selection isolation, host disposal and ordinary deliberate window close,
+without real sign-in or PR writes. The fixture emulates close-to-tray so an
+unexpected host close cannot pass merely because the process remains alive.
+These synthetic checks do not establish that the full tenant sign-in flow in
+[#15](https://github.com/alanmeadows/adoprview/issues/15) is resolved; human validation remains outstanding.
+
+```powershell
+$env:ADOPRVIEW_TEST_FILTER = 'Native PoP WebView2'
+$env:ADOPRVIEW_TEST_POP_WEBVIEW = '1'
+dotnet run --project tests\AdoPrView.Tests -c Release
+Remove-Item Env:\ADOPRVIEW_TEST_FILTER, Env:\ADOPRVIEW_TEST_POP_WEBVIEW
+```
+
 See [DESIGN.md](DESIGN.md) for the architecture, approval provider contract,
 ADO calls, classification and merge preview scheduling.
