@@ -1133,9 +1133,9 @@ function renderDrawer() {
   $('#drawerBody').innerHTML = `
     <div class="section">
       <h4>Appearance</h4>
-      <p class="help" id="themeHelp">Changes apply and save immediately. GitHub uses GitHub's light web appearance.</p>
+      <p class="help" id="themeHelp">Changes apply and save immediately. Light Mode is the default.</p>
       <div class="field"><label for="theme">Theme</label><select id="theme" aria-describedby="themeHelp" ${S.themeBusy ? 'disabled' : ''}>
-        ${[['github', 'GitHub'], ['light', 'Light Mode'], ['dark', 'Dark Mode']].map(([value, label]) => `<option value="${value}" ${AppTheme.effective(st.theme) === value ? 'selected' : ''}>${label}</option>`).join('')}
+        ${[['light', 'Light Mode'], ['dark', 'Dark Mode']].map(([value, label]) => `<option value="${value}" ${AppTheme.effective(st.theme) === value ? 'selected' : ''}>${label}</option>`).join('')}
       </select></div>
     </div>
     ${S.snap.approvalProviderError ? `<div class="section"><h4>Approval provider</h4><p class="help error">${esc(S.snap.approvalProviderError)}</p></div>` : ''}
@@ -1407,7 +1407,7 @@ async function boot() {
   S.settings = init.settings;
   applySavedTheme();
   if (S.settings.theme != null && !AppTheme.supported.includes(S.settings.theme))
-    toast('The saved theme is not supported by this version. Showing GitHub without changing your preference.', 'info');
+    toast('The saved theme is not supported by this version. Showing Light Mode without changing your preference.', 'info');
   for (const run of init.runs || []) updateCopilotRun(run);
   for (const explanation of init.explanations || []) updateExplanation(explanation);
   setSnapshot(init.snapshot);

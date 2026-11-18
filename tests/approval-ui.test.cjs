@@ -7,7 +7,7 @@ const vm = require('node:vm');
 const source = fs.readFileSync(path.join(__dirname, '..', 'src', 'AdoPrView', 'wwwroot', 'app.js'), 'utf8');
 const themeSource = fs.readFileSync(path.join(__dirname, '..', 'src', 'AdoPrView', 'wwwroot', 'theme.js'), 'utf8');
 
-function setup() {
+function setup(search = '?mock=1') {
   const elements = new Map();
   const element = () => ({
     innerHTML: '', textContent: '', dataset: {}, scrollTop: 0, children: [],
@@ -26,7 +26,7 @@ function setup() {
   const dialogs = [];
   const window = { MockHost: { rpc: () => new Promise(() => {}) }, addEventListener() {}, getSelection: () => '',
     confirm: text => { dialogs.push(text); return true; } };
-  const location = { href: 'https://app.local/index.html?mock=1', search: '?mock=1' };
+  const location = { href: 'https://app.local/index.html' + search, search };
   const context = vm.createContext({
     window, document, URL, URLSearchParams, location,
     history: { replaceState(_, __, url) { location.href = url.href; location.search = url.search; } },
@@ -48,7 +48,7 @@ function setup() {
 
 test('theme changes apply immediately, save only the theme and leave other drawer edits alone', async () => {
   const { hooks, window, document, elements, context, element } = setup();
-  hooks.S.settings.theme = 'github';
+  hooks.S.settings.theme = 'light';
   const selector = element();
   selector.value = 'dark';
   elements.set('#theme', selector);
@@ -97,10 +97,10 @@ test('failed or unconfirmed theme saves restore the confirmed palette and displa
 test('theme save restores selector focus without stealing focus from another control or a closed drawer', async () => {
   for (const outcome of ['saved', 'failed', 'moved', 'closed']) {
     const { hooks, window, document, elements, element } = setup();
-    hooks.S.settings.theme = 'github';
+    hooks.S.settings.theme = 'light';
     hooks.S.drawer = true;
     const selector = element(), another = element();
-    selector.value = 'light';
+    selector.value = 'dark';
     selector.focus = () => { document.activeElement = selector; };
     Object.defineProperty(selector, 'disabled', { set(value) { if (value) document.activeElement = document.body; } });
     elements.set('#theme', selector);
@@ -109,22 +109,33 @@ test('theme save restores selector focus without stealing focus from another con
       if (outcome === 'moved') document.activeElement = another;
       if (outcome === 'closed') hooks.S.drawer = false;
       if (outcome === 'failed') throw Error('Read-only settings');
-      return { ...hooks.S.settings, theme: 'light' };
+      return { ...hooks.S.settings, theme: 'dark' };
     };
     await hooks.changeTheme(selector);
     assert.equal(document.activeElement, outcome === 'moved' ? another : outcome === 'closed' ? document.body : selector);
   }
 });
 
-test('legacy and unsupported theme settings display GitHub without overwriting the saved value', () => {
-  for (const value of [undefined, 'future-theme']) {
+test('theme bootstrap defaults to Light Mode and accepts legacy github hints without a third choice', () => {
+  for (const value of [undefined, 'github', 'light', 'dark', 'future-theme']) {
+    const { document, window } = setup(value ? '?theme=' + value : '');
+    assert.equal(document.documentElement.dataset.theme, value === 'dark' ? 'dark' : 'light');
+    assert.deepEqual(Array.from(window.AppTheme.supported), ['light', 'dark']);
+  }
+});
+
+test('legacy and unsupported theme settings display Light Mode without overwriting the saved value', () => {
+  for (const value of [undefined, 'github', 'future-theme']) {
     const { hooks, document } = setup();
     hooks.S.settings.theme = value;
     hooks.applySavedTheme();
-    assert.equal(document.documentElement.dataset.theme, 'github');
+    assert.equal(document.documentElement.dataset.theme, 'light');
     assert.equal(hooks.S.settings.theme, value);
     hooks.renderDrawer();
-    assert.match(document.querySelector('#drawerBody').innerHTML, /value="github" selected>GitHub/);
+    const html = document.querySelector('#drawerBody').innerHTML;
+    assert.match(html, /value="light" selected>Light Mode/);
+    assert.match(html, /value="dark" >Dark Mode/);
+    assert.doesNotMatch(html, /value="github"/);
   }
 });
 

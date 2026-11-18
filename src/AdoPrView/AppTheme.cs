@@ -11,14 +11,13 @@ internal sealed record NativePalette(string Canvas, string Subtle, string Surfac
 
 internal static class AppTheme
 {
-    public static bool IsSupported(string? theme) => theme is "github" or "light" or "dark";
-    public static string Effective(string? theme) => IsSupported(theme) ? theme! : "github";
+    public static bool IsSupported(string? theme) => theme is "light" or "dark";
+    public static string Effective(string? theme) => IsSupported(theme) ? theme! : "light";
 
     // This small chrome subset mirrors themes.css; the native theme tests check parity.
     public static NativePalette Palette(string? theme) => Effective(theme) switch
     {
         "dark" => new("#0e1014", "#12151b", "#161a22", "#1c212b", "#2b3444", "#343e50", "#e7e9ef", "#a0aabe", "#707e96", "#a6acff"),
-        "light" => new("#f3f5fb", "#f8f9fd", "#ffffff", "#ffffff", "#e9edf8", "#dfe4f4", "#20283e", "#58647c", "#7a849d", "#5145cd"),
         _ => new("#ffffff", "#ffffff", "#ffffff", "#f6f8fa", "#eff2f5", "#e6eaef", "#1f2328", "#59636e", "#818b98", "#0969da"),
     };
 

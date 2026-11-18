@@ -29,7 +29,7 @@ enough detail inline that you rarely need to click into ADO.
 * **UI:** plain HTML/CSS/JS (no build step) served from a WebView2 virtual host.
   `marked` + `DOMPurify` are vendored for safe Markdown descriptions.
   `?mock=1` runs the UI in any browser against fixture data for fast iteration.
-  Semantic CSS palettes provide GitHub (light, default), Light Mode and Dark
+  Semantic CSS palettes provide Light Mode (default, Primer-inspired) and Dark
   Mode. Native settings own the selection; a derived navigation hint applies
   it before first paint. A dedicated transactional theme RPC saves independently
   of unfinished settings edits and updates app-owned native chrome. External

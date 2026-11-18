@@ -68,7 +68,8 @@ public sealed class ApprovalProviderSettings
 
 public sealed class AppSettings
 {
-    public string Theme { get; set; } = "github";
+    string _theme = "light";
+    public string Theme { get => _theme; set => _theme = value == "github" ? "light" : value; }
     public List<RepoRef> Repos { get; set; } = new();
     public List<string> Whitelist { get; set; } = new();
     public List<string> Hidden { get; set; } = new();   // "{repoId}:{prId}"
@@ -149,7 +150,7 @@ public sealed class SettingsStore
 
     public void SetTheme(string theme)
     {
-        if (!AppTheme.IsSupported(theme)) throw new ArgumentException("Choose GitHub, Light Mode or Dark Mode.");
+        if (!AppTheme.IsSupported(theme)) throw new ArgumentException("Choose Light Mode or Dark Mode.");
         lock (_gate)
         {
             var previous = Current.Theme;

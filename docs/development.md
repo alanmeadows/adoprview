@@ -100,12 +100,12 @@ mock UI with synthetic data.
 ## Theme design and checks
 
 `wwwroot/themes.css` defines semantic canvas, surface, foreground, border,
-control, focus, status and output roles for `github`, `light` and `dark`.
+control, focus, status and output roles for `light` and `dark`.
 Components in `app.css` consume these roles rather than fixed colors.
 `AppTheme.cs` mirrors only the small native chrome subset; a native test checks
 it against the CSS. Set `color-scheme` per palette for native browser controls.
 
-GitHub is a light, Primer-inspired theme, not a clone of github.com's navigation
+Light Mode is a Primer-inspired theme, not a clone of github.com's navigation
 or a statement about its current default theme. The sources are official
 [Primer color primitives](https://primer.style/product/primitives/color/),
 [color usage](https://primer.style/product/getting-started/foundations/color-usage/),
@@ -124,9 +124,14 @@ native chrome. General settings saves deliberately cannot reset a separately
 saved theme. `AppTheme.DashboardUri` supplies a derived `?theme=` first-paint
 hint; the synchronous `theme.js` applies it before the stylesheet and updates
 the current URL after confirmed saves so reloads also start with the right
-palette. There is no localStorage preference. Missing keys default to GitHub;
-unknown future values render the effective default with a notice without being
-silently rewritten.
+palette. There is no localStorage preference. Missing keys default to Light Mode.
+The former `github` value normalizes to `light` in memory and on subsequent saves,
+without rewriting the file at load. Unknown future values render the effective
+default with a notice without being silently rewritten.
+
+Busy/refresh indicators preserve their state and accessible labels when
+`prefers-reduced-motion` disables animation. Browser checks explicitly emulate
+both `no-preference` and `reduce`, independent of the test host's OS preference.
 
 The regular frontend/browser checks cover live switching, failure rollback,
 reload, first-paint defaults, representative computed colors/contrast and

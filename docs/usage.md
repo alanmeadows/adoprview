@@ -47,15 +47,17 @@ calls used see [DESIGN.md](DESIGN.md); for building and tests see
 
 ### Themes
 
-Choose **Settings > Appearance > Theme**: **GitHub** (the default, inspired by
-GitHub's light web appearance), **Light Mode** (a softer indigo palette), or
-**Dark Mode**. Selection applies immediately and saves independently of other
+Choose **Settings > Appearance > Theme**: **Light Mode** (the default, inspired
+by GitHub's light web appearance) or **Dark Mode**. Selection applies immediately
+and saves independently of other
 unfinished settings edits; no restart or separate Save is needed. A failed
 save restores the previous appearance and shows an error.
 
-The `theme` setting uses `github`, `light`, or `dark`. Existing settings without
-this key use GitHub; explicit choices and unrecognized settings are preserved.
-An unsupported theme from another version displays GitHub with a notice until
+The `theme` setting uses `light` or `dark`. Existing settings without this key
+use Light Mode. The former `github` value is read as `light` and written in its
+canonical form on the next settings save, without rewriting the file at load.
+Explicit supported choices and unrecognized settings are preserved.
+An unsupported theme from another version displays Light Mode with a notice until
 you choose a supported theme. Themes cover the dashboard, Markdown/code/logs,
 settings and app-owned PoP framing, loading canvas and title bar (where Windows
 supports it). External ADO/sign-in pages, Windows security prompts, system

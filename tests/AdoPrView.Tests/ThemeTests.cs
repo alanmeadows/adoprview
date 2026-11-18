@@ -18,7 +18,7 @@ static class ThemeTests
         await test("theme native chrome matches the bundled semantic palettes", () =>
         {
             var css = File.ReadAllText(Path.Combine(AppContext.BaseDirectory, "wwwroot", "themes.css"));
-            foreach (var theme in new[] { "github", "light", "dark" })
+            foreach (var theme in new[] { "light", "dark" })
             {
                 var block = Regex.Match(css, $$""":root\[data-theme="{{theme}}"\]\s*\{([^}]+)""").Groups[1].Value;
                 var p = AppTheme.Palette(theme);
@@ -30,7 +30,10 @@ static class ThemeTests
                 })
                     Check(Regex.IsMatch(block, $@"--{token}:\s*{Regex.Escape(color)};"), $"{theme} native {token} does not match the dashboard");
             }
-            Check(AppTheme.Effective(null) == "github" && AppTheme.Effective("future-theme") == "github", "Wrong effective fallback");
+            Check(AppTheme.Effective(null) == "light" && AppTheme.Effective("future-theme") == "light", "Wrong effective fallback");
+            Check(new AppSettings { Theme = "github" }.Theme == "light" &&
+                AppTheme.Palette("github") == AppTheme.Palette("light") &&
+                AppTheme.DashboardUri("github", false).EndsWith("?theme=light"), "Legacy GitHub theme changed appearance or first paint");
             return Task.CompletedTask;
         });
         if (Environment.GetEnvironmentVariable("ADOPRVIEW_TEST_NATIVE_THEME") == "1")
@@ -73,8 +76,9 @@ static class ThemeTests
                     TaskCompletionSource<string>? init = null;
                     TaskCompletionSource? ready = null;
                     TaskCompletionSource? settled = null;
-                    var bridge = new Bridge(prs, store, text => { core.PostWebMessageAsJson(text); return Task.CompletedTask; }, _ => { },
+                    Bridge CreateBridge() => new(prs, store, text => { core.PostWebMessageAsJson(text); return Task.CompletedTask; }, _ => { },
                         themeChanged: theme => { AppTheme.ApplyWindow(window, web, theme); pop.ApplyTheme(theme); });
+                    var bridge = CreateBridge();
                     core.WebMessageReceived += (_, e) =>
                     {
                         if (!PopTarget.IsDashboardSource(e.Source)) return;
@@ -93,6 +97,8 @@ static class ThemeTests
                     }
                     async Task Navigate(string theme)
                     {
+                        store = new SettingsStore(Path.Combine(root, "settings.json"));
+                        bridge = CreateBridge();
                         init = new(TaskCreationOptions.RunContinuationsAsynchronously);
                         ready = new(TaskCreationOptions.RunContinuationsAsynchronously);
                         AppTheme.ApplyWindow(window, web, store.Current.Theme);
@@ -107,9 +113,15 @@ static class ThemeTests
                         await ready.Task.WaitAsync(TimeSpan.FromSeconds(15));
                         init = null;
                     }
-                    await Navigate("github"); // Missing file and missing theme key: do not create or rewrite settings.
+                    await Navigate("light"); // Missing file and missing theme key: do not create or rewrite settings.
                     Check(!File.Exists(Path.Combine(root, "settings.json")), "First paint wrote settings");
-                    foreach (var theme in new[] { "dark", "light", "github" })
+                    const string legacy = """{"theme":"github","futureTop":"KEEP"}""";
+                    File.WriteAllText(Path.Combine(root, "settings.json"), legacy);
+                    await Navigate("light");
+                    Check((await Js("S.settings.theme")).GetString() == "light" &&
+                        File.ReadAllText(Path.Combine(root, "settings.json")) == legacy,
+                        "Legacy native preference was not normalized before first paint or was rewritten at load");
+                    foreach (var theme in new[] { "dark", "light" })
                     {
                         settled = new(TaskCreationOptions.RunContinuationsAsynchronously);
                         // The real selector, real WebView2 RPC, real SettingsStore and real native palette callback.
@@ -126,7 +138,8 @@ static class ThemeTests
                             """);
                         await settled.Task.WaitAsync(TimeSpan.FromSeconds(15));
                         var saved = new SettingsStore(Path.Combine(root, "settings.json"));
-                        Check(saved.Current.Theme == theme, "Selector did not persist through the native bridge");
+                        Check(saved.Current.Theme == theme && saved.Current.Extra!["futureTop"].GetString() == "KEEP",
+                            "Selector did not persist through the native bridge or lost unrelated settings");
                         Check(((SolidColorBrush)window.Background).Color == AppTheme.Color(AppTheme.Palette(theme).Canvas) &&
                             web.DefaultBackgroundColor.R == AppTheme.Color(AppTheme.Palette(theme).Canvas).R, "Native canvas did not switch");
                         Check(((SolidColorBrush)pop.Resources["Theme.Text"]).Color == AppTheme.Color(AppTheme.Palette(theme).Text), "PoP chrome palette did not switch");

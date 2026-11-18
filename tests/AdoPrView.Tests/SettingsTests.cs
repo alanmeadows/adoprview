@@ -19,7 +19,7 @@ static class SettingsTests
             Check(!File.Exists(path), "Loading created a settings file");
             Check(!store.Current.IgnoreDrafts, "Draft ignoring must be opt-in");
             Check(store.Current.Notifications && store.Current.Sound, "New settings should enable notifications and sound");
-            Check(store.Current.Theme == "github", "New settings must default to GitHub");
+            Check(store.Current.Theme == "light", "New settings must default to Light Mode");
         }));
         foreach (var original in new[] { "github", "light", "dark", "future-theme" })
             await test($"theme bridge persists supported choices and preserves unrelated settings from {original}", () => InDir(dir =>
@@ -27,14 +27,22 @@ static class SettingsTests
                 var path = Path.Combine(dir, "settings.json");
                 File.WriteAllText(path, JsonSerializer.Serialize(new { theme = original, refreshSeconds = 45,
                     hidden = new[] { "offline:123" }, futureTop = new { preserve = true } }));
+                var originalText = File.ReadAllText(path);
                 var store = new SettingsStore(path);
-                Check(store.Current.Theme == original, "Loading overwrote an explicit theme");
+                var canonical = original == "github" ? "light" : original;
+                Check(store.Current.Theme == canonical && File.ReadAllText(path) == originalText,
+                    "Loading failed to normalize the legacy alias, changed an unknown theme, or rewrote settings");
+                store.Update(s => s.RefreshSeconds = 45);
+                using (var saved = JsonDocument.Parse(File.ReadAllText(path)))
+                    Check(saved.RootElement.GetProperty("theme").GetString() == canonical &&
+                        saved.RootElement.GetProperty("futureTop").GetProperty("preserve").GetBoolean(),
+                        "A settings save failed to retain the canonical/unknown theme or unrelated fields");
                 using var http = new HttpClient();
                 var service = new PrService(new AdoClient(http, _ => Task.FromResult(new AuthenticationHeaderValue("Bearer", "offline"))), store);
                 string? reply = null, applied = null;
                 var kicks = 0;
                 var bridge = new Bridge(service, store, text => { reply = text; return Task.CompletedTask; }, _ => kicks++, themeChanged: theme => applied = theme);
-                foreach (var theme in new[] { "dark", "light", "github" })
+                foreach (var theme in new[] { "dark", "light" })
                 {
                     bridge.HandleAsync(new JsonObject { ["id"] = 1, ["method"] = "setTheme",
                         ["params"] = new JsonObject { ["theme"] = theme } }.ToJsonString()).GetAwaiter().GetResult();
@@ -62,7 +70,7 @@ static class SettingsTests
             const string text = """{"refreshSeconds":45,"futureTop":"KEEP"}""";
             File.WriteAllText(path, text);
             var store = new SettingsStore(path);
-            Check(store.Current.Theme == "github" && File.ReadAllText(path) == text, "Legacy theme migration rewrote settings");
+            Check(store.Current.Theme == "light" && File.ReadAllText(path) == text, "Legacy theme migration rewrote settings");
             Directory.CreateDirectory(path + ".tmp");
             using var http = new HttpClient();
             var service = new PrService(new AdoClient(http, _ => Task.FromResult(new AuthenticationHeaderValue("Bearer", "offline"))), store);
@@ -70,7 +78,7 @@ static class SettingsTests
             var applied = false;
             var bridge = new Bridge(service, store, value => { reply = value; return Task.CompletedTask; }, _ => { }, themeChanged: _ => applied = true);
             bridge.HandleAsync("""{"id":1,"method":"setTheme","params":{"theme":"dark"}}""").GetAwaiter().GetResult();
-            Check(reply!.Contains("\"error\"") && !applied && store.Current.Theme == "github" && File.ReadAllText(path) == text,
+            Check(reply!.Contains("\"error\"") && !applied && store.Current.Theme == "light" && File.ReadAllText(path) == text,
                 "Failed theme save changed current settings, applied native chrome, or damaged the original file");
         }));
         foreach (var notifications in new[] { false, true })

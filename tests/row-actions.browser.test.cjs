@@ -55,6 +55,7 @@ test('real row hit testing and action identity across refreshes', { timeout: 900
     const click = async p => { await move(p.x, p.y); await press(p); await release(p); };
     await send('Page.enable');
     await send('Page.bringToFront');
+    await send('Emulation.setEmulatedMedia', { features: [{ name: 'prefers-reduced-motion', value: 'no-preference' }] });
     await send('Page.addScriptToEvaluateOnNewDocument', { source: `
       window.rowIntervals=[];
       const interval=window.setInterval.bind(window);
@@ -647,29 +648,50 @@ test('real row hit testing and action identity across refreshes', { timeout: 900
       assert.equal((await calls()).filter(c => c.method === 'hide').length, 1);
     });
 
-    await t.test('Copilot spinner survives collapse, another PR, refresh/filter and terminal events without losing per-PR state', async () => {
-      await reset(true);
-      const a = 'sample-service-id:101', b = 'sample-api-id:104';
-      const running = key => evaluate(`(()=>{const e=document.querySelector('[data-key="${key}"] .row [data-act="triage"]');return {running:e.classList.contains('running'),busy:e.getAttribute('aria-busy'),disabled:e.disabled,animation:getComputedStyle(e.querySelector('svg')).animationName};})()`);
-      await click(await point(a, '.row [data-act="triage"]')); await frame();
-      assert.deepEqual(await running(a), { running: true, busy: 'true', disabled: false, animation: 'spin' }, 'Launch reply must not clear the running indicator');
-      await click(await point(a, '.row .title')); await frame();
-      await click(await point(b, '.row .title')); await frame();
-      assert.equal((await running(a)).running, true);
-      assert.equal((await running(b)).running, false);
-      await move(10, 10); await evaluate('document.activeElement?.blur()'); await frame();
-      await evaluate(`setSnapshot({...S.snap,prs:S.snap.prs.map(p=>({...p,updated:'2099-01-01'}))});S.q='no matching PR';render();S.q='';render();`);
-      await frame();
-      assert.equal((await running(a)).running, true);
-      await evaluate(`updateCopilotRun({...S.snap.prs.find(p=>p.key==='${b}'),runId:'independent',status:'running',output:''});`);
-      for (const status of ['completed', 'failed', 'cancelled']) {
-        await evaluate(`updateCopilotRun({...runForPr('${a}'),runId:'test-${status}',status:'running',output:''});`);
-        assert.equal((await running(a)).running, true);
-        await evaluate(`updateCopilotRun({...runForPr('${a}'),status:'${status}'});`);
-        assert.equal((await running(a)).running, false, 'Collapsed terminal event must update the existing button');
-        assert.equal((await running(b)).running, true);
-      }
-    });
+    for (const motion of ['no-preference', 'reduce']) {
+      await t.test(`Copilot busy state and refresh survive redraws and terminal events with motion=${motion}`, async () => {
+        await send('Emulation.setEmulatedMedia', { features: [{ name: 'prefers-reduced-motion', value: motion }] });
+        try {
+          await reset(true);
+          assert.equal(await evaluate("matchMedia('(prefers-reduced-motion: reduce)').matches"), motion === 'reduce');
+          const a = 'sample-service-id:101', b = 'sample-api-id:104';
+          const active = { running: true, busy: 'true', disabled: false, animation: motion === 'reduce' ? 'none' : 'spin' };
+          const idle = { running: false, busy: null, disabled: false, animation: 'none' };
+          const running = key => evaluate(`(()=>{const e=document.querySelector('[data-key="${key}"] .row [data-act="triage"]');return {running:e.classList.contains('running'),busy:e.getAttribute('aria-busy'),disabled:e.disabled,animation:getComputedStyle(e.querySelector('svg')).animationName};})()`);
+          await click(await point(a, '.row [data-act="triage"]')); await frame();
+          assert.deepEqual(await running(a), active, 'Launch reply must not clear the busy state, regardless of motion preference');
+          await click(await point(a, '.row .title')); await frame();
+          await click(await point(b, '.row .title')); await frame();
+          assert.deepEqual(await running(a), active);
+          assert.deepEqual(await running(b), idle);
+          await move(10, 10); await evaluate('document.activeElement?.blur()'); await frame();
+          await evaluate(`setSnapshot({...S.snap,refreshing:true,prs:S.snap.prs.map(p=>({...p,updated:'2099-01-01'}))});S.q='no matching PR';render();S.q='';render();`);
+          await frame();
+          assert.deepEqual(await running(a), active);
+          const refresh = await evaluate(`(()=>{
+            const button=document.querySelector('#refreshBtn'),dot=document.querySelector('.statusline .dot');
+            return {spin:button.classList.contains('spin'),disabled:button.disabled,busy:dot.classList.contains('busy'),
+              label:dot.parentElement.textContent,animation:getComputedStyle(button.querySelector('svg')).animationName,
+              dotAnimation:getComputedStyle(dot).animationName};
+          })()`);
+          assert.deepEqual(refresh, { spin: true, disabled: false, busy: true, label: 'Refreshing…',
+            animation: motion === 'reduce' ? 'none' : 'spin', dotAnimation: motion === 'reduce' ? 'none' : 'blink' });
+          await evaluate(`document.querySelector('#refreshBtn').click();setSnapshot({...S.snap,refreshing:false});`);
+          assert.equal((await calls()).filter(c => c.method === 'refresh').length, 1, 'Refresh stays usable without animation');
+          assert.equal(await evaluate("document.querySelector('#refreshBtn').classList.contains('spin')"), false);
+          await evaluate(`updateCopilotRun({...S.snap.prs.find(p=>p.key==='${b}'),runId:'independent',status:'running',output:''});`);
+          for (const status of ['completed', 'failed', 'cancelled']) {
+            await evaluate(`updateCopilotRun({...runForPr('${a}'),runId:'test-${status}',status:'running',output:''});`);
+            assert.deepEqual(await running(a), active);
+            await evaluate(`updateCopilotRun({...runForPr('${a}'),status:'${status}'});`);
+            assert.deepEqual(await running(a), idle, 'Collapsed terminal event must clear only its own busy state');
+            assert.deepEqual(await running(b), active);
+          }
+        } finally {
+          await send('Emulation.setEmulatedMedia', { features: [{ name: 'prefers-reduced-motion', value: 'no-preference' }] });
+        }
+      });
+    }
 
     await t.test('running Copilot panel stays inside its owning row across lane/search/repo views and collapse/reopen', async () => {
       await send('Emulation.setDeviceMetricsOverride', { width: 1600, height: 1000, deviceScaleFactor: 1, mobile: false });
@@ -834,7 +856,7 @@ test('real row hit testing and action identity across refreshes', { timeout: 900
       await evaluate(`DOMPurify.sanitize=window.realSanitize;delete window.chrome.webview;`);
     });
 
-    await t.test('all three themes apply to real components, states, contrast and saved reloads', async () => {
+    await t.test('both themes apply to real components, states, contrast and saved reloads', async () => {
       const navigate = async url => {
         await evaluate('delete window.__ready');
         await send('Page.navigate', { url });
@@ -844,12 +866,17 @@ test('real row hit testing and action identity across refreshes', { timeout: 900
         })`);
         await frame();
       };
-      await navigate(pathToFileURL(root).href + '?mock=1');
-      assert.equal(await evaluate('document.documentElement.dataset.theme'), 'github', 'Missing preference defaults to GitHub');
+      for (const hint of ['', '&theme=github']) {
+        await navigate(pathToFileURL(root).href + '?mock=1' + hint);
+        assert.deepEqual(await evaluate('({applied:document.documentElement.dataset.theme,saved:S.settings.theme})'),
+          {applied:'light',saved:'light'},'Missing preference and the legacy GitHub hint use canonical Light Mode');
+      }
       await evaluate(`openDrawer();document.querySelector('#theme').focus();`);
-      for (const expected of ['light','dark']) {
-        await send('Input.dispatchKeyEvent',{type:'keyDown',key:'ArrowDown',code:'ArrowDown',windowsVirtualKeyCode:40});
-        await send('Input.dispatchKeyEvent',{type:'keyUp',key:'ArrowDown',code:'ArrowDown',windowsVirtualKeyCode:40});
+      assert.deepEqual(await evaluate("[...document.querySelector('#theme').options].map(o=>({value:o.value,label:o.textContent}))"),
+        [{value:'light',label:'Light Mode'},{value:'dark',label:'Dark Mode'}]);
+      for (const [expected,key,code] of [['dark','ArrowDown',40],['light','ArrowUp',38],['dark','ArrowDown',40]]) {
+        await send('Input.dispatchKeyEvent',{type:'keyDown',key,code:key,windowsVirtualKeyCode:code});
+        await send('Input.dispatchKeyEvent',{type:'keyUp',key,code:key,windowsVirtualKeyCode:code});
         await evaluate(`new Promise((resolve,reject)=>{
           const deadline=Date.now()+5000;
           const check=()=>!S.themeBusy?resolve():Date.now()>deadline?reject(Error('Theme save did not settle')):requestAnimationFrame(check);check();
@@ -865,7 +892,7 @@ test('real row hit testing and action identity across refreshes', { timeout: 900
         const { data } = await send('Page.captureScreenshot', { format: 'png' });
         await writeFile(path.join(screenshotDir, name + '.png'), Buffer.from(data, 'base64'));
       };
-      for (const [theme, background] of [['github','rgb(255, 255, 255)'],['light','rgb(243, 245, 251)'],['dark','rgb(14, 16, 20)']]) {
+      for (const [theme, background] of [['light','rgb(255, 255, 255)'],['dark','rgb(14, 16, 20)']]) {
         await evaluate('openDrawer()');
         await evaluate(`new Promise((resolve,reject)=>{
           const select=document.querySelector('#theme');
@@ -892,6 +919,9 @@ test('real row hit testing and action identity across refreshes', { timeout: 900
         await frame();
         assert.equal(await evaluate('getComputedStyle(document.activeElement).outlineStyle'),'solid');
         await screenshot(theme + '-settings');
+        await evaluate('closeDrawer()');
+        await frame();
+        await screenshot(theme + '-overview');
 
         await evaluate(`closeDrawer();
           window.themeFixture=structuredClone(S.snap);

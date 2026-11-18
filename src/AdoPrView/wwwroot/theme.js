@@ -3,8 +3,8 @@
 // The URL is only a first-paint hint, supplied from native settings at launch and
 // refreshed after a confirmed save. There is no second preference store.
 window.AppTheme = Object.freeze({
-  supported: ['github', 'light', 'dark'],
-  effective(value) { return this.supported.includes(value) ? value : 'github'; },
+  supported: ['light', 'dark'],
+  effective(value) { return this.supported.includes(value) ? value : 'light'; },
   apply(value) { document.documentElement.dataset.theme = this.effective(value); },
   remember(value) {
     const url = new URL(location.href);

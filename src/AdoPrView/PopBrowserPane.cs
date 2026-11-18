@@ -72,7 +72,7 @@ public sealed class PopBrowserPane : Border, IDisposable
     public PopBrowserPane(Func<PopTarget, Task<PopPolicyResult>> refresh, string? userDataDirectory = null)
     {
         session = new(refresh);
-        ApplyTheme("github");
+        ApplyTheme("light");
         this.userDataDirectory = userDataDirectory ?? Path.Combine(SettingsStore.Dir, "PoPWebView2");
         Visibility = Visibility.Collapsed;
         Margin = new Thickness(12, 0, 12, 12);
