@@ -5,8 +5,9 @@ const path = require('node:path');
 const vm = require('node:vm');
 
 const source = fs.readFileSync(path.join(__dirname, '..', 'src', 'AdoPrView', 'wwwroot', 'app.js'), 'utf8');
+const themeSource = fs.readFileSync(path.join(__dirname, '..', 'src', 'AdoPrView', 'wwwroot', 'theme.js'), 'utf8');
 
-function setup() {
+function setup(search = '?mock=1') {
   const elements = new Map();
   const element = () => ({
     innerHTML: '', textContent: '', dataset: {}, scrollTop: 0, children: [],
@@ -14,6 +15,7 @@ function setup() {
     appendChild(child) { this.children.push(child); }, remove() {},
   });
   const document = {
+    documentElement: { dataset: {} },
     querySelector(selector) {
       if (!elements.has(selector)) elements.set(selector, element());
       return elements.get(selector);
@@ -24,11 +26,15 @@ function setup() {
   const dialogs = [];
   const window = { MockHost: { rpc: () => new Promise(() => {}) }, addEventListener() {}, getSelection: () => '',
     confirm: text => { dialogs.push(text); return true; } };
+  const location = { href: 'https://app.local/index.html' + search, search };
   const context = vm.createContext({
-    window, document, URLSearchParams, location: { search: '?mock=1' },
+    window, document, URL, URLSearchParams, location,
+    history: { replaceState(_, __, url) { location.href = url.href; location.search = url.search; } },
     console, setTimeout() {}, setInterval() {}, queueMicrotask, confirm: text => window.confirm(text),
   });
-  vm.runInContext(source + '\nglobalThis.hooks = { S, onAction, actionButtons, renderDetail, setSnapshot, flushRowUpdates, renderHeader, renderRows, undoHide, baseVisible, updateCopilotRun, renderRunShelf, runForPr, runActive, onDrawerAction, loadApprovalSettings, renderDrawer, renderExplanation, updateExplanation, explanationBody };', context);
+  vm.runInContext(themeSource, context);
+  context.AppTheme = window.AppTheme;
+  vm.runInContext(source + '\nglobalThis.hooks = { S, onAction, actionButtons, renderDetail, setSnapshot, flushRowUpdates, renderHeader, renderRows, undoHide, baseVisible, updateCopilotRun, renderRunShelf, runForPr, runActive, onDrawerAction, loadApprovalSettings, renderDrawer, renderExplanation, updateExplanation, explanationBody, changeTheme, applySavedTheme };', context);
   const { hooks } = context;
   const pr = {
     key: 'repo:123', id: 123, repo: 'sample-service', title: 'Offline PR',
@@ -39,6 +45,99 @@ function setup() {
   hooks.S.snap = { prs: [pr], lastRefresh: new Date().toISOString(), approvalProvider: { name: 'Sample approval' } };
   return { hooks, pr, window, elements, dialogs, document, context, element };
 }
+
+test('theme changes apply immediately, save only the theme and leave other drawer edits alone', async () => {
+  const { hooks, window, document, elements, context, element } = setup();
+  hooks.S.settings.theme = 'light';
+  const selector = element();
+  selector.value = 'dark';
+  elements.set('#theme', selector);
+  const draft = element();
+  draft.value = 'unfinished polling edit';
+  elements.set('#refreshSeconds', draft);
+  let complete;
+  const calls = [];
+  window.MockHost.rpc = (method, p) => {
+    calls.push({ method, ...p });
+    return new Promise(resolve => { complete = resolve; });
+  };
+  const changing = hooks.changeTheme(selector);
+  assert.equal(document.documentElement.dataset.theme, 'dark');
+  assert.equal(selector.disabled, true);
+  await hooks.changeTheme(selector);
+  assert.deepEqual(calls, [{ method: 'setTheme', theme: 'dark' }]);
+  assert.equal(new URL(context.location.href).searchParams.get('theme'), null, 'Unconfirmed hints must not survive reload');
+  complete({ ...hooks.S.settings, theme: 'dark' });
+  await changing;
+  assert.equal(hooks.S.settings.theme, 'dark');
+  assert.equal(new URL(context.location.href).searchParams.get('theme'), 'dark');
+  assert.equal(selector.disabled, false);
+  assert.equal(draft.value, 'unfinished polling edit');
+});
+
+test('failed or unconfirmed theme saves restore the confirmed palette and display an error', async () => {
+  for (const invalidReply of [false, true]) {
+    const { hooks, window, document, elements, element, context } = setup();
+    hooks.S.settings.theme = 'dark';
+    hooks.applySavedTheme();
+    const selector = element();
+    selector.value = 'light';
+    elements.set('#theme', selector);
+    window.MockHost.rpc = async () => { if (invalidReply) return null; throw Error('Offline disk is read-only'); };
+    await hooks.changeTheme(selector);
+    assert.equal(hooks.S.settings.theme, 'dark');
+    assert.equal(document.documentElement.dataset.theme, 'dark');
+    assert.equal(new URL(context.location.href).searchParams.get('theme'), 'dark');
+    assert.equal(selector.value, 'dark');
+    assert.equal(selector.disabled, false);
+    assert.match(elements.get('#toasts').children[0].innerHTML, /Theme was not saved/);
+  }
+});
+
+test('theme save restores selector focus without stealing focus from another control or a closed drawer', async () => {
+  for (const outcome of ['saved', 'failed', 'moved', 'closed']) {
+    const { hooks, window, document, elements, element } = setup();
+    hooks.S.settings.theme = 'light';
+    hooks.S.drawer = true;
+    const selector = element(), another = element();
+    selector.value = 'dark';
+    selector.focus = () => { document.activeElement = selector; };
+    Object.defineProperty(selector, 'disabled', { set(value) { if (value) document.activeElement = document.body; } });
+    elements.set('#theme', selector);
+    document.activeElement = selector;
+    window.MockHost.rpc = async () => {
+      if (outcome === 'moved') document.activeElement = another;
+      if (outcome === 'closed') hooks.S.drawer = false;
+      if (outcome === 'failed') throw Error('Read-only settings');
+      return { ...hooks.S.settings, theme: 'dark' };
+    };
+    await hooks.changeTheme(selector);
+    assert.equal(document.activeElement, outcome === 'moved' ? another : outcome === 'closed' ? document.body : selector);
+  }
+});
+
+test('theme bootstrap defaults to Light Mode and accepts legacy github hints without a third choice', () => {
+  for (const value of [undefined, 'github', 'light', 'dark', 'future-theme']) {
+    const { document, window } = setup(value ? '?theme=' + value : '');
+    assert.equal(document.documentElement.dataset.theme, value === 'dark' ? 'dark' : 'light');
+    assert.deepEqual(Array.from(window.AppTheme.supported), ['light', 'dark']);
+  }
+});
+
+test('legacy and unsupported theme settings display Light Mode without overwriting the saved value', () => {
+  for (const value of [undefined, 'github', 'future-theme']) {
+    const { hooks, document } = setup();
+    hooks.S.settings.theme = value;
+    hooks.applySavedTheme();
+    assert.equal(document.documentElement.dataset.theme, 'light');
+    assert.equal(hooks.S.settings.theme, value);
+    hooks.renderDrawer();
+    const html = document.querySelector('#drawerBody').innerHTML;
+    assert.match(html, /value="light" selected>Light Mode/);
+    assert.match(html, /value="dark" >Dark Mode/);
+    assert.doesNotMatch(html, /value="github"/);
+  }
+});
 
 test('Explain is available on expanded drafts without changing fixed row actions or starting Fix', async () => {
   const { hooks, pr, window } = setup();

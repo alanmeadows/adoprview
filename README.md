@@ -7,7 +7,9 @@ Windows app that shows your PRs, and those of people you choose to watch, in one
 table sorted by what they are waiting on: **Needs Human**, **Blocked**,
 **Waiting** or **Ready**.
 
-![The dashboard: lane counters in the header, and one row per PR with its lane, gates and actions](docs/images/overview.png)
+![The default Light Mode dashboard: lane counters in the header, and one row per PR with its lane, gates and actions](docs/images/overview.png)
+
+Screenshots use the default Light Mode with synthetic PR data.
 
 ## Get it
 

@@ -10,7 +10,8 @@ namespace AdoPrView;
 /// JSON-RPC bridge between the WebView2 UI and the services.
 public sealed class Bridge(PrService prs, SettingsStore store, Func<string, Task> post, Action<bool> kickRefresh,
     IApprovalProvider? approval = null, IApprovalUi? approvalUi = null, Func<string, JsonObject, Task<object>>? copilotAction = null,
-    Func<string, Task<object>>? popAction = null, Func<string, JsonObject, Task<object>>? explainAction = null)
+    Func<string, Task<object>>? popAction = null, Func<string, JsonObject, Task<object>>? explainAction = null,
+    Action<string>? themeChanged = null)
 {
     public static readonly JsonSerializerOptions Json = new(JsonSerializerDefaults.Web)
     {
@@ -58,6 +59,11 @@ public sealed class Bridge(PrService prs, SettingsStore store, Func<string, Task
             case "refresh":
                 kickRefresh(true);
                 return null;
+            case "setTheme":
+                var theme = Str(p, "theme");
+                store.SetTheme(theme);
+                themeChanged?.Invoke(theme);
+                return store.Current;
             case "refreshOne":
                 await prs.RefreshOneAsync(Str(p, "key"));
                 return null;

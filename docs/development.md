@@ -97,6 +97,58 @@ neighboring action targets. All approval writes in these checks are intercepted.
 synthetic fixtures. The screenshots in [images](images) were captured from that
 mock UI with synthetic data.
 
+## Theme design and checks
+
+`wwwroot/themes.css` defines semantic canvas, surface, foreground, border,
+control, focus, status and output roles for `light` and `dark`.
+Components in `app.css` consume these roles rather than fixed colors.
+`AppTheme.cs` mirrors only the small native chrome subset; a native test checks
+it against the CSS. Set `color-scheme` per palette for native browser controls.
+
+Light Mode is a Primer-inspired theme, not a clone of github.com's navigation
+or a statement about its current default theme. The sources are official
+[Primer color primitives](https://primer.style/product/primitives/color/),
+[color usage](https://primer.style/product/getting-started/foundations/color-usage/),
+[typography](https://primer.style/product/getting-started/foundations/typography/)
+and [buttons](https://primer.style/product/components/button/). The bundled subset
+adapts [Primer primitives 11.10.0 light tokens](https://cdn.jsdelivr.net/npm/@primer/primitives@11.10.0/dist/css/functional/themes/light.css):
+white/subtle gray canvases, cool gray borders, blue links/focus, green primary
+actions, 6px radii, 1px borders and system fonts. The upstream MIT notice is
+retained at `licenses/Primer/LICENSE.txt` and included in build/publish output.
+No Primer runtime package, CDN request, remote font, GitHub logo or endorsement
+is involved.
+
+Native `settings.json` is the only preference authority. `setTheme` validates
+and atomically saves only that field, rolling it back on failure, then updates
+native chrome. General settings saves deliberately cannot reset a separately
+saved theme. `AppTheme.DashboardUri` supplies a derived `?theme=` first-paint
+hint; the synchronous `theme.js` applies it before the stylesheet and updates
+the current URL after confirmed saves so reloads also start with the right
+palette. There is no localStorage preference. Missing keys default to Light Mode.
+The former `github` value normalizes to `light` in memory and on subsequent saves,
+without rewriting the file at load. Unknown future values render the effective
+default with a notice without being silently rewritten.
+
+Busy/refresh indicators preserve their state and accessible labels when
+`prefers-reduced-motion` disables animation. Browser checks explicitly emulate
+both `no-preference` and `reduce`, independent of the test host's OS preference.
+
+The regular frontend/browser checks cover live switching, failure rollback,
+reload, first-paint defaults, representative computed colors/contrast and
+hover/focus/disabled states. To save synthetic screenshots, set
+`ADOPRVIEW_THEME_SCREENSHOTS` to an output directory before running the browser
+suite. The optional native check uses a disposable settings file and WebView2
+profile, the real bridge and selector, and no ADO requests or installed app data:
+
+```powershell
+$env:ADOPRVIEW_TEST_FILTER = 'theme'
+$env:ADOPRVIEW_TEST_NATIVE_THEME = '1'
+dotnet run --project tests\AdoPrView.Tests -c Release
+Remove-Item Env:\ADOPRVIEW_TEST_FILTER, Env:\ADOPRVIEW_TEST_NATIVE_THEME
+```
+
+## Native PoP checks
+
 CI and release checks enable the native PoP regression with the installed
 WebView2 Evergreen Runtime; the WebView2 SDK is not downgraded.
 The same check can be enabled locally. It intercepts all website requests with synthetic pages
