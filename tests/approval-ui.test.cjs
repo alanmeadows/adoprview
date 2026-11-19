@@ -12,6 +12,7 @@ function setup(search = '?mock=1') {
   const element = () => ({
     innerHTML: '', textContent: '', dataset: {}, scrollTop: 0, children: [],
     classList: { toggle() {} }, addEventListener() {}, querySelectorAll: () => [],
+    insertAdjacentHTML(_, html) { this.innerHTML += html; },
     showModal() { this.open = true; }, close() { this.open = false; },
     appendChild(child) { this.children.push(child); }, remove() {},
   });
@@ -159,6 +160,27 @@ test('TikTok rejects unsafe media URLs, ignores stale events and escapes the loc
   assert.match(html, /&lt;video&gt;\.mp4/);
   assert.match(html, /&lt;img src=x onerror=alert\(1\)&gt;/);
   assert.doesNotMatch(html, /autoplay|<img src=x/);
+});
+
+test('video shelf follows the selected lane and keeps lane-retained jobs in their rows', () => {
+  for (const [lane, retained] of [['blocked', false], ['waiting', false], ['blocked', true]]) {
+    const { hooks, pr, elements } = setup();
+    hooks.S.lane = lane;
+    hooks.S.expanded.add(pr.key);
+    if (retained) hooks.S.laneRetained.add(pr.key);
+    hooks.S.videos.set(pr.key, { key: pr.key, requestId: 'lane-job', sequence: 1,
+      status: 'rendering', message: 'Rendering', evidence: [], coverage: [] });
+    hooks.renderRows();
+    const shelf = elements.get('#videoShelf').innerHTML;
+    if (retained) {
+      assert.equal(shelf, '');
+      assert.match(elements.get('#rows').innerHTML, /data-video-key="repo:123"/);
+    } else {
+      assert.match(shelf, /data-video-key="repo:123"/, `${lane}: filtered-out job must remain reachable`);
+      assert.match(shelf, /data-act="cancelVideo" data-request-id="lane-job"\s*>/);
+      assert.doesNotMatch(elements.get('#rows').innerHTML, /data-key="repo:123"/);
+    }
+  }
 });
 
 test('TikTok refuses hidden inactive ignored and pending-removed PRs but retains exact-job cancellation outside the table', async () => {

@@ -96,6 +96,7 @@ test('real row hit testing and action identity across refreshes', { timeout: 900
           status:'cancelled',message:'Synthetic video cancelled. No MP4 was generated.'};
         if(method==='listSpeechSubscriptions'){
           if(window.speechMissingAz)throw Error('Azure CLI (az) is not available. Install Azure CLI and run az login.');
+          if(window.speechListDenied)throw Error('Subscription listing denied. Use an exact resource ID if permitted.');
           return [{id:'00000000-0000-4000-8000-000000000001',name:'Offline subscription'}];
         }
         if(method==='findSpeechResources')return [
@@ -164,6 +165,7 @@ test('real row hit testing and action identity across refreshes', { timeout: 900
       };
     `);
     const reset = async (race = false) => {
+      await evaluate('S.speechSetup ? closeSpeechSetup() : null');
       await release({ x: 10, y: 10 });
       await move(10, 10);
       await evaluate(`document.activeElement?.blur();`);
@@ -174,12 +176,16 @@ test('real row hit testing and action identity across refreshes', { timeout: 900
         window.confirmations=[];window.confirmResult=true;window.autoFailure=false;S.autoCompleteErrors.clear();
         window.explainSequence=0;S.explanations.clear();window.videoSequence=0;S.videos.clear();
         S.settings.videoSpeech={voice:'offline-configured-voice'};
-        window.speechMissingAz=false;window.speechDenied=false;
+        window.speechMissingAz=false;window.speechDenied=false;window.speechListDenied=false;
         window.holdApproval=false;window.approvalFailure=false;S.reviewVotes.clear();
         setSnapshot(structuredClone(window.baseline));${race ? 'window.raceFixture();' : ''}render();window.calls=[];`);
       await frame();
     };
     const point = (key, selector) => evaluate(`window.rowPoint(${JSON.stringify(key)},${JSON.stringify(selector)})`);
+    const elementPoint = selector => evaluate(`(()=>{
+      const el=document.querySelector(${JSON.stringify(selector)});el.scrollIntoView({block:'center'});
+      const r=el.getBoundingClientRect();return {x:r.x+r.width/2,y:r.y+r.height/2};
+    })()`);
     const expectedUrl = p => `https://dev.azure.com/contoso/Sample/_git/${encodeURIComponent(p.repo)}/pullrequest/${p.id}`;
     const calls = () => evaluate('window.calls');
     const hidePoint = async key => {
@@ -278,6 +284,31 @@ test('real row hit testing and action identity across refreshes', { timeout: 900
       assert.equal((await calls()).find(c=>c.method==='tiktokPr').key,key);
     });
 
+    await t.test('exact-resource setup preserves typed values through blur and verification without subscription-list access', async () => {
+      const key='sample-service-id:101';
+      const resource='/subscriptions/00000000-0000-4000-8000-000000000001/resourceGroups/offline/providers/Microsoft.CognitiveServices/accounts/offline-exact';
+      const voice='en-US-AvaMultilingualNeural';
+      await reset(true);
+      await evaluate(`S.settings.videoSpeech=null;window.speechListDenied=true;S.expanded.add('${key}');renderRows();`);
+      await click(await point(key,'.detail [data-act="tiktokPr"]')); await frame();
+      assert.match(await evaluate(`document.querySelector('#speechBody').textContent`),/Subscription listing denied/);
+      await evaluate(`document.querySelector('#speechBody details').open=true;document.querySelector('#speechExactId').focus();`);
+      await send('Input.insertText',{text:resource});
+      await send('Input.dispatchKeyEvent',{type:'keyDown',key:'Tab',code:'Tab',windowsVirtualKeyCode:9});
+      await send('Input.dispatchKeyEvent',{type:'keyUp',key:'Tab',code:'Tab',windowsVirtualKeyCode:9});
+      assert.equal(await evaluate(`document.querySelector('#speechExactId').value`),resource);
+      await evaluate(`document.querySelector('#speechExactVoice').value='';document.querySelector('#speechExactVoice').focus();`);
+      await send('Input.insertText',{text:voice});
+      await click(await elementPoint('[data-sact="exact"]')); await frame();
+      const selected=(await calls()).filter(c=>c.method==='selectSpeechResource');
+      assert.equal(selected.length,1);
+      assert.equal(selected[0].resourceId,resource);
+      assert.equal(selected[0].voice,voice);
+      assert.equal((await calls()).some(c=>c.method==='findSpeechResources'),false);
+      assert.equal((await calls()).filter(c=>c.method==='tiktokPr').length,1);
+      assert.equal(await evaluate(`document.querySelector('#speechDialog').open`),false);
+    });
+
     await t.test('video loading stays responsive, cancellation survives filtering, retry is exact-job scoped and ignored context cannot restart', async () => {
       const key='sample-service-id:101';
       for (const width of [1600,900]) {
@@ -326,6 +357,51 @@ test('real row hit testing and action identity across refreshes', { timeout: 900
         assert.deepEqual((await calls()).map(c=>c.method),['tiktokPr','cancelVideo','tiktokPr']);
       }
       await send('Emulation.setDeviceMetricsOverride', {width:1600,height:1000,deviceScaleFactor:1,mobile:false});
+    });
+
+    await t.test('lane-filtered video jobs keep a visible exact-job cancellation control', async () => {
+      const key='sample-service-id:101';
+      await reset(true);
+      await evaluate(`S.expanded.add('${key}');renderRows();`);
+      await click(await point(key,'.detail [data-act="tiktokPr"]')); await frame();
+      await click(await elementPoint('[data-lane="blocked"]')); await frame();
+      assert.equal(await evaluate(`!!document.querySelector('#rows [data-key="${key}"]')`),false);
+      const cancel=`#videoShelf [data-video-key="${key}"] [data-act="cancelVideo"]`;
+      assert.equal(await evaluate(`!!document.querySelector('${cancel}:not([hidden])')`),true);
+      await click(await elementPoint(cancel)); await frame();
+      const cancelled=(await calls()).filter(c=>c.method==='cancelVideo');
+      assert.equal(cancelled.length,1);
+      assert.equal(cancelled[0].key,key);
+      assert.equal(cancelled[0].requestId,'1'.padStart(32,'0'));
+    });
+
+    await t.test('shelf retries and membership changes retain unrelated player nodes, seek and playback settings', async () => {
+      const playing='sample-service-id:101', retry='sample-api-id:104';
+      await reset(true);
+      const state=await evaluate(`(async()=>{
+          S.q='no matching PR';renderRows();
+          updateVideo({key:'${playing}',requestId:'a'.repeat(32),sequence:++window.videoSequence,status:'completed',
+            message:'Offline playback fixture',evidence:[],coverage:[],model:'claude-opus-5.5',durationSeconds:1,
+            path:'offline.mp4',mediaUrl:'https://pr-video.local/'+'a'.repeat(32)+'.mp4'});
+          updateVideo({key:'${retry}',requestId:'b'.repeat(32),sequence:++window.videoSequence,status:'failed',
+            message:'Synthetic failure',evidence:[],coverage:[]});
+          const player=document.querySelector('#videoShelf [data-video-key="${playing}"] video');
+          player.currentTime=17;player.volume=.35;player.playbackRate=.75;
+          const snapshot=()=>{
+            const current=document.querySelector('#videoShelf [data-video-key="${playing}"] video');
+            return {same:current===player,connected:player.isConnected,position:current.currentTime,
+              volume:current.volume,rate:current.playbackRate};
+          };
+          await onAction('tiktokPr',{},'${retry}');
+          const afterRetry=snapshot();
+          updateVideo({key:'departed:105',requestId:'c'.repeat(32),sequence:++window.videoSequence,
+            status:'rendering',message:'Another retained job',evidence:[],coverage:[]});
+          const afterAddition=snapshot();
+          S.videos.delete('departed:105');renderVideoShelf();
+          return [afterRetry,afterAddition,snapshot()];
+        })()`);
+      assert.deepEqual(state,Array.from({length:3},()=>({same:true,connected:true,position:17,volume:.35,rate:.75})));
+      assert.equal((await calls()).find(c=>c.method==='tiktokPr').key,retry);
     });
 
     await t.test('ordinary Approve preserves collapsed/expanded rows through pending, result and refresh without dialogs or duplicate votes', async () => {

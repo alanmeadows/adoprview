@@ -288,6 +288,10 @@ function renderStatus() {
   $('#statusline').innerHTML = parts.join('<span class="small">·</span>');
 }
 
+function laneVisible(prs) {
+  return S.lane ? prs.filter(p => !ignoredDraft(p) && (p.lane === S.lane || S.laneRetained.has(p.key))) : prs;
+}
+
 function renderRows(whenIdle = false) {
   const players = new Map([...document.querySelectorAll('video[data-video-media]')].map(v => [v.dataset.videoMedia, v]));
   renderRowsContent(whenIdle);
@@ -319,7 +323,7 @@ function renderRowsContent(whenIdle = false) {
     empty.innerHTML = `<div class="big">📂</div><h2>No repositories yet</h2><div>Add an Azure DevOps repository URL in settings.</div><button class="btn primary" data-act="settings">Open settings</button>`;
     return;
   }
-  const shown = S.lane ? vis.filter((p) => !ignoredDraft(p) && (p.lane === S.lane || S.laneRetained.has(p.key))) : vis;
+  const shown = laneVisible(vis);
   if (S.lane) shown.forEach(p => S.laneRetained.add(p.key));
   if (!shown.length) {
     rows.innerHTML = '';
@@ -500,19 +504,19 @@ function updateVideo(r) {
 function renderVideoShelf() {
   const shelf = $('#videoShelf');
   if (!shelf) return;
-  const shown = new Set(baseVisible().map(p => p.key));
+  const shown = new Set(laneVisible(baseVisible()).map(p => p.key));
   const outside = [...S.videos.values()].filter(r => !shown.has(r.key));
-  const signature = outside.map(r => r.requestId).join(',');
-  if (shelf.dataset.signature === signature) {
-    for (const card of shelf.querySelectorAll('.pr-video')) {
-      const key = card.dataset.videoKey;
-      $('[data-act="tiktokPr"]', card).disabled = videoActive(S.videos.get(key)) || isBusy(key, 'tiktokPr') || !canVideo(key);
-    }
-    return;
+  const missing = new Set(outside.map(r => r.key));
+  for (const entry of shelf.querySelectorAll('.video-only')) {
+    if (missing.has(entry.dataset.key)) missing.delete(entry.dataset.key);
+    else entry.remove();
   }
-  shelf.dataset.signature = signature;
-  shelf.innerHTML = outside.map(r => `<div class="pr video-only" data-key="${esc(r.key)}"><div class="detail"><div class="full">
-    <p class="small">Video for ${esc(r.revision?.repo || 'PR')} !${esc(r.revision?.id || '')} outside the current view</p>${renderVideo(r.key)}</div></div></div>`).join('');
+  shelf.insertAdjacentHTML('beforeend', outside.filter(r => missing.has(r.key)).map(r => `<div class="pr video-only" data-key="${esc(r.key)}"><div class="detail"><div class="full">
+    <p class="small">Video for ${esc(r.revision?.repo || 'PR')} !${esc(r.revision?.id || '')} outside the current view</p>${renderVideo(r.key)}</div></div></div>`).join(''));
+  for (const card of shelf.querySelectorAll('.pr-video')) {
+    const key = card.dataset.videoKey;
+    $('[data-act="tiktokPr"]', card).disabled = videoActive(S.videos.get(key)) || isBusy(key, 'tiktokPr') || !canVideo(key);
+  }
 }
 
 function runSummary(r) {
@@ -1551,7 +1555,7 @@ function wire() {
   });
   $('#speechDialog').addEventListener('change', e => {
     const s = S.speechSetup;
-    if (!s || s.busy) return;
+    if (!s || s.busy || !['speechSubscription', 'speechResource', 'speechVoice'].includes(e.target.id)) return;
     if (e.target.id === 'speechSubscription') { s.subscription = e.target.value; s.resources = null; s.resource = ''; s.voice = ''; }
     if (e.target.id === 'speechResource') {
       s.resource = e.target.value;
