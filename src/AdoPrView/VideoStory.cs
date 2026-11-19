@@ -98,7 +98,7 @@ internal sealed record VideoStory(string Title, VideoCast[] Cast, VideoScene[] S
                 var at = scene.Narration.IndexOf(beat.Cue, cursor, StringComparison.OrdinalIgnoreCase);
                 if (at < 0)
                     throw new InvalidDataException($"Scene {number} cue \"{beat.Cue}\" must quote words from that scene's narration, in reveal order.");
-                cursor = at;
+                cursor = at + beat.Cue.Length;
                 if (Plain(beat.Text) == Plain(scene.Kicker))
                     throw new InvalidDataException($"Scene {number} repeats its kicker as a beat; make on-screen text complementary.");
                 if (Words(beat.Text).Length >= 6 && spoken.Contains(Plain(beat.Text), StringComparison.Ordinal))
@@ -177,7 +177,7 @@ internal sealed record VideoStory(string Title, VideoCast[] Cast, VideoScene[] S
                                 properties = new
                                 {
                                     text = Str("At most 44 characters; a condensed visual, not a copy of the narration."),
-                                    cue = Str("1-4 words quoted exactly from this scene's narration; the beat animates in as they are spoken. Cues in order."),
+                                    cue = Str("1-4 words quoted exactly from this scene's narration; the beat animates in as they are spoken. Cues in order, without reusing matched words. Repeated cues need later occurrences."),
                                     tone = Choice(Tones, "Color meaning: old behavior, new behavior, alert/caveat, or plain."),
                                 },
                             },

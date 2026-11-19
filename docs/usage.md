@@ -372,6 +372,10 @@ if desired. Missing `az`, sign-in, read permissions, Speech RBAC, network access
 or quota produce explicit errors. No resources are provisioned, keys fetched
 or role assignments changed. Discovery is limited to 100 candidate accounts
 per selected subscription; an exact account resource ID can also be supplied.
+Exact-resource input and its open panel survive progress updates and verification
+errors so a retry uses the same resource and voice. Speech response-body reads
+have a two-minute maximum deadline; a stalled response fails rather than keeping
+the only video slot occupied indefinitely.
 Public Azure custom subdomain endpoints are currently supported, not sovereign
 cloud endpoints.
 

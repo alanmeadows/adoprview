@@ -103,6 +103,24 @@ static class VideoTests
             }
             finally { foreach (var art in arts.Values) art.Dispose(); }
         });
+        await test("Video repeated narration cues advance to later journey stations and reject reused occurrences", async () =>
+        {
+            var story = Change(Story(), 3, s => s with
+            {
+                Narration = "Ready now marks the first stop. The preview can continue while we handle this step. Ready now marks the next stop. Finally, Ready now marks the last stop.",
+                Beats = [new("First stop", "Ready now", "plain"), new("Next stop", "Ready now", "new"), new("Last stop", "Ready now", "plain")],
+            });
+            story.Validate(["yawn"]);
+            var cues = VideoRenderer.ScenePlan.Create(story, 3, 0, 9).Cues;
+            Check(cues[0] < 1 && cues[1] > 3 && cues[2] > cues[1] + 1,
+                "Repeated phrases reused the first occurrence and skipped a journey station.");
+            var missing = Change(story, 3, s => s with
+            {
+                Narration = "Ready now marks the first stop, while the preview continues and human actions remain available without repeating this cue.",
+            });
+            await Throws<InvalidDataException>(() => Task.Run(() => missing.Validate(["yawn"])));
+            await Throws<InvalidDataException>(() => Task.FromResult(VideoRenderer.ScenePlan.Create(missing, 3, 0, 9)));
+        });
         await test("Video dependency setup retries failures shares concurrent checks and reuses successful bundled dependencies", async () =>
         {
             var checks = 0;

@@ -135,6 +135,7 @@ public sealed class MainWindow : Window, IApprovalUi
                     try { await _speechSetupWork; } catch (Exception ex) { _diagnostics.Record("speech-setup-stopped", ex.Message); }
                 await _video.DisposeAsync();
                 _speechSetup?.Dispose();
+                _speechSetup = null;
                 _speech.Dispose();
                 await _explain.DisposeAsync();
                 await _copilot.DisposeAsync();

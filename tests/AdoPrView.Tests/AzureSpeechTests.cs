@@ -64,6 +64,52 @@ static class AzureSpeechTests
             await Throws<InvalidDataException>(() => speech.SynthesizeAsync(new(Resource, "https://evil.invalid/", "eastus", Voice), "sample", default));
             await Throws<ArgumentException>(() => speech.SynthesizeAsync(new(Resource, Endpoint, "eastus", Voice), new string('x', 1001), default));
         });
+        await test("Video Azure stalled response bodies time out without turning caller cancellation into a network failure", async () =>
+        {
+            foreach (var narration in new[] { false, true })
+            {
+                foreach (var cancelCaller in new[] { false, true })
+                {
+                    using var body = new StalledBody();
+                    using var http = new HttpClient(new Transport(_ => Task.FromResult(new HttpResponseMessage(HttpStatusCode.OK)
+                        { Content = new StreamContent(body) }))) { Timeout = TimeSpan.FromMilliseconds(cancelCaller ? 2000 : 100) };
+                    using var speech = new AzureSpeech(http, (args, _) => Az([], args));
+                    using var cancel = new CancellationTokenSource();
+                    Task read = narration ? speech.SynthesizeAsync(new(Resource, Endpoint, "eastus", Voice), "sample", cancel.Token)
+                        : speech.VoicesAsync(new(Resource, Endpoint, "eastus", Voice), cancel.Token);
+                    await body.Entered.Task.WaitAsync(TimeSpan.FromSeconds(5));
+                    if (cancelCaller)
+                    {
+                        cancel.Cancel();
+                        await Throws<OperationCanceledException>(() => read.WaitAsync(TimeSpan.FromSeconds(5)));
+                    }
+                    else
+                    {
+                        try
+                        {
+                            await read.WaitAsync(TimeSpan.FromSeconds(5));
+                            throw new Exception("Stalled response body did not time out.");
+                        }
+                        catch (HttpRequestException ex)
+                        {
+                            Check(ex.Message.Contains("body timed out") && !cancel.IsCancellationRequested,
+                                "Body deadline was not distinguished from caller cancellation.");
+                        }
+                    }
+                }
+            }
+        });
+        await test("Video Azure response body deadlines retain declared and streaming byte limits", async () =>
+        {
+            foreach (var chunked in new[] { false, true })
+            {
+                using HttpContent content = chunked ? new StreamContent(new ChunkedBody(new byte[4_000_001])) : new ByteArrayContent([]);
+                if (!chunked) content.Headers.ContentLength = 4_000_001;
+                using var http = new HttpClient(new Transport(_ => Task.FromResult(new HttpResponseMessage(HttpStatusCode.OK) { Content = content })));
+                using var speech = new AzureSpeech(http, (args, _) => Az([], args));
+                await Throws<InvalidDataException>(() => speech.VoicesAsync(new(Resource, Endpoint, "eastus", Voice), default));
+            }
+        });
         await test("Video Azure malformed audio shell arguments and cancelled operations fail explicitly", async () =>
         {
             foreach (var bytes in new[] { Array.Empty<byte>(), Encoding.UTF8.GetBytes("not audio"), Wave()[..80] })
@@ -113,5 +159,27 @@ static class AzureSpeechTests
     sealed class Transport(Func<HttpRequestMessage, Task<HttpResponseMessage>> send) : HttpMessageHandler
     {
         protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken ct) => send(request);
+    }
+    sealed class ChunkedBody(byte[] data) : MemoryStream(data)
+    {
+        public override bool CanSeek => false;
+    }
+    sealed class StalledBody : Stream
+    {
+        readonly TaskCompletionSource<int> _completion = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        public TaskCompletionSource Entered { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        public override ValueTask<int> ReadAsync(Memory<byte> buffer, CancellationToken ct = default)
+        { Entered.TrySetResult(); return new(_completion.Task.WaitAsync(ct)); }
+        protected override void Dispose(bool disposing) { if (disposing) _completion.TrySetResult(0); base.Dispose(disposing); }
+        public override bool CanRead => true;
+        public override bool CanSeek => false;
+        public override bool CanWrite => false;
+        public override long Length => throw new NotSupportedException();
+        public override long Position { get => throw new NotSupportedException(); set => throw new NotSupportedException(); }
+        public override int Read(byte[] buffer, int offset, int count) => throw new NotSupportedException();
+        public override void Flush() => throw new NotSupportedException();
+        public override long Seek(long offset, SeekOrigin origin) => throw new NotSupportedException();
+        public override void SetLength(long value) => throw new NotSupportedException();
+        public override void Write(byte[] buffer, int offset, int count) => throw new NotSupportedException();
     }
 }

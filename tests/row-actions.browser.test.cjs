@@ -104,6 +104,7 @@ test('real row hit testing and action identity across refreshes', { timeout: 900
             voices:['en-US-Ava:DragonHDLatestNeural'],message:'Synthetic catalog; no live Azure call'},
           {resourceId:'offline-denied',name:'Denied fixture',region:'eastus',compatible:false,voices:[],message:'Missing Speech User RBAC'}];
         if(method==='selectSpeechResource'){
+          if(window.holdSpeechSelection)await new Promise(resolve=>window.completeSpeechSelection=resolve);
           if(window.speechDenied)throw Error('Synthesis denied: Cognitive Services Speech User RBAC is required.');
           return {...S.settings,videoSpeech:{resourceId:p.resourceId,voice:p.voice,region:'eastus'}};
         }
@@ -176,7 +177,7 @@ test('real row hit testing and action identity across refreshes', { timeout: 900
         window.confirmations=[];window.confirmResult=true;window.autoFailure=false;S.autoCompleteErrors.clear();
         window.explainSequence=0;S.explanations.clear();window.videoSequence=0;S.videos.clear();
         S.settings.videoSpeech={voice:'offline-configured-voice'};
-        window.speechMissingAz=false;window.speechDenied=false;window.speechListDenied=false;
+        window.speechMissingAz=false;window.speechDenied=false;window.speechListDenied=false;window.holdSpeechSelection=false;
         window.holdApproval=false;window.approvalFailure=false;S.reviewVotes.clear();
         setSnapshot(structuredClone(window.baseline));${race ? 'window.raceFixture();' : ''}render();window.calls=[];`);
       await frame();
@@ -284,7 +285,7 @@ test('real row hit testing and action identity across refreshes', { timeout: 900
       assert.equal((await calls()).find(c=>c.method==='tiktokPr').key,key);
     });
 
-    await t.test('exact-resource setup preserves typed values through blur and verification without subscription-list access', async () => {
+    await t.test('exact-resource setup retains typed values and open state through progress, denied verification and retry', async () => {
       const key='sample-service-id:101';
       const resource='/subscriptions/00000000-0000-4000-8000-000000000001/resourceGroups/offline/providers/Microsoft.CognitiveServices/accounts/offline-exact';
       const voice='en-US-AvaMultilingualNeural';
@@ -299,11 +300,23 @@ test('real row hit testing and action identity across refreshes', { timeout: 900
       assert.equal(await evaluate(`document.querySelector('#speechExactId').value`),resource);
       await evaluate(`document.querySelector('#speechExactVoice').value='';document.querySelector('#speechExactVoice').focus();`);
       await send('Input.insertText',{text:voice});
+      await evaluate(`window.holdSpeechSelection=true;window.speechDenied=true;`);
+      await click(await elementPoint('[data-sact="exact"]')); await frame();
+      await evaluate(`onHostMessage({event:'speechSetupProgress',data:{epoch:S.speechEpoch,message:'Checking offline synthesis permissions'}});`);
+      const exactState=()=>evaluate(`({
+        resource:document.querySelector('#speechExactId').value,voice:document.querySelector('#speechExactVoice').value,
+        open:document.querySelector('#speechBody details').open
+      })`);
+      assert.deepEqual(await exactState(),{resource,voice,open:true});
+      await evaluate(`window.completeSpeechSelection();`); await frame();
+      assert.match(await evaluate(`document.querySelector('#speechBody').textContent`),/Synthesis denied/);
+      assert.deepEqual(await exactState(),{resource,voice,open:true});
+      assert.equal((await calls()).some(c=>c.method==='tiktokPr'),false);
+      await evaluate(`window.holdSpeechSelection=false;window.speechDenied=false;`);
       await click(await elementPoint('[data-sact="exact"]')); await frame();
       const selected=(await calls()).filter(c=>c.method==='selectSpeechResource');
-      assert.equal(selected.length,1);
-      assert.equal(selected[0].resourceId,resource);
-      assert.equal(selected[0].voice,voice);
+      assert.equal(selected.length,2);
+      assert.equal(selected.every(c=>c.resourceId===resource&&c.voice===voice),true);
       assert.equal((await calls()).some(c=>c.method==='findSpeechResources'),false);
       assert.equal((await calls()).filter(c=>c.method==='tiktokPr').length,1);
       assert.equal(await evaluate(`document.querySelector('#speechDialog').open`),false);

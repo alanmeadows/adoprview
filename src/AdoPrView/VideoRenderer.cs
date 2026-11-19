@@ -319,8 +319,11 @@ internal sealed class VideoRenderer(IVideoVoice voice, string? assetDirectory = 
             var cursor = 0;
             var cues = scene.Beats.Select(beat =>
             {
-                cursor = Math.Max(cursor, scene.Narration.IndexOf(beat.Cue, cursor, StringComparison.OrdinalIgnoreCase));
-                return Math.Clamp(speech * cursor / length - 0.1, 0.15, Math.Max(0.15, speech - 0.4));
+                var at = scene.Narration.IndexOf(beat.Cue, cursor, StringComparison.OrdinalIgnoreCase);
+                if (at < 0)
+                    throw new InvalidDataException($"Scene {index + 1} cue \"{beat.Cue}\" has no remaining narration occurrence.");
+                cursor = at + beat.Cue.Length;
+                return Math.Clamp(speech * at / length - 0.1, 0.15, Math.Max(0.15, speech - 0.4));
             }).ToArray();
             var parts = VideoRenderer.Captions(scene.Narration);
             var weight = Math.Max(1, parts.Sum(p => p.Length));

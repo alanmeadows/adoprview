@@ -188,19 +188,29 @@ internal sealed class AzureSpeech : IDisposable
         finally { _tokenGate.Release(); }
     }
 
-    static async Task<byte[]> ReadAsync(HttpResponseMessage response, int maximum, CancellationToken ct)
+    async Task<byte[]> ReadAsync(HttpResponseMessage response, int maximum, CancellationToken ct)
     {
         if (response.Content.Headers.ContentLength > maximum) throw new InvalidDataException("Azure Speech response exceeds the size limit.");
-        await using var stream = await response.Content.ReadAsStreamAsync(ct);
-        using var output = new MemoryStream();
-        var buffer = new byte[8192];
-        int read;
-        while ((read = await stream.ReadAsync(buffer, ct)) > 0)
+        using var timeout = CancellationTokenSource.CreateLinkedTokenSource(ct);
+        var maximumWait = TimeSpan.FromMinutes(2);
+        timeout.CancelAfter(_http.Timeout > TimeSpan.Zero && _http.Timeout < maximumWait ? _http.Timeout : maximumWait);
+        try
         {
-            if (output.Length + read > maximum) throw new InvalidDataException("Azure Speech response exceeds the size limit.");
-            output.Write(buffer, 0, read);
+            await using var stream = await response.Content.ReadAsStreamAsync(timeout.Token);
+            using var output = new MemoryStream();
+            var buffer = new byte[8192];
+            int read;
+            while ((read = await stream.ReadAsync(buffer, timeout.Token)) > 0)
+            {
+                if (output.Length + read > maximum) throw new InvalidDataException("Azure Speech response exceeds the size limit.");
+                output.Write(buffer, 0, read);
+            }
+            return output.ToArray();
         }
-        return output.ToArray();
+        catch (OperationCanceledException ex) when (timeout.IsCancellationRequested && !ct.IsCancellationRequested)
+        {
+            throw new HttpRequestException("Azure Speech response body timed out. Check network access and retry.", ex);
+        }
     }
 
     internal static VideoSpeech ReadWave(byte[] bytes)

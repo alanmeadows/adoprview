@@ -1249,7 +1249,8 @@ async function onAction(act, el, key) {
 async function openSpeechSetup(key = null) {
   if ($('#speechDialog').open) return;
   const epoch = ++S.speechEpoch;
-  S.speechSetup = { key, busy: true, progress: 'Checking video dependencies and Azure CLI...', subscriptions: [], subscription: '', resources: null, resource: '', voice: '', error: '' };
+  S.speechSetup = { key, busy: true, progress: 'Checking video dependencies and Azure CLI...', subscriptions: [], subscription: '', resources: null, resource: '', voice: '', error: '',
+    exactId: '', exactVoice: 'en-US-Ava:DragonHDLatestNeural', exactOpen: false };
   renderSpeechSetup(); $('#speechDialog').showModal();
   try {
     const subscriptions = await rpc('listSpeechSubscriptions', { epoch });
@@ -1284,10 +1285,10 @@ function renderSpeechSetup() {
       ${s.resources.filter(r => !r.compatible).map(r => `<p class="speech-result small">${esc(r.name)}: ${esc(r.message)}</p>`).join('')}` : ''}
     ${selected ? `<p class="speech-result small">${esc(selected.resourceId)}<br>${esc(selected.message)}</p>
       <label>Neural voice<select id="speechVoice" ${s.busy ? 'disabled' : ''}>${selected.voices.map(v => `<option ${v === s.voice ? 'selected' : ''}>${esc(v)}</option>`).join('')}</select></label>` : ''}
-    <details><summary>Have an exact resource ID?</summary><p class="help">Use an account ID ending in Microsoft.CognitiveServices/accounts/name, not a project URL.
+    <details id="speechExactDetails" ${s.exactOpen ? 'open' : ''}><summary>Have an exact resource ID?</summary><p class="help">Use an account ID ending in Microsoft.CognitiveServices/accounts/name, not a project URL.
       This also works when your account can read a resource but cannot list its subscription.</p>
-      <label>Resource ID<input id="speechExactId" placeholder="/subscriptions/.../resourceGroups/.../providers/Microsoft.CognitiveServices/accounts/..." ${s.busy ? 'disabled' : ''}></label>
-      <label>Voice name<input id="speechExactVoice" value="en-US-Ava:DragonHDLatestNeural" ${s.busy ? 'disabled' : ''}></label>
+      <label>Resource ID<input id="speechExactId" value="${esc(s.exactId)}" placeholder="/subscriptions/.../resourceGroups/.../providers/Microsoft.CognitiveServices/accounts/..." ${s.busy ? 'disabled' : ''}></label>
+      <label>Voice name<input id="speechExactVoice" value="${esc(s.exactVoice)}" ${s.busy ? 'disabled' : ''}></label>
       <button class="mini" data-sact="exact" ${s.busy ? 'disabled' : ''}>Verify and use this resource${s.key ? ', then generate' : ''}</button></details>
     <p role="status" aria-live="polite" class="${s.error ? 'error' : 'small'}">${s.busy ? '<span class="video-spinner" aria-hidden="true"></span> ' : ''}${esc(s.error || (s.busy ? s.progress || 'Checking Azure access... You can cancel this setup.' : 'Only compatible resources with verified voice access can be selected.'))}</p>
     <div class="field"><button class="btn primary" data-sact="use" ${s.busy || !selected || !s.voice ? 'disabled' : ''}>
@@ -1553,6 +1554,15 @@ function wire() {
     const button = e.target.closest('[data-sact]');
     if (button && !button.disabled) void onSpeechAction(button.dataset.sact);
   });
+  $('#speechDialog').addEventListener('input', e => {
+    const s = S.speechSetup;
+    if (!s || s.busy) return;
+    if (e.target.id === 'speechExactId') s.exactId = e.target.value;
+    if (e.target.id === 'speechExactVoice') s.exactVoice = e.target.value;
+  });
+  $('#speechDialog').addEventListener('toggle', e => {
+    if (S.speechSetup && e.target.id === 'speechExactDetails') S.speechSetup.exactOpen = e.target.open;
+  }, true);
   $('#speechDialog').addEventListener('change', e => {
     const s = S.speechSetup;
     if (!s || s.busy || !['speechSubscription', 'speechResource', 'speechVoice'].includes(e.target.id)) return;
