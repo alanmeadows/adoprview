@@ -51,6 +51,7 @@ internal sealed class VideoModel : IVideoModel
                   ideal for a sequence or flow), list (2-4 points that slide in, for guardrails or caveats).
                 - Every beat has a cue: 1-4 words copied exactly from that scene's narration. The beat animates in the
                   moment those words are spoken, so order beats by when you say them and cue the meaningful word.
+                  Space consecutive cues apart in the narration so each beat has a distinct reveal.
                 - On-screen text is a condensed visual label (<=44 chars, usually 2-6 words), never the narration
                   sentence repeated; the kicker is a tiny corner label (<=40 chars) and must differ from every beat.
                 - Tones color meaning consistently: old = previous behavior, new = changed behavior, alert = caveat.

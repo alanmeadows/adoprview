@@ -1,4 +1,5 @@
 using System.Net;
+using System.Net.Sockets;
 using System.Text;
 using System.Text.Json;
 using System.Xml.Linq;
@@ -41,6 +42,54 @@ static class AzureSpeechTests
             await Throws<HttpRequestException>(() => speech.SelectAsync(Resource, Voice, default, testSynthesis: true));
             await Throws<InvalidOperationException>(() => speech.SelectAsync(Resource, "unavailable-voice", default));
             await Throws<ArgumentException>(() => speech.SelectAsync(Resource + "/projects/arbitrary", Voice, default));
+        });
+        await test("Video Azure Unicode resource groups survive discovery and exact selection without changing CLI segments", async () =>
+        {
+            foreach (var group in new[] { "\u00e9quipe", "\u958b\u767a", "ci-\u0661\u0662", "\u01c5\u02b0", "Team.(A)_1", new string('\u958b', 90) })
+            {
+                var resource = Resource.Replace("/resourceGroups/offline/", $"/resourceGroups/{group}/");
+                var calls = new List<string[]>();
+                using var speech = Service(calls, _ => Json(new[] { new { ShortName = Voice, Locale = "en-US", VoiceType = "Neural", Status = "GA" } }), resource);
+                var found = await speech.FindAsync(Subscription, default);
+                Check(found.Single(c => c.ResourceId == resource).Compatible, "Discovery rejected a supported Unicode resource group.");
+                var selected = await speech.SelectAsync(resource, Voice, default);
+                var show = calls.Single(c => c.Contains("show"));
+                Check(selected.ResourceId == resource && show[Array.IndexOf(show, "--resource-group") + 1] == group &&
+                    show[Array.IndexOf(show, "--name") + 1] == "offline-speech", "Exact selection changed the resource group or account segment.");
+            }
+        });
+        await test("Video Azure resource IDs reject invalid group categories separators and account names", async () =>
+        {
+            foreach (var group in new[] { "", new string('a', 91), "trailing.", "a/b", @"a\b", "a%2fb", "a&b", "a|b",
+                "a^b", "a!b", "a\"b", "a\nb", "a b", "a?b", "a#b", "a\u00b2", "a\u2167", "e\u0301quipe" })
+                await Throws<ArgumentException>(() => Task.FromResult(AzureSpeech.Resource(Resource.Replace("/resourceGroups/offline/", $"/resourceGroups/{group}/"))));
+            foreach (var account in new[] { "ab", "Az-12", new string('a', 64) })
+                Check(AzureSpeech.Resource(Resource.Replace("accounts/offline-speech", "accounts/" + account)).Success, "A valid ASCII account name was rejected.");
+            foreach (var account in new[] { "a", new string('a', 65), "-az", "az-", "az_name", "\u958b\u767a", "\u212a1", "az/child" })
+                await Throws<ArgumentException>(() => Task.FromResult(AzureSpeech.Resource(Resource.Replace("accounts/offline-speech", "accounts/" + account))));
+            foreach (var suffix in new[] { "/projects/child", "?query=x", "#fragment", "\n" })
+                await Throws<ArgumentException>(() => Task.FromResult(AzureSpeech.Resource(Resource + suffix)));
+        });
+        await test("Video Azure native HTTP transport sends Unicode resource IDs in the authorization header", async () =>
+        {
+            using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(5));
+            using var listener = new TcpListener(IPAddress.Loopback, 0);
+            listener.Start();
+            using var handler = AzureSpeech.CreateHandler();
+            handler.UseProxy = false;
+            using var http = new HttpClient(handler);
+            using var request = new HttpRequestMessage(HttpMethod.Get, $"http://127.0.0.1:{((IPEndPoint)listener.LocalEndpoint).Port}/");
+            var authorization = $"aad#{Resource.Replace("/resourceGroups/offline/", "/resourceGroups/\u958b\u767a/")}#offline-token-never-print";
+            request.Headers.Authorization = new("Bearer", authorization);
+            var send = http.SendAsync(request, timeout.Token);
+            using var client = await listener.AcceptTcpClientAsync(timeout.Token);
+            using var reader = new StreamReader(client.GetStream(), Encoding.UTF8, leaveOpen: true);
+            var headers = new List<string>();
+            string? line;
+            while (!string.IsNullOrEmpty(line = await reader.ReadLineAsync(timeout.Token))) headers.Add(line);
+            await client.GetStream().WriteAsync("HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"u8.ToArray(), timeout.Token);
+            using var response = await send;
+            Check(headers.Contains("Authorization: Bearer " + authorization), "Native HTTP rejected or corrupted the Unicode resource ID.");
         });
         await test("Video Azure narration XML-escapes text uses bounded PCM and never sends tokens or SSML to the model", async () =>
         {
@@ -123,9 +172,9 @@ static class AzureSpeechTests
         });
     }
 
-    static AzureSpeech Service(List<string[]> calls, Func<HttpRequestMessage, HttpResponseMessage> response) =>
-        new(new HttpClient(new Transport(r => Task.FromResult(response(r)))), (args, _) => Az(calls, args));
-    static Task<string> Az(List<string[]> calls, string[] args)
+    static AzureSpeech Service(List<string[]> calls, Func<HttpRequestMessage, HttpResponseMessage> response, string resource = Resource) =>
+        new(new HttpClient(new Transport(r => Task.FromResult(response(r)))), (args, _) => Az(calls, args, resource));
+    static Task<string> Az(List<string[]> calls, string[] args, string resource = Resource)
     {
         lock (calls) calls.Add(args);
         object result = args[1] switch
@@ -136,11 +185,11 @@ static class AzureSpeechTests
                 new { id = Subscription, name = "Sovereign cloud", state = "Enabled", cloudName = "AzureUSGovernment", environmentName = "AzureCloud" },
                 new { id = Subscription, name = "Disabled", state = "Disabled", cloudName = "AzureCloud" },
                 new { id = Subscription, name = "Unknown cloud", state = "Enabled" } },
-            _ when args.Contains("show") => new { id = Resource, kind = "AIServices", location = "eastus", endpoint = Endpoint },
+            _ when args.Contains("show") => new { id = resource, kind = "AIServices", location = "eastus", endpoint = Endpoint },
             _ => new[] {
-                new { id = Resource, name = "offline-speech", kind = "AIServices", location = "eastus", endpoint = Endpoint },
-                new { id = Resource.Replace("offline-speech", "denied"), name = "denied", kind = "SpeechServices", location = "eastus", endpoint = Endpoint },
-                new { id = Resource, name = "not-speech", kind = "OpenAI", location = "eastus", endpoint = Endpoint } },
+                new { id = resource, name = "offline-speech", kind = "AIServices", location = "eastus", endpoint = Endpoint },
+                new { id = resource.Replace("offline-speech", "denied"), name = "denied", kind = "SpeechServices", location = "eastus", endpoint = Endpoint },
+                new { id = resource, name = "not-speech", kind = "OpenAI", location = "eastus", endpoint = Endpoint } },
         };
         return Task.FromResult(JsonSerializer.Serialize(result));
     }

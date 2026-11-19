@@ -121,6 +121,31 @@ static class VideoTests
             await Throws<InvalidDataException>(() => Task.Run(() => missing.Validate(["yawn"])));
             await Throws<InvalidDataException>(() => Task.FromResult(VideoRenderer.ScenePlan.Create(missing, 3, 0, 9)));
         });
+        await test("Video layout rejects ordered cues that collide after clamping and accepts distinct reveal times", async () =>
+        {
+            var story = Change(Story(), 3, s => s with
+            {
+                Narration = "PR checks can advance through the pipeline while the dashboard keeps every human action available. A reviewer can act later, once the separate preview has finished updating.",
+                Beats = [new("First stop", "PR", "plain"), new("Next check", "checks", "new"), new("Reviewer action", "reviewer", "plain")],
+            });
+            try
+            {
+                VideoRenderer.ScenePlan.Create(story, 3, 0, 8);
+                throw new Exception("The PR/checks clamp collision was accepted.");
+            }
+            catch (InvalidDataException ex)
+            {
+                Check(ex.Message.Contains("increasing reveal times"), "The fixture failed for a reason other than the actual timestamp collision.");
+            }
+            await Throws<InvalidDataException>(() => Task.Run(() => story.Validate(["yawn"])));
+            var spaced = Change(story, 3, s => s with
+            {
+                Narration = "A PR waits while the dashboard shows which human action needs attention. Those checks keep running in the background. A reviewer can still act when the preview finishes.",
+            });
+            spaced.Validate(["yawn"]);
+            var cues = VideoRenderer.ScenePlan.Create(spaced, 3, 0, 8).Cues;
+            Check(cues.Zip(cues.Skip(1)).All(pair => pair.First < pair.Second), "Distinct, ordered reveal times were not preserved.");
+        });
         await test("Video dependency setup retries failures shares concurrent checks and reuses successful bundled dependencies", async () =>
         {
             var checks = 0;

@@ -28,17 +28,26 @@ internal sealed class AzureSpeech : IDisposable
     DateTimeOffset _expiry;
     internal AzureSpeech(HttpClient? http = null, Func<string[], CancellationToken, Task<string>>? az = null)
     {
-        _http = http ?? new HttpClient(new SocketsHttpHandler { AllowAutoRedirect = false })
+        _http = http ?? new HttpClient(CreateHandler())
             { Timeout = TimeSpan.FromMinutes(2) };
         _az = az ?? RunAzAsync;
     }
 
+    internal static SocketsHttpHandler CreateHandler() => new()
+    {
+        AllowAutoRedirect = false,
+        // The aad authorization value includes the resource ID, whose group name can contain Unicode.
+        RequestHeaderEncodingSelector = static (name, _) => name.Equals("Authorization", StringComparison.OrdinalIgnoreCase) ? Encoding.UTF8 : null,
+    };
+
     static string Value(JsonNode node, string key) => node[key]?.GetValue<string>() ?? "";
     internal static Match Resource(string id)
     {
-        var match = Regex.Match(id, @"\A/subscriptions/([a-fA-F0-9-]{36})/resourceGroups/([a-zA-Z0-9_.()-]{1,90})/providers/Microsoft\.CognitiveServices/accounts/([a-zA-Z0-9-]{2,64})\z",
+        var match = Regex.Match(id,
+            @"\A/subscriptions/([a-fA-F0-9-]{36})/resourceGroups/([\p{L}\p{Nd}_.()-]{1,90})" +
+            @"/providers/Microsoft\.CognitiveServices/accounts/((?-i:[a-zA-Z0-9][a-zA-Z0-9-]{0,62}[a-zA-Z0-9]))\z",
             RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
-        if (!match.Success || !Guid.TryParse(match.Groups[1].Value, out _))
+        if (!match.Success || !Guid.TryParse(match.Groups[1].Value, out _) || match.Groups[2].Value.EndsWith('.'))
             throw new ArgumentException("Select an Azure Cognitive Services account, not a Foundry project or model deployment.");
         return match;
     }

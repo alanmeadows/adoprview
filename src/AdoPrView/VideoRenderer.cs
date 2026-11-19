@@ -325,6 +325,8 @@ internal sealed class VideoRenderer(IVideoVoice voice, string? assetDirectory = 
                 cursor = at + beat.Cue.Length;
                 return Math.Clamp(speech * at / length - 0.1, 0.15, Math.Max(0.15, speech - 0.4));
             }).ToArray();
+            if (cues.Zip(cues.Skip(1)).Any(pair => pair.First >= pair.Second))
+                throw new InvalidDataException($"Scene {index + 1} cues need distinct, increasing reveal times. Space their phrases further apart in the narration.");
             var parts = VideoRenderer.Captions(scene.Narration);
             var weight = Math.Max(1, parts.Sum(p => p.Length));
             var elapsed = 0.0;
