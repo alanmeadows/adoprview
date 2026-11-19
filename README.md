@@ -62,6 +62,16 @@ optional and needs WSL with an authenticated Copilot CLI; it runs with broad
 permissions and the worktree is not a sandbox. Read
 [Inline Copilot Fix](docs/usage.md#inline-copilot-fix) before using it.
 
+### TikTok This PR
+
+Expanded PRs also offer [TikTok This PR](docs/usage.md#tiktok-this-pr): an
+Opus 5.5 code-grounded short explainer with Azure neural narration, captions,
+animated visuals and real cats integrated into the explanation, rendered locally
+and played inline. First use
+selects an accessible Azure Speech resource using your Azure CLI sign-in.
+Speech processes narration in Azure and charges that resource; no API key or
+extra model deployment is needed.
+
 ### Merge re-checks and auto-complete
 
 <img src="docs/images/merge-auto.png" width="480" alt="The expanded Status and Merge cards with Re-check merge and Set auto-complete buttons">

@@ -1,0 +1,74 @@
+[
+  {
+    "id": "yawn",
+    "file": "yawn.jpg",
+    "description": "A real fluffy cat lying on a wooden table, yawning dramatically. Cast as the bored waiter or relieved teammate; useful for a slow before-state or a payoff, not an unrelated cutaway.",
+    "author": "Lemon tart",
+    "source": "https://commons.wikimedia.org/wiki/File:Cat_yawning_-_DSC00577.jpg",
+    "license": "CC0-1.0",
+    "sha256": "BDE62712E1F72BB24B9104BC4C92F95C72AFA3DF403DF5886B616F2E0298967F"
+  },
+  {
+    "id": "rugby",
+    "file": "rugby.jpg",
+    "description": "A real wide-eyed ginger kitten holding an orange rubber rugby ball. Cast as the eager teammate ready to act or move a task forward. Portrait photo; its face also works as a travelling character in a diagram.",
+    "author": "Aiaikz",
+    "source": "https://commons.wikimedia.org/wiki/File:Ginger_kitten_with_an_orange_rubber_rugby.jpg",
+    "license": "CC0-1.0",
+    "sha256": "AD9443B29FBD58E9D42FA8473426BC0B887ED68481FD4CBC74A5824A3038A3B9"
+  },
+  {
+    "id": "cool",
+    "file": "cool.jpg",
+    "description": "A real gray cat wearing bright yellow round sunglasses. Confident, unbothered, ship-it energy; a strong payoff or competent new-state character. Portrait photo with a large expressive face.",
+    "author": "Raoul Droog",
+    "source": "https://unsplash.com/photos/russian-blue-cat-wearing-yellow-sunglasses-yMSecCHsIBc",
+    "license": "Unsplash",
+    "sha256": "7637BA1D52F924245A389BA615C8E1C04E0B4EC5962F8FCC4DDDA2EE4295D494"
+  },
+  {
+    "id": "peek",
+    "file": "peek.jpg",
+    "description": "A real wide-eyed tabby on white stairs, looking curiously at the camera with its head slightly tilted. Cast as the investigator, puzzled user or teammate discovering a gotcha. Tall portrait; face close-up keeps the reaction readable.",
+    "author": "Alexander London",
+    "source": "https://unsplash.com/photos/brown-tabby-cat-on-white-stairs-mJaD10XeD7w",
+    "license": "Unsplash",
+    "sha256": "2AEB0AF33CBEBFFDA86E4BD81E48A7E4E42ABAFADB98674C6385E4AA83C864AE"
+  },
+  {
+    "id": "judge",
+    "file": "judge.jpg",
+    "description": "A real black-and-white cat resting both front paws on a bookshelf, staring straight ahead with green eyes. A skeptical reviewer, watchful guard or hold-on-a-minute reaction. Keep the paws in a portrait shot for its deadpan personality.",
+    "author": "Manja Vitolic",
+    "source": "https://unsplash.com/photos/black-and-white-cat-lying-on-brown-bamboo-chair-inside-room-gKXKBY-C-Dk",
+    "license": "Unsplash",
+    "sha256": "A4F0310746A09A603F2353829218C2FF43CE2E7F74E21D4BEFCD27C5376816D2"
+  },
+  {
+    "id": "mischief",
+    "file": "mischief.jpg",
+    "description": "A real wide-eyed tabby lying under cardboard and chewing its corner. Mischievous edge-case tester, bug hunter or chaotic before-state character. Wide landscape crop includes the cardboard so the visual joke makes sense.",
+    "author": "Sindugab",
+    "source": "https://commons.wikimedia.org/wiki/File:Playing_time_of_our_cat.jpg",
+    "license": "CC0-1.0",
+    "sha256": "28491C06AC68DE3FDA4D497B272C7DE903BE93755F16E159B0AEF5023EB65432"
+  },
+  {
+    "id": "cuddle",
+    "file": "cuddle.jpg",
+    "description": "A real black-and-white cat curled on a floor with its face, folded paws and pink toe beans visible. Cozy relief, calmer after-state or an off-duty teammate once the confusing work is gone. Wide close crop.",
+    "author": "N1kos.a98",
+    "source": "https://commons.wikimedia.org/wiki/File:Erik_THE_cat.jpg",
+    "license": "CC0-1.0",
+    "sha256": "D18B4D916B1CBF1703DF3F05EC67000F0D7199473FDC47D0D835768403C3B73C"
+  },
+  {
+    "id": "duo",
+    "file": "duo.jpg",
+    "description": "Two real dark-and-ginger kittens cuddled together on a chair. Cast the pair as collaborators, two independent signals that can coexist, or a reassuring together-at-last payoff. A tight wide crop keeps both kittens visible.",
+    "author": "Jeromi Mikhael",
+    "source": "https://commons.wikimedia.org/wiki/File:A_black_and_an_orange_kitten_17.jpg",
+    "license": "CC0-1.0",
+    "sha256": "A72D76E1EFB1B08AE95A283C7B0EACFCAB89141F2438F8C0F8D9556EA2137A6D"
+  }
+]

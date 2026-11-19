@@ -12,6 +12,8 @@ function setup(search = '?mock=1') {
   const element = () => ({
     innerHTML: '', textContent: '', dataset: {}, scrollTop: 0, children: [],
     classList: { toggle() {} }, addEventListener() {}, querySelectorAll: () => [],
+    insertAdjacentHTML(_, html) { this.innerHTML += html; },
+    showModal() { this.open = true; }, close() { this.open = false; },
     appendChild(child) { this.children.push(child); }, remove() {},
   });
   const document = {
@@ -34,7 +36,7 @@ function setup(search = '?mock=1') {
   });
   vm.runInContext(themeSource, context);
   context.AppTheme = window.AppTheme;
-  vm.runInContext(source + '\nglobalThis.hooks = { S, onAction, actionButtons, renderDetail, setSnapshot, flushRowUpdates, renderHeader, renderRows, undoHide, baseVisible, updateCopilotRun, renderRunShelf, runForPr, runActive, onDrawerAction, loadApprovalSettings, renderDrawer, renderExplanation, updateExplanation, explanationBody, changeTheme, applySavedTheme };', context);
+  vm.runInContext(source + '\nglobalThis.hooks = { S, onHostMessage, onAction, actionButtons, renderDetail, setSnapshot, flushRowUpdates, renderHeader, renderRows, undoHide, baseVisible, updateCopilotRun, renderRunShelf, runForPr, runActive, onDrawerAction, loadApprovalSettings, renderDrawer, renderExplanation, updateExplanation, explanationBody, renderVideo, updateVideo, videoContent, openSpeechSetup, onSpeechAction, closeSpeechSetup, changeTheme, applySavedTheme };', context);
   const { hooks } = context;
   const pr = {
     key: 'repo:123', id: 123, repo: 'sample-service', title: 'Offline PR',
@@ -42,9 +44,165 @@ function setup(search = '?mock=1') {
     isMine: true, lane: 'needsHuman', humanActions: ['pop', 'autocomplete'], gates: {},
   };
   hooks.S.settings = { repos: [{}], hidden: [], whitelist: [], autoComplete: { mergeStrategy: 'squash' }, refreshSeconds: 120, mergeCheckMinutes: 10 };
+  hooks.S.settings.videoSpeech = { voice: 'offline-voice' };
   hooks.S.snap = { prs: [pr], lastRefresh: new Date().toISOString(), approvalProvider: { name: 'Sample approval' } };
   return { hooks, pr, window, elements, dialogs, document, context, element };
 }
+
+test('first video requires explicit Azure setup and missing az stays an actionable setup error without starting generation', async () => {
+  const { hooks, pr, window, elements } = setup();
+  hooks.S.settings.videoSpeech = null;
+  const calls = [];
+  window.MockHost.rpc = async method => { calls.push(method); throw Error('Azure CLI (az) is not available. Install Azure CLI and run az login.'); };
+  await hooks.onAction('tiktokPr', {}, pr.key);
+  assert.deepEqual(calls, ['listSpeechSubscriptions']);
+  assert.equal(elements.get('#speechDialog').open, true);
+  assert.match(elements.get('#speechBody').innerHTML, /Azure CLI \(az\) is not available/);
+  assert.match(elements.get('#speechBody').innerHTML, /billed to the selected resource/);
+  assert.equal(hooks.S.speechSetup.key, pr.key);
+  window.MockHost.rpc = async method => { calls.push(method); return {}; };
+  await hooks.closeSpeechSetup();
+  assert.equal(elements.get('#speechDialog').open, false);
+  assert.equal(calls.at(-1), 'cancelSpeechSetup');
+});
+
+test('Speech setup saves its verified connection but explains why an ineligible original PR cannot auto-generate', async () => {
+  const { hooks, pr, window, elements } = setup();
+  hooks.S.settings.videoSpeech = null;
+  const calls = [];
+  window.MockHost.rpc = async method => {
+    calls.push(method);
+    if (method === 'listSpeechSubscriptions') return [];
+    if (method === 'selectSpeechResource')
+      return {...hooks.S.settings, hidden:[pr.key], videoSpeech:{voice:'offline-verified-voice'}};
+    throw Error('Unexpected generation');
+  };
+  await hooks.openSpeechSetup(pr.key);
+  Object.assign(hooks.S.speechSetup, {
+    resource:'offline-verified', voice:'offline-verified-voice',
+    resources:[{resourceId:'offline-verified',voices:['offline-verified-voice'],compatible:true}],
+  });
+  await hooks.onSpeechAction('use');
+  assert.equal(hooks.S.settings.videoSpeech.voice,'offline-verified-voice');
+  assert.equal(calls.includes('tiktokPr'),false);
+  assert.equal(elements.get('#speechDialog').open,false);
+  assert.match(elements.get('#toasts').children.at(-1).innerHTML,/No video was started/);
+});
+
+test('video setup surfaces dependency failure allows retry and fences cancelled setup progress/results', async () => {
+  const { hooks, pr, window, elements } = setup();
+  hooks.S.settings.videoSpeech = null;
+  const calls = [];
+  window.MockHost.rpc = async method => {
+    calls.push(method); throw Error('Windows AAC dependency check failed. Install Media Feature Pack, then retry video setup.');
+  };
+  await hooks.openSpeechSetup(pr.key);
+  assert.match(elements.get('#speechBody').innerHTML, /AAC dependency check failed.*retry/);
+  let release;
+  window.MockHost.rpc = method => {
+    calls.push(method);
+    return method === 'cancelSpeechSetup' ? Promise.resolve({}) : new Promise(resolve => { release = resolve; });
+  };
+  const retry = hooks.onSpeechAction('reload');
+  const epoch = hooks.S.speechEpoch;
+  hooks.onHostMessage({event:'speechSetupProgress',data:{epoch:epoch-1,message:'Wrong old setup'}});
+  assert.doesNotMatch(elements.get('#speechBody').innerHTML, /Wrong old setup/);
+  hooks.onHostMessage({event:'speechSetupProgress',data:{epoch,message:'Checking Windows H.264 and AAC encoders'}});
+  assert.match(elements.get('#speechBody').innerHTML, /Checking Windows H.264 and AAC encoders/);
+  await hooks.closeSpeechSetup();
+  release([{id:'offline-subscription',name:'Late result'}]); await retry;
+  hooks.onHostMessage({event:'speechSetupProgress',data:{epoch,message:'Late progress'}});
+  assert.equal(hooks.S.speechSetup,null);
+  assert.equal(elements.get('#speechDialog').open,false);
+  assert.equal(calls.includes('tiktokPr'),false);
+});
+
+test('TikTok uses a separate captured-key job with duplicate prevention, honest progress and exact cancellation', async () => {
+  const { hooks, pr, window } = setup();
+  assert.match(hooks.renderDetail(pr), /data-act="tiktokPr"/);
+  const calls = [];
+  let release;
+  const state = { key: pr.key, requestId: 'a'.repeat(32), sequence: 1, status: 'storyboarding',
+    message: 'Reading real code', evidence: [], coverage: [], model: 'claude-opus-5.5' };
+  window.MockHost.rpc = (method, p) => { calls.push({ method, p }); return new Promise(r => { release = r; }); };
+  const start = hooks.onAction('tiktokPr', {}, pr.key);
+  await hooks.onAction('tiktokPr', {}, pr.key);
+  assert.equal(calls.length, 1);
+  assert.deepEqual(Object.keys(calls[0].p), ['key']);
+  assert.equal(calls[0].method, 'tiktokPr');
+  release(state); await start;
+  const html = hooks.renderVideo(pr.key);
+  assert.match(html, /Generating\.\.\./);
+  assert.match(html, /aria-busy="true"/);
+  assert.doesNotMatch(html, /\d+%|ETA|<video/);
+  window.MockHost.rpc = async (method, p) => {
+    calls.push({ method, p }); return { ...state, sequence: 2, status: 'cancelled' };
+  };
+  await hooks.onAction('cancelVideo', { dataset: { requestId: state.requestId } }, pr.key);
+  assert.equal(calls.at(-1).method, 'cancelVideo');
+  assert.equal(calls.at(-1).p.requestId, state.requestId);
+  assert.match(hooks.renderVideo(pr.key), /Retry video/);
+});
+
+test('TikTok rejects unsafe media URLs, ignores stale events and escapes the local path and evidence', () => {
+  const { hooks, pr } = setup();
+  const ready = { key: pr.key, requestId: 'b'.repeat(32), sequence: 8, status: 'completed', message: 'Ready',
+    evidence: ['<img src=x onerror=alert(1)>'], coverage: [], model: 'claude-opus-5.5', durationSeconds: 68,
+    path: 'C:\\owned\\<video>.mp4', mediaUrl: `https://pr-video.local/${'b'.repeat(32)}.mp4` };
+  for (const mediaUrl of ['file:///C:/secret', 'https://evil.invalid/video.mp4', ready.mediaUrl + '?path=secret'])
+    assert.throws(() => hooks.updateVideo({ ...ready, mediaUrl }), /invalid video state/);
+  hooks.updateVideo(ready);
+  hooks.updateVideo({ ...ready, requestId: 'a'.repeat(32), sequence: 7, status: 'rendering', mediaUrl: null });
+  assert.equal(hooks.S.videos.get(pr.key).requestId, ready.requestId);
+  const html = hooks.renderVideo(pr.key);
+  assert.match(html, /<video controls playsinline preload="metadata"/);
+  assert.match(html, /width="1280" height="720"/);
+  assert.match(html, /&lt;video&gt;\.mp4/);
+  assert.match(html, /&lt;img src=x onerror=alert\(1\)&gt;/);
+  assert.doesNotMatch(html, /autoplay|<img src=x/);
+});
+
+test('video shelf follows the selected lane and keeps lane-retained jobs in their rows', () => {
+  for (const [lane, retained] of [['blocked', false], ['waiting', false], ['blocked', true]]) {
+    const { hooks, pr, elements } = setup();
+    hooks.S.lane = lane;
+    hooks.S.expanded.add(pr.key);
+    if (retained) hooks.S.laneRetained.add(pr.key);
+    hooks.S.videos.set(pr.key, { key: pr.key, requestId: 'lane-job', sequence: 1,
+      status: 'rendering', message: 'Rendering', evidence: [], coverage: [] });
+    hooks.renderRows();
+    const shelf = elements.get('#videoShelf').innerHTML;
+    if (retained) {
+      assert.equal(shelf, '');
+      assert.match(elements.get('#rows').innerHTML, /data-video-key="repo:123"/);
+    } else {
+      assert.match(shelf, /data-video-key="repo:123"/, `${lane}: filtered-out job must remain reachable`);
+      assert.match(shelf, /data-act="cancelVideo" data-request-id="lane-job"\s*>/);
+      assert.doesNotMatch(elements.get('#rows').innerHTML, /data-key="repo:123"/);
+    }
+  }
+});
+
+test('TikTok refuses hidden inactive ignored and pending-removed PRs but retains exact-job cancellation outside the table', async () => {
+  for (const reason of ['hidden', 'inactive', 'ignored', 'removed']) {
+    const { hooks, pr, window } = setup();
+    const calls = [];
+    window.MockHost.rpc = async (method, p) => {
+      calls.push({ method, p });
+      return { key: pr.key, requestId: p.requestId, sequence: 9, status: 'cancelled', message: 'Cancelled', evidence: [], coverage: [] };
+    };
+    if (reason === 'hidden') hooks.S.settings.hidden.push(pr.key);
+    if (reason === 'inactive') pr.isActive = false;
+    if (reason === 'ignored') { hooks.S.settings.ignoreDrafts = true; pr.isDraft = true; }
+    if (reason === 'removed') hooks.S.pendingSnapshot = { prs: [] };
+    assert.match(hooks.renderVideo(pr.key), /data-act="tiktokPr" disabled/);
+    if (reason === 'ignored') await assert.rejects(hooks.onAction('tiktokPr', {}, pr.key), /ignored/);
+    else await hooks.onAction('tiktokPr', {}, pr.key);
+    assert.equal(calls.length, 0);
+    await hooks.onAction('cancelVideo', { dataset: { requestId: 'captured' } }, pr.key);
+    assert.equal(calls[0].p.requestId, 'captured');
+  }
+});
 
 test('theme changes apply immediately, save only the theme and leave other drawer edits alone', async () => {
   const { hooks, window, document, elements, context, element } = setup();

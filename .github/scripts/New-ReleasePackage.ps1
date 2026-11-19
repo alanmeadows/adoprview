@@ -29,6 +29,10 @@ if ($LASTEXITCODE) { throw "dotnet publish failed with exit code $LASTEXITCODE."
 
 foreach ($required in 'AdoPrView.exe', 'AdoPrView.dll', 'hostfxr.dll', 'coreclr.dll', 'PresentationFramework.dll',
         'Microsoft.Web.WebView2.Core.dll', 'WebView2Loader.dll', 'wwwroot\index.html',
+        'Microsoft.Windows.SDK.NET.dll', 'WinRT.Runtime.dll',
+        'VideoAssets\cats.json', 'VideoAssets\yawn.jpg', 'VideoAssets\rugby.jpg', 'licenses\cat-photos.txt',
+        'VideoAssets\cool.jpg', 'VideoAssets\peek.jpg', 'VideoAssets\judge.jpg',
+        'VideoAssets\mischief.jpg', 'VideoAssets\cuddle.jpg', 'VideoAssets\duo.jpg',
         'DiffPlex.dll', 'GitHub.Copilot.SDK.dll', 'runtimes\win-x64\native\copilot-runtime.exe',
         'runtimes\win-x64\native\runtime.node', 'runtimes\win-x64\native\copilot_runtime.dll',
         'runtimes\win-x64\native\OneAuthInterop.LICENSE.txt') {
@@ -48,6 +52,7 @@ $components = @(
     @{ Id = 'Microsoft.NETCore.App.Runtime.win-x64'; Library = 'runtimepack.Microsoft.NETCore.App.Runtime.win-x64'; Packs = $true },
     @{ Id = 'Microsoft.WindowsDesktop.App.Runtime.win-x64'; Library = 'runtimepack.Microsoft.WindowsDesktop.App.Runtime.win-x64'; Packs = $true },
     @{ Id = 'Microsoft.Web.WebView2'; Library = 'Microsoft.Web.WebView2'; Packs = $false },
+    @{ Id = 'Microsoft.Windows.SDK.NET.Ref'; Library = 'runtimepack.Microsoft.Windows.SDK.NET.Ref'; Packs = $true; License = 'licenses\Microsoft.Windows.SDK.NET.Ref\LICENSE.rtf'; Notice = 'licenses\Microsoft.Windows.SDK.NET.Ref\NOTICE.txt' },
     @{ Id = 'DiffPlex'; Library = 'DiffPlex'; Packs = $false; License = 'licenses\DiffPlex\LICENSE.txt' },
     @{ Id = 'GitHub.Copilot.SDK'; Library = 'GitHub.Copilot.SDK'; Packs = $false; License = 'licenses\GitHub.Copilot.SDK\LICENSE.txt' },
     @{ Id = 'Microsoft.Extensions.AI.Abstractions'; Library = 'Microsoft.Extensions.AI.Abstractions'; Packs = $false; License = 'licenses\Microsoft.Extensions\LICENSE.txt' },
@@ -68,6 +73,7 @@ foreach ($component in $components) {
         $texts += Get-Item -LiteralPath (Join-Path $root $component.License)
     }
     if (-not ($texts | Where-Object { $_.Name -match '^LICENSE' })) { throw "No license text found for $($component.Id) $componentVersion." }
+    if ($component.ContainsKey('Notice')) { $texts += Get-Item -LiteralPath (Join-Path $root $component.Notice) }
     $target = Join-Path $licenses $component.Id
     New-Item -ItemType Directory -Force -Path $target | Out-Null
     foreach ($text in $texts) { Copy-Item -LiteralPath $text.FullName -Destination (Join-Path $target $text.Name) }
@@ -92,6 +98,9 @@ This package redistributes the following components under their own licenses:
 $($index -join "`n")
 - marked and DOMPurify: wwwroot/vendor/marked.min.js and purify.min.js keep
   their original license headers.
+- Real cat photographs: CC0 1.0 and the free Unsplash License, with authors,
+  source URLs and license/provenance notices in licenses/cat-photos.txt;
+  redistributed JPEG hashes in VideoAssets/cats.json. These assets are not MIT.
 
 The Microsoft Edge WebView2 Runtime is not included; Windows provides it as
 the separately installed WebView2 Evergreen Runtime.

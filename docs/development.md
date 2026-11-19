@@ -27,6 +27,11 @@ The retained upstream texts come from [DiffPlex 1.9.0](https://github.com/mmanel
 [Copilot SDK 1.0.29](https://github.com/github/copilot-sdk/blob/v1.0.29/LICENSE),
 [Copilot CLI 1.0.107](https://github.com/github/copilot-cli/blob/v1.0.107/LICENSE.md)
 and [.NET Extensions](https://github.com/dotnet/extensions/blob/main/LICENSE).
+The Windows SDK .NET projection's Microsoft license and C#/WinRT MIT notice are
+retained under `licenses\Microsoft.Windows.SDK.NET.Ref`. The official
+[Windows SDK redist list](https://learn.microsoft.com/en-us/legal/windows-sdk/redist#microsoftwindowssdknetref)
+explicitly permits its unmodified projection/runtime files for WinRT API calls;
+they are not relicensed under this application's MIT license.
 Review these texts when updating the dependencies or their bundled runtime.
 
 Explain's native fake-HTTP/fake-model checks and frontend checks run in the
@@ -39,6 +44,29 @@ with `ADOPRVIEW_TEST_FILTER` set to `Explain runtime`.
 
 ## Offline checks
 
+PR video uses Windows media APIs through the Windows SDK target framework,
+not bundled FFmpeg or downloaded voice models. Azure Speech uses bounded REST
+requests authenticated by the user's Windows Azure CLI, independently of
+Copilot authentication. The model never receives Azure credentials or a shell.
+Cat provenance/license notices and verified thumbnail hashes ship with the app.
+The precurated `VideoAssets\cats.json` contains each photo's selection ID,
+visual description/storytelling hints, author, source, approved license and
+SHA-256. Opus receives only ID, description and framing hints; generation has
+no photo-search/download tool. The catalog is bounded to 2-8 assets. To replace
+or extend it within that bound, verify the original license, add the JPEG and
+manifest/notice entry, and set its full-photo and face crops in
+`VideoRenderer.Looks`. Update the release package's required-asset checks.
+Do not treat Google Images or a stock search's "free" label as reuse permission.
+The current set uses five CC0 photographs and three free Unsplash photographs,
+not Unsplash+ or Pixabay assets; their own licenses, not MIT, cover the photos.
+Opus directs a bounded animated storyboard rather than generated renderer code:
+6-10 scenes, 120-210 spoken words and 30-150 seconds of measured narration.
+The host draws at 15 fps (at most 2,250 frames), encodes H.264/AAC at 30 fps,
+and removes intermediate frame JPEGs afterward. Motion-heavy videos can be
+substantially larger than static slides; the observed 69-second pilot was 53 MB.
+Only narration, scene keyframes, storyboard/evidence and the completed MP4 are
+retained normally; cleanup failures are surfaced rather than silently ignored.
+
 No live approval, PR or auth requests are made:
 
 ```powershell
@@ -48,6 +76,31 @@ node --test tests\approval-ui.test.cjs
 node --test tests\row-actions.browser.test.cjs
 powershell -NoProfile -ExecutionPolicy Bypass -File tests\install-guide.tests.ps1
 ```
+
+`ADOPRVIEW_TEST_FILTER=Video|Explain` selects source/video/native offline
+regressions, including fake Azure CLI/HTTP resource discovery, denied synthesis,
+SSML escaping, media validation failure, cancellation and range requests.
+The browser suite includes first-use setup and responsive video controls.
+The browser mock never invokes Azure, Copilot or a renderer and never pretends
+its synthetic generation produced a real MP4.
+
+Explicit integration harnesses are separate from offline suites:
+
+```powershell
+dotnet run --project tests\AdoPrView.Tests -c Release -- --video-discovery-test <account-resource-id> <evidence-directory> <voice-name>
+dotnet run --project tests\AdoPrView.Tests -c Release -- --video-speech-test <account-resource-id> <output-directory> <voice-name>
+dotnet run --project tests\AdoPrView.Tests -c Release -- --video-pilot <this-public-repo-checkout> <artifact-directory> <account-resource-id> <voice-name>
+dotnet run --project tests\AdoPrView.Tests -c Release -- --video-playback <actual-mp4-path> <evidence-directory>
+```
+
+Speech tests incur Azure usage for a generic sample sentence. The pilot also
+uses real Copilot Opus 5.5 and Speech calls; its ADO GET transport is synthetic
+around authentic pinned public PR #19 Git objects, not a production private PR.
+No ADO writes are permitted. It records actual-vs-synthetic boundaries, timing,
+source evidence, storyboard and media artifacts outside Git. Playback uses a
+disposable native WebView2 profile and verifies decoded audio/video, seek,
+HTTP ranges, unregistered-URL rejection and player preservation. It does not
+establish a human listening judgment; audition the actual generated WAV/MP4.
 
 CI and the release package treat compiler warnings as errors (`-warnaserror`
 on the build and `dotnet publish`), so keep both projects warning-clean.

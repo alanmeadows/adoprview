@@ -854,6 +854,23 @@ public sealed partial class PrService
         catch { context.Dispose(); throw; }
     }
 
+    internal void CheckVideoAvailable(string key)
+    {
+        var pr = Find(key);
+        if (!Monitored(pr) || pr.Error is not null ||
+            !_store.Current.Repos.Any(r => r.Key == $"{pr.Org}/{pr.Project}/{pr.Repo}".ToLowerInvariant()))
+            throw new InvalidOperationException("This PR is no longer active and monitored. Refresh before generating a video.");
+    }
+
+    internal async Task<ExplainContext> GetVideoContextAsync(string key, CancellationToken ct)
+    {
+        CheckVideoAvailable(key);
+        var pr = Find(key);
+        var context = await ExplainContext.CaptureAsync(_ado, pr, ct, requireActive: true, ignoreDrafts: () => _store.Current.IgnoreDrafts);
+        try { CheckVideoAvailable(key); return context; }
+        catch { context.Dispose(); throw; }
+    }
+
     public async Task<(PrView Pr, string SourceRef, string SourceCommit, string Prompt)> GetCopilotSourceAsync(string key)
     {
         var pr = Find(key);

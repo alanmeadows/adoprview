@@ -81,6 +81,28 @@ enough detail inline that you rarely need to click into ADO.
   and awaits work before disposing the runtime. See [usage](usage.md#explain-this-pr)
   for bounds and [development](development.md) for offline checks.
 
+* **PR video:** `Bridge -> VideoService -> VideoModel / ExplainContext ->
+  AzureSpeechVoice -> VideoRenderer -> VideoArtifacts`. Exact Opus 5.5 uses the
+  same denied-permission source boundary as Explain, with actual textual diff
+  and full-file evidence required. A bounded structured storyboard, never
+  generated programs/URLs, selects verified cat IDs/roles, bounded animated
+  compositions, reveal cues and motion. Cats can recur within explanations
+  instead of being forced separate cutaways. Native layout-fit validation runs
+  before billed narration; supported render choices cannot issue commands.
+  Active/monitoring/draft eligibility and pinned revisions are checked before
+  and after long work. One job runs at a time; cancellation is exact-job scoped.
+  First-use setup uses host-owned read-only Azure CLI commands to discover
+  subscriptions/accounts, checks voice access and actual sample synthesis, and
+  persists only a non-secret Speech connection. Entra Speech tokens never enter
+  model tools, frontend state or logs. Cloud requests use validated Azure
+  endpoints, bounded responses, nonredirecting HTTP and escaped SSML text.
+  Windows MediaComposition locally encodes scene PNGs plus measured PCM audio
+  into H.264/AAC; output codec/duration and representative decoded frames are
+  verified before atomic publication. An unmapped `pr-video.local` WebView2 host
+  intercepts registered GUID MP4 URLs with bounded HTTP ranges; no filesystem
+  directory is mapped. A separate host is necessary because the dashboard's
+  mapped `app.local` host bypasses WebResourceRequested interception.
+
 Draft exclusion is opt-in through the persisted `IgnoreDrafts` setting
 (default `false`). Ignored drafts retain list metadata for the dedicated filter,
 but skip policy/thread/build reads, classification and automatic merge writes.

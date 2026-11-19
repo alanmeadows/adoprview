@@ -89,6 +89,26 @@ test('real row hit testing and action identity across refreshes', { timeout: 900
           output:'',coverage:[],revision:{iteration:4,sourceCommit:'a'.repeat(40),baseCommit:'b'.repeat(40)}};
         if(method==='cancelExplanation')return {...S.explanations.get(p.key),sequence:++window.explainSequence,
           status:'cancelled',message:'Explanation cancelled. Partial text is not a finished explanation.'};
+        if(method==='tiktokPr')return {key:p.key,requestId:(++window.videoSequence).toString(16).padStart(32,'0'),
+          sequence:window.videoSequence,status:'preparing',message:'Synthetic UI job only; no model or renderer.',
+          evidence:[],coverage:[],model:'claude-opus-5.5'};
+        if(method==='cancelVideo')return {...S.videos.get(p.key),sequence:++window.videoSequence,
+          status:'cancelled',message:'Synthetic video cancelled. No MP4 was generated.'};
+        if(method==='listSpeechSubscriptions'){
+          if(window.speechMissingAz)throw Error('Azure CLI (az) is not available. Install Azure CLI and run az login.');
+          if(window.speechListDenied)throw Error('Subscription listing denied. Use an exact resource ID if permitted.');
+          return [{id:'00000000-0000-4000-8000-000000000001',name:'Offline subscription'}];
+        }
+        if(method==='findSpeechResources')return [
+          {resourceId:'offline-verified',name:'Verified fixture',region:'eastus',compatible:true,
+            voices:['en-US-Ava:DragonHDLatestNeural'],message:'Synthetic catalog; no live Azure call'},
+          {resourceId:'offline-denied',name:'Denied fixture',region:'eastus',compatible:false,voices:[],message:'Missing Speech User RBAC'}];
+        if(method==='selectSpeechResource'){
+          if(window.holdSpeechSelection)await new Promise(resolve=>window.completeSpeechSelection=resolve);
+          if(window.speechDenied)throw Error('Synthesis denied: Cognitive Services Speech User RBAC is required.');
+          return {...S.settings,videoSpeech:{resourceId:p.resourceId,voice:p.voice,region:'eastus'}};
+        }
+        if(method==='cancelSpeechSetup')return {cancelled:true};
         if(method==='approve'){
           const pr=structuredClone(S.snap.prs.find(x=>x.key===p.key));
           if(window.holdApproval)await new Promise(resolve=>window.completeApproval=resolve);
@@ -146,6 +166,7 @@ test('real row hit testing and action identity across refreshes', { timeout: 900
       };
     `);
     const reset = async (race = false) => {
+      await evaluate('S.speechSetup ? closeSpeechSetup() : null');
       await release({ x: 10, y: 10 });
       await move(10, 10);
       await evaluate(`document.activeElement?.blur();`);
@@ -154,12 +175,18 @@ test('real row hit testing and action identity across refreshes', { timeout: 900
         S.rowOrder=[];S.orderRevision=null;S.laneRetained.clear();S.runs.clear();S.busy.clear();closeRowMenu();
         window.holdLog=false;S.settings.hidden=['sample-deploy-id:1001'];S.settings.ignoreDrafts=false;S.hideUndo=[];
         window.confirmations=[];window.confirmResult=true;window.autoFailure=false;S.autoCompleteErrors.clear();
-        window.explainSequence=0;S.explanations.clear();
+        window.explainSequence=0;S.explanations.clear();window.videoSequence=0;S.videos.clear();
+        S.settings.videoSpeech={voice:'offline-configured-voice'};
+        window.speechMissingAz=false;window.speechDenied=false;window.speechListDenied=false;window.holdSpeechSelection=false;
         window.holdApproval=false;window.approvalFailure=false;S.reviewVotes.clear();
         setSnapshot(structuredClone(window.baseline));${race ? 'window.raceFixture();' : ''}render();window.calls=[];`);
       await frame();
     };
     const point = (key, selector) => evaluate(`window.rowPoint(${JSON.stringify(key)},${JSON.stringify(selector)})`);
+    const elementPoint = selector => evaluate(`(()=>{
+      const el=document.querySelector(${JSON.stringify(selector)});el.scrollIntoView({block:'center'});
+      const r=el.getBoundingClientRect();return {x:r.x+r.width/2,y:r.y+r.height/2};
+    })()`);
     const expectedUrl = p => `https://dev.azure.com/contoso/Sample/_git/${encodeURIComponent(p.repo)}/pullrequest/${p.id}`;
     const calls = () => evaluate('window.calls');
     const hidePoint = async key => {
@@ -227,6 +254,167 @@ test('real row hit testing and action identity across refreshes', { timeout: 900
         assert.deepEqual((await calls()).map(c=>c.method),['explainPr','cancelExplanation','explainPr']);
       }
       await send('Emulation.setDeviceMetricsOverride', {width:1600,height:1000,deviceScaleFactor:1,mobile:false});
+    });
+
+    await t.test('first video selects an Azure resource and voice explicitly, missing az and denied synthesis cannot generate', async () => {
+      const key='sample-service-id:101';
+      await reset(true);
+      await evaluate(`S.settings.videoSpeech=null;window.speechMissingAz=true;S.expanded.add('${key}');renderRows();`);
+      await click(await point(key,'.detail [data-act="tiktokPr"]')); await frame();
+      assert.equal(await evaluate(`document.querySelector('#speechDialog').open`),true);
+      assert.match(await evaluate(`document.querySelector('#speechBody').textContent`),/az.*not available/);
+      assert.deepEqual((await calls()).map(c=>c.method),['listSpeechSubscriptions']);
+      await evaluate(`window.speechMissingAz=false;document.querySelector('[data-sact="reload"]').click();`); await frame();
+      await evaluate(`{
+        const select=document.querySelector('#speechSubscription');select.value=select.options[1].value;
+        select.dispatchEvent(new Event('change',{bubbles:true}));document.querySelector('[data-sact="find"]').click();
+      }`); await frame();
+      assert.match(await evaluate(`document.querySelector('#speechBody').textContent`),/Missing Speech User RBAC/);
+      assert.equal(await evaluate(`document.querySelector('#speechResource option[value="offline-denied"]')===null`),true);
+      await evaluate(`{
+        const select=document.querySelector('#speechResource');select.value='offline-verified';
+        select.dispatchEvent(new Event('change',{bubbles:true}));window.speechDenied=true;
+        document.querySelector('[data-sact="use"]').click();
+      }`); await frame();
+      assert.match(await evaluate(`document.querySelector('#speechBody').textContent`),/Synthesis denied/);
+      assert.equal((await calls()).some(c=>c.method==='tiktokPr'),false);
+      await evaluate(`window.speechDenied=false;document.querySelector('[data-sact="use"]').click();`); await frame();
+      assert.equal(await evaluate(`document.querySelector('#speechDialog').open`),false);
+      assert.equal((await calls()).filter(c=>c.method==='tiktokPr').length,1);
+      assert.equal(await evaluate('S.settings.videoSpeech.voice'),'en-US-Ava:DragonHDLatestNeural');
+      assert.equal((await calls()).find(c=>c.method==='tiktokPr').key,key);
+    });
+
+    await t.test('exact-resource setup retains typed values and open state through progress, denied verification and retry', async () => {
+      const key='sample-service-id:101';
+      const resource='/subscriptions/00000000-0000-4000-8000-000000000001/resourceGroups/offline/providers/Microsoft.CognitiveServices/accounts/offline-exact';
+      const voice='en-US-AvaMultilingualNeural';
+      await reset(true);
+      await evaluate(`S.settings.videoSpeech=null;window.speechListDenied=true;S.expanded.add('${key}');renderRows();`);
+      await click(await point(key,'.detail [data-act="tiktokPr"]')); await frame();
+      assert.match(await evaluate(`document.querySelector('#speechBody').textContent`),/Subscription listing denied/);
+      await evaluate(`document.querySelector('#speechBody details').open=true;document.querySelector('#speechExactId').focus();`);
+      await send('Input.insertText',{text:resource});
+      await send('Input.dispatchKeyEvent',{type:'keyDown',key:'Tab',code:'Tab',windowsVirtualKeyCode:9});
+      await send('Input.dispatchKeyEvent',{type:'keyUp',key:'Tab',code:'Tab',windowsVirtualKeyCode:9});
+      assert.equal(await evaluate(`document.querySelector('#speechExactId').value`),resource);
+      await evaluate(`document.querySelector('#speechExactVoice').value='';document.querySelector('#speechExactVoice').focus();`);
+      await send('Input.insertText',{text:voice});
+      await evaluate(`window.holdSpeechSelection=true;window.speechDenied=true;`);
+      await click(await elementPoint('[data-sact="exact"]')); await frame();
+      await evaluate(`onHostMessage({event:'speechSetupProgress',data:{epoch:S.speechEpoch,message:'Checking offline synthesis permissions'}});`);
+      const exactState=()=>evaluate(`({
+        resource:document.querySelector('#speechExactId').value,voice:document.querySelector('#speechExactVoice').value,
+        open:document.querySelector('#speechBody details').open
+      })`);
+      assert.deepEqual(await exactState(),{resource,voice,open:true});
+      await evaluate(`window.completeSpeechSelection();`); await frame();
+      assert.match(await evaluate(`document.querySelector('#speechBody').textContent`),/Synthesis denied/);
+      assert.deepEqual(await exactState(),{resource,voice,open:true});
+      assert.equal((await calls()).some(c=>c.method==='tiktokPr'),false);
+      await evaluate(`window.holdSpeechSelection=false;window.speechDenied=false;`);
+      await click(await elementPoint('[data-sact="exact"]')); await frame();
+      const selected=(await calls()).filter(c=>c.method==='selectSpeechResource');
+      assert.equal(selected.length,2);
+      assert.equal(selected.every(c=>c.resourceId===resource&&c.voice===voice),true);
+      assert.equal((await calls()).some(c=>c.method==='findSpeechResources'),false);
+      assert.equal((await calls()).filter(c=>c.method==='tiktokPr').length,1);
+      assert.equal(await evaluate(`document.querySelector('#speechDialog').open`),false);
+    });
+
+    await t.test('video loading stays responsive, cancellation survives filtering, retry is exact-job scoped and ignored context cannot restart', async () => {
+      const key='sample-service-id:101';
+      for (const width of [1600,900]) {
+        await send('Emulation.setDeviceMetricsOverride', {width,height:1000,deviceScaleFactor:1,mobile:false});
+        await reset(true);
+        await evaluate(`S.expanded.add('${key}');renderRows();
+          window.originalFix=document.querySelector('[data-key="${key}"] .row [data-act="triage"]');`);
+        await click(await point(key,'.detail [data-act="tiktokPr"]')); await frame();
+        assert.deepEqual((await calls()).map(c=>c.method),['tiktokPr']);
+        assert.equal(await evaluate(`(()=>{
+          const button=document.querySelector('[data-key="${key}"] [data-act="tiktokPr"]');
+          button.click();return button.disabled;
+        })()`),true);
+        assert.equal((await calls()).length,1,'Duplicate start is blocked');
+        await evaluate(`window.firstVideo=S.videos.get('${key}');
+          updateVideo({...window.firstVideo,sequence:++window.videoSequence,status:'rendering',
+            message:'<img src=x onerror="window.videoInjected=true"> Generating narration',
+            evidence:['Diff: /README.md'],coverage:['Only the public fixture is synthetic']});`);
+        assert.equal(await evaluate(`(()=>{
+          const card=document.querySelector('[data-key="${key}"] .pr-video');
+          return card.scrollWidth<=card.clientWidth+1&&getComputedStyle(card.querySelector('.video-spinner')).animationName!=='none'
+            &&!window.videoInjected&&!card.querySelector('.video-status img')
+            &&window.originalFix===document.querySelector('[data-key="${key}"] .row [data-act="triage"]');
+        })()`),true,`Responsive safe loading card at ${width}px`);
+        await evaluate(`S.q='no matching PR';renderRows();`);
+        assert.equal(await evaluate(`!!document.querySelector('#videoShelf [data-act="cancelVideo"]:not([hidden])')`),true);
+        const cancelPoint=await evaluate(`(()=>{
+          const button=document.querySelector('#videoShelf [data-act="cancelVideo"]');button.scrollIntoView({block:'center'});
+          const r=button.getBoundingClientRect();return {x:r.x+r.width/2,y:r.y+r.height/2};
+        })()`);
+        await click(cancelPoint); await frame();
+        const cancelled=(await calls()).find(c=>c.method==='cancelVideo');
+        assert.equal(cancelled.key,key);
+        assert.equal(cancelled.requestId,'1'.padStart(32,'0'));
+        await evaluate(`S.q='';renderRows();`);
+        await click(await point(key,'.detail [data-act="tiktokPr"]')); await frame();
+        await evaluate(`window.retryVideo=S.videos.get('${key}');
+          updateVideo({...window.firstVideo,sequence:1,message:'stale progress'});
+          updateVideo({...window.retryVideo,sequence:++window.videoSequence,status:'failed',message:'Voice prerequisite unavailable. No media published.'});`);
+        assert.match(await evaluate(`document.querySelector('[data-key="${key}"] .video-status').textContent`),/prerequisite unavailable/);
+        assert.match(await evaluate(`document.querySelector('[data-key="${key}"] [data-act="tiktokPr"]').textContent`),/Retry video/);
+        assert.equal(await evaluate(`!!document.querySelector('[data-key="${key}"] video')`),false);
+        await evaluate(`S.q='no matching PR';renderRows();S.settings.hidden.push('${key}');renderRows();`);
+        assert.equal(await evaluate(`document.querySelector('#videoShelf [data-act="tiktokPr"]').disabled`),true);
+        await evaluate(`document.querySelector('#videoShelf [data-act="tiktokPr"]').click();`);
+        assert.deepEqual((await calls()).map(c=>c.method),['tiktokPr','cancelVideo','tiktokPr']);
+      }
+      await send('Emulation.setDeviceMetricsOverride', {width:1600,height:1000,deviceScaleFactor:1,mobile:false});
+    });
+
+    await t.test('lane-filtered video jobs keep a visible exact-job cancellation control', async () => {
+      const key='sample-service-id:101';
+      await reset(true);
+      await evaluate(`S.expanded.add('${key}');renderRows();`);
+      await click(await point(key,'.detail [data-act="tiktokPr"]')); await frame();
+      await click(await elementPoint('[data-lane="blocked"]')); await frame();
+      assert.equal(await evaluate(`!!document.querySelector('#rows [data-key="${key}"]')`),false);
+      const cancel=`#videoShelf [data-video-key="${key}"] [data-act="cancelVideo"]`;
+      assert.equal(await evaluate(`!!document.querySelector('${cancel}:not([hidden])')`),true);
+      await click(await elementPoint(cancel)); await frame();
+      const cancelled=(await calls()).filter(c=>c.method==='cancelVideo');
+      assert.equal(cancelled.length,1);
+      assert.equal(cancelled[0].key,key);
+      assert.equal(cancelled[0].requestId,'1'.padStart(32,'0'));
+    });
+
+    await t.test('shelf retries and membership changes retain unrelated player nodes, seek and playback settings', async () => {
+      const playing='sample-service-id:101', retry='sample-api-id:104';
+      await reset(true);
+      const state=await evaluate(`(async()=>{
+          S.q='no matching PR';renderRows();
+          updateVideo({key:'${playing}',requestId:'a'.repeat(32),sequence:++window.videoSequence,status:'completed',
+            message:'Offline playback fixture',evidence:[],coverage:[],model:'claude-opus-5.5',durationSeconds:1,
+            path:'offline.mp4',mediaUrl:'https://pr-video.local/'+'a'.repeat(32)+'.mp4'});
+          updateVideo({key:'${retry}',requestId:'b'.repeat(32),sequence:++window.videoSequence,status:'failed',
+            message:'Synthetic failure',evidence:[],coverage:[]});
+          const player=document.querySelector('#videoShelf [data-video-key="${playing}"] video');
+          player.currentTime=17;player.volume=.35;player.playbackRate=.75;
+          const snapshot=()=>{
+            const current=document.querySelector('#videoShelf [data-video-key="${playing}"] video');
+            return {same:current===player,connected:player.isConnected,position:current.currentTime,
+              volume:current.volume,rate:current.playbackRate};
+          };
+          await onAction('tiktokPr',{},'${retry}');
+          const afterRetry=snapshot();
+          updateVideo({key:'departed:105',requestId:'c'.repeat(32),sequence:++window.videoSequence,
+            status:'rendering',message:'Another retained job',evidence:[],coverage:[]});
+          const afterAddition=snapshot();
+          S.videos.delete('departed:105');renderVideoShelf();
+          return [afterRetry,afterAddition,snapshot()];
+        })()`);
+      assert.deepEqual(state,Array.from({length:3},()=>({same:true,connected:true,position:17,volume:.35,rate:.75})));
+      assert.equal((await calls()).find(c=>c.method==='tiktokPr').key,retry);
     });
 
     await t.test('ordinary Approve preserves collapsed/expanded rows through pending, result and refresh without dialogs or duplicate votes', async () => {

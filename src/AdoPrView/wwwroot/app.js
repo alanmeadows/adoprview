@@ -31,6 +31,10 @@ function onHostMessage(m) {
     try { updateCopilotRun(m.data); } catch (e) { toast(e.message || String(e), 'error'); }
   } else if (m.event === 'explanation') {
     try { updateExplanation(m.data); } catch (e) { toast(e.message || String(e), 'error'); }
+  } else if (m.event === 'prVideo') {
+    try { updateVideo(m.data); } catch (e) { toast(e.message || String(e), 'error'); }
+  } else if (m.event === 'speechSetupProgress' && S.speechSetup?.busy && m.data?.epoch === S.speechEpoch) {
+    S.speechSetup.progress = m.data.message; renderSpeechSetup();
   }
 }
 
@@ -64,6 +68,9 @@ const S = {
   approvalSettingsBusy: false,
   runs: new Map(),
   explanations: new Map(),
+  videos: new Map(),
+  speechSetup: null,
+  speechEpoch: 0,
   rowMenu: null,
   drawer: false,
   themeBusy: false,
@@ -281,11 +288,25 @@ function renderStatus() {
   $('#statusline').innerHTML = parts.join('<span class="small">·</span>');
 }
 
+function laneVisible(prs) {
+  return S.lane ? prs.filter(p => !ignoredDraft(p) && (p.lane === S.lane || S.laneRetained.has(p.key))) : prs;
+}
+
 function renderRows(whenIdle = false) {
+  const players = new Map([...document.querySelectorAll('video[data-video-media]')].map(v => [v.dataset.videoMedia, v]));
+  renderRowsContent(whenIdle);
+  for (const placeholder of document.querySelectorAll('video[data-video-media]')) {
+    const existing = players.get(placeholder.dataset.videoMedia);
+    if (existing && existing !== placeholder) placeholder.replaceWith(existing);
+  }
+}
+
+function renderRowsContent(whenIdle = false) {
   if (S.rowPointerDown || (whenIdle && rowsInUse())) { S.rowsPending = true; renderStatus(); return; }
   S.rowsPending = false;
   const vis = baseVisible();
   renderRunShelf();
+  renderVideoShelf();
   const rows = $('#rows');
   const empty = $('#empty');
   if (!S.snap.lastRefresh && !vis.length) {
@@ -302,7 +323,7 @@ function renderRows(whenIdle = false) {
     empty.innerHTML = `<div class="big">📂</div><h2>No repositories yet</h2><div>Add an Azure DevOps repository URL in settings.</div><button class="btn primary" data-act="settings">Open settings</button>`;
     return;
   }
-  const shown = S.lane ? vis.filter((p) => !ignoredDraft(p) && (p.lane === S.lane || S.laneRetained.has(p.key))) : vis;
+  const shown = laneVisible(vis);
   if (S.lane) shown.forEach(p => S.laneRetained.add(p.key));
   if (!shown.length) {
     rows.innerHTML = '';
@@ -407,6 +428,94 @@ function updateExplanation(r) {
     cancel.hidden = !active;
     cancel.disabled = r.status === 'cancelling';
     cancel.dataset.requestId = r.requestId;
+  }
+}
+
+const videoActive = r => !!r && ['preparing', 'storyboarding', 'rendering', 'cancelling'].includes(r.status);
+const videoLabel = r => r?.status === 'failed' || r?.status === 'cancelled' ? 'Retry video' : r?.status === 'completed' ? 'Generate again' : 'TikTok This PR';
+function canVideo(key) {
+  const p = S.pendingSnapshot ? S.pendingSnapshot.prs.find(p => p.key === key) : findPr(key);
+  return canExplain(key) && p?.isActive !== false;
+}
+
+function videoContent(r) {
+  if (!r) return '';
+  if (r.status !== 'completed') return videoActive(r)
+    ? `<div class="video-loading" aria-label="Generating PR video"><span class="video-spinner" aria-hidden="true"></span><strong>Generating...</strong><span class="small">This can take several minutes. You can keep using the dashboard.</span></div>` : '';
+  return `<video controls playsinline preload="metadata" width="1280" height="720" data-video-media="${esc(r.requestId)}"
+      src="${esc(r.mediaUrl)}" aria-label="AI-generated PR video with narrated captions"></video>
+    <p class="video-playback-error error small" role="status" hidden></p>
+    <p class="small video-path">${esc(r.path)}</p><button class="mini" data-act="copyVideoPath">${svg('copy')} Copy MP4 path</button>`;
+}
+
+function renderVideo(key) {
+  const r = S.videos.get(key), active = videoActive(r);
+  return `<div class="card pr-video" data-video-key="${esc(key)}">
+    <h3><span class="grow">A short PR explainer, with cats</span>
+      <button class="mini" data-act="tiktokPr" ${active || isBusy(key, 'tiktokPr') || !canVideo(key) ? 'disabled' : ''}>${svg('play')} ${videoLabel(r)}</button>
+      <button class="mini" data-act="cancelVideo" data-request-id="${esc(r?.requestId || '')}" ${active ? '' : 'hidden'} ${r?.status === 'cancelling' ? 'disabled' : ''}>${svg('x')} Cancel</button></h3>
+    <div class="body">
+      <p class="video-status small${r?.status === 'failed' ? ' error' : ''}" role="status" aria-live="polite">${esc(r?.message || 'Opus 5.5 reads pinned PR code; narration uses your selected Azure Speech resource. No PR changes; the video stays local.')}</p>
+      <div class="video-content" aria-busy="${active}">${videoContent(r)}</div>
+      <details class="explain-details"><summary>Source evidence and generation details</summary>
+        <p class="small">AI-generated; verify important details against the code. Bounded source inspection, not a local checkout or Fix run. Videos are not resumed automatically.</p>
+        <p class="video-meta small">${esc([r?.model, r?.voice, r?.durationSeconds && `${Math.round(r.durationSeconds)} seconds`].filter(Boolean).join(' · '))}</p>
+        <p class="video-revision small">${esc(explanationRevision(r))}</p>
+        <div class="video-evidence small">${(r?.evidence || []).map(x => `<p>${esc(x)}</p>`).join('')}</div>
+        <div class="video-coverage small">${(r?.coverage || []).map(x => `<p>${esc(x)}</p>`).join('')}</div>
+      </details>
+    </div></div>`;
+}
+
+function updateVideo(r) {
+  if (!r || typeof r.key !== 'string' || typeof r.requestId !== 'string' || !Number.isSafeInteger(r.sequence) ||
+      !['preparing', 'storyboarding', 'rendering', 'cancelling', 'completed', 'cancelled', 'failed'].includes(r.status) ||
+      typeof r.message !== 'string' || !Array.isArray(r.evidence) || !Array.isArray(r.coverage) ||
+      r.status === 'completed' && (!/^[a-f0-9]{32}$/.test(r.requestId) ||
+        r.mediaUrl !== `https://pr-video.local/${r.requestId}.mp4` || typeof r.path !== 'string' ||
+        !(r.durationSeconds > 0) || r.model !== 'claude-opus-5.5'))
+    throw new Error('Copilot returned an invalid video state. No media was opened.');
+  const old = S.videos.get(r.key);
+  if (old && (r.sequence <= old.sequence || old.requestId === r.requestId && !videoActive(old) && videoActive(r))) return;
+  S.videos.set(r.key, r);
+  for (const card of document.querySelectorAll('.pr-video')) {
+    if (card.dataset.videoKey !== r.key) continue;
+    $('.video-status', card).textContent = r.message;
+    $('.video-status', card).classList.toggle('error', r.status === 'failed');
+    $('.video-meta', card).textContent = [r.model, r.voice, r.durationSeconds && `${Math.round(r.durationSeconds)} seconds`].filter(Boolean).join(' · ');
+    $('.video-revision', card).textContent = explanationRevision(r);
+    $('.video-evidence', card).innerHTML = r.evidence.map(x => `<p>${esc(x)}</p>`).join('');
+    $('.video-coverage', card).innerHTML = r.coverage.map(x => `<p>${esc(x)}</p>`).join('');
+    const content = $('.video-content', card), active = videoActive(r);
+    // Keep an existing player's DOM/audio/seek position while unrelated status events arrive.
+    if (!old || old.requestId !== r.requestId || old.status !== r.status) content.innerHTML = videoContent(r);
+    content.setAttribute('aria-busy', active);
+    const start = $('[data-act="tiktokPr"]', card);
+    start.disabled = active || isBusy(r.key, 'tiktokPr') || !canVideo(r.key);
+    start.innerHTML = `${svg('play')} ${videoLabel(r)}`;
+    const cancel = $('[data-act="cancelVideo"]', card);
+    cancel.hidden = !active;
+    cancel.disabled = r.status === 'cancelling';
+    cancel.dataset.requestId = r.requestId;
+  }
+  renderVideoShelf();
+}
+
+function renderVideoShelf() {
+  const shelf = $('#videoShelf');
+  if (!shelf) return;
+  const shown = new Set(laneVisible(baseVisible()).map(p => p.key));
+  const outside = [...S.videos.values()].filter(r => !shown.has(r.key));
+  const missing = new Set(outside.map(r => r.key));
+  for (const entry of shelf.querySelectorAll('.video-only')) {
+    if (missing.has(entry.dataset.key)) missing.delete(entry.dataset.key);
+    else entry.remove();
+  }
+  shelf.insertAdjacentHTML('beforeend', outside.filter(r => missing.has(r.key)).map(r => `<div class="pr video-only" data-key="${esc(r.key)}"><div class="detail"><div class="full">
+    <p class="small">Video for ${esc(r.revision?.repo || 'PR')} !${esc(r.revision?.id || '')} outside the current view</p>${renderVideo(r.key)}</div></div></div>`).join(''));
+  for (const card of shelf.querySelectorAll('.pr-video')) {
+    const key = card.dataset.videoKey;
+    $('[data-act="tiktokPr"]', card).disabled = videoActive(S.videos.get(key)) || isBusy(key, 'tiktokPr') || !canVideo(key);
   }
 }
 
@@ -692,11 +801,13 @@ function renderDetail(p) {
   if (ignoredDraft(p)) return `<div class="detail"><div class="full">
     <p>Ignored draft: no attention notifications or automatic merge checks. Publish it in Azure DevOps or turn off Ignore draft PRs in Settings to resume monitoring.</p>
     ${runsForPr(p.key).length ? renderRunCard(p.key) + earlierRunCards(p.key) : ''}
+    ${S.videos.has(p.key) ? renderVideo(p.key) : ''}
     </div></div>`;
   const left = [];
   const right = [];
   const full = [];
   full.push(renderExplanation(p.key));
+  full.push(renderVideo(p.key));
   full.push(renderRunCard(p.key) + earlierRunCards(p.key));
 
   if (p.approval || S.approvals.has(p.key)) {
@@ -944,7 +1055,7 @@ async function changeAutoComplete(p, enable) {
 
 async function onAction(act, el, key) {
   const p = key ? findPr(key) : null;
-  if (p && ignoredDraft(p) && !['toggle', 'open', 'hide', 'cancelRun', 'cancelExplanation'].includes(act))
+  if (p && ignoredDraft(p) && !['toggle', 'open', 'hide', 'cancelRun', 'cancelExplanation', 'cancelVideo', 'copyVideoPath'].includes(act))
     throw new Error('Draft PRs are ignored. Publish in Azure DevOps or turn off Ignore draft PRs in Settings first.');
   switch (act) {
     case 'toggle':
@@ -1073,6 +1184,35 @@ async function onAction(act, el, key) {
       catch (e) { toast(e.message || String(e), 'error'); }
       finally { S.busy.delete(`${key}:${act}`); }
       break;
+    case 'tiktokPr':
+      if (!canVideo(key) || isBusy(key, act) || videoActive(S.videos.get(key))) return;
+      if (!S.settings.videoSpeech) { await openSpeechSetup(key); return; }
+      S.busy.add(`${key}:${act}`);
+      for (const card of document.querySelectorAll('.pr-video')) {
+        if (card.dataset.videoKey === key) $('[data-act="tiktokPr"]', card).disabled = true;
+      }
+      try { updateVideo(await rpc('tiktokPr', { key })); }
+      catch (e) { toast(e.message || String(e), 'error'); }
+      finally {
+        S.busy.delete(`${key}:${act}`);
+        for (const card of document.querySelectorAll('.pr-video')) {
+          if (card.dataset.videoKey === key) $('[data-act="tiktokPr"]', card).disabled = videoActive(S.videos.get(key)) || !canVideo(key);
+        }
+      }
+      break;
+    case 'cancelVideo':
+      if (isBusy(key, act)) return;
+      S.busy.add(`${key}:${act}`);
+      try { updateVideo(await rpc('cancelVideo', { key, requestId: el.dataset.requestId })); }
+      catch (e) { toast(e.message || String(e), 'error'); }
+      finally { S.busy.delete(`${key}:${act}`); }
+      break;
+    case 'copyVideoPath':
+      if (S.videos.get(key)?.status === 'completed') {
+        await rpc('copy', { text: S.videos.get(key).path });
+        toast('MP4 path copied');
+      }
+      break;
     case 'cancelRun':
       await runAction(key, 'cancelRun', async () => updateCopilotRun(await rpc('cancelCopilot', { key, runId: el.dataset.runId })));
       break;
@@ -1106,6 +1246,94 @@ async function onAction(act, el, key) {
 }
 
 // ------------------------------------------------------------------ drawer
+async function openSpeechSetup(key = null) {
+  if ($('#speechDialog').open) return;
+  const epoch = ++S.speechEpoch;
+  S.speechSetup = { key, busy: true, progress: 'Checking video dependencies and Azure CLI...', subscriptions: [], subscription: '', resources: null, resource: '', voice: '', error: '',
+    exactId: '', exactVoice: 'en-US-Ava:DragonHDLatestNeural', exactOpen: false };
+  renderSpeechSetup(); $('#speechDialog').showModal();
+  try {
+    const subscriptions = await rpc('listSpeechSubscriptions', { epoch });
+    if (epoch !== S.speechEpoch) return;
+    if (!Array.isArray(subscriptions)) throw new Error('Azure CLI returned no subscription list.');
+    S.speechSetup.subscriptions = subscriptions;
+    if (!subscriptions.length) S.speechSetup.error = 'No enabled public Azure subscriptions found. Run az login in the correct tenant.';
+  } catch (e) { if (epoch === S.speechEpoch) S.speechSetup.error = e.message || String(e); }
+  finally { if (epoch === S.speechEpoch) { S.speechSetup.busy = false; renderSpeechSetup(); } }
+}
+
+function renderSpeechSetup() {
+  const s = S.speechSetup;
+  if (!s) return;
+  const selected = (s.resources || []).find(r => r.resourceId === s.resource);
+  $('#speechBody').innerHTML = `
+    <p>Use your Azure CLI sign-in to find a Speech-capable Cognitive Services resource.
+      No API keys, model deployments or Azure changes are needed. Discovery needs resource read access;
+      narration needs Cognitive Services Speech User RBAC on the account, not just its Foundry project.</p>
+    <p class="help">Windows rendering, the bundled Copilot runtime and real-cat assets are checked once and reused.
+      No FFmpeg installation or voice-model download is needed. Missing components show repair and retry instructions.</p>
+    <p class="help">Narration text will be sent to Azure Speech and billed to the selected resource.
+      Selection synthesizes a short generic test phrase to verify your Speech RBAC.
+      PR source inspection still uses Copilot. Video rendering and cat photos stay local.</p>
+    <label>Azure subscription<select id="speechSubscription" ${s.busy ? 'disabled' : ''}>
+      <option value="">Select a subscription</option>${s.subscriptions.map(x => `<option value="${esc(x.id)}" ${x.id === s.subscription ? 'selected' : ''}>${esc(x.name)} (${esc(x.id)})</option>`).join('')}</select></label>
+    <div class="field"><button class="btn" data-sact="find" ${s.busy || !s.subscription ? 'disabled' : ''}>Find compatible resources</button>
+      <button class="mini" data-sact="reload" ${s.busy ? 'disabled' : ''}>Reload sign-in</button></div>
+    ${s.resources ? `<label>Resource<select id="speechResource" ${s.busy ? 'disabled' : ''}><option value="">Select a verified resource</option>
+      ${s.resources.filter(r => r.compatible).map(r => `<option value="${esc(r.resourceId)}" ${r.resourceId === s.resource ? 'selected' : ''}>${esc(r.name)} / ${esc(r.region)}</option>`).join('')}</select></label>
+      ${!s.resources.some(r => r.compatible) ? '<p class="error">No compatible resources with verified Speech voice access were found. Check RBAC, network access and subscription.</p>' : ''}
+      ${s.resources.filter(r => !r.compatible).map(r => `<p class="speech-result small">${esc(r.name)}: ${esc(r.message)}</p>`).join('')}` : ''}
+    ${selected ? `<p class="speech-result small">${esc(selected.resourceId)}<br>${esc(selected.message)}</p>
+      <label>Neural voice<select id="speechVoice" ${s.busy ? 'disabled' : ''}>${selected.voices.map(v => `<option ${v === s.voice ? 'selected' : ''}>${esc(v)}</option>`).join('')}</select></label>` : ''}
+    <details id="speechExactDetails" ${s.exactOpen ? 'open' : ''}><summary>Have an exact resource ID?</summary><p class="help">Use an account ID ending in Microsoft.CognitiveServices/accounts/name, not a project URL.
+      This also works when your account can read a resource but cannot list its subscription.</p>
+      <label>Resource ID<input id="speechExactId" value="${esc(s.exactId)}" placeholder="/subscriptions/.../resourceGroups/.../providers/Microsoft.CognitiveServices/accounts/..." ${s.busy ? 'disabled' : ''}></label>
+      <label>Voice name<input id="speechExactVoice" value="${esc(s.exactVoice)}" ${s.busy ? 'disabled' : ''}></label>
+      <button class="mini" data-sact="exact" ${s.busy ? 'disabled' : ''}>Verify and use this resource${s.key ? ', then generate' : ''}</button></details>
+    <p role="status" aria-live="polite" class="${s.error ? 'error' : 'small'}">${s.busy ? '<span class="video-spinner" aria-hidden="true"></span> ' : ''}${esc(s.error || (s.busy ? s.progress || 'Checking Azure access... You can cancel this setup.' : 'Only compatible resources with verified voice access can be selected.'))}</p>
+    <div class="field"><button class="btn primary" data-sact="use" ${s.busy || !selected || !s.voice ? 'disabled' : ''}>
+      ${s.key ? 'Use resource and generate video' : 'Use this resource'}</button>
+      <button class="btn" data-sact="cancel">Cancel</button></div>`;
+}
+
+async function closeSpeechSetup() {
+  ++S.speechEpoch;
+  S.speechSetup = null; $('#speechDialog').close();
+  try { await rpc('cancelSpeechSetup'); } catch (e) { toast(e.message || String(e), 'error'); }
+}
+
+async function onSpeechAction(action) {
+  const s = S.speechSetup;
+  if (!s) return;
+  if (action === 'cancel') { await closeSpeechSetup(); return; }
+  if (s.busy) return;
+  if (action === 'reload') { $('#speechDialog').close(); await openSpeechSetup(s.key); return; }
+  const epoch = S.speechEpoch;
+  const exactId = action === 'exact' ? $('#speechExactId').value.trim() : null;
+  const exactVoice = action === 'exact' ? $('#speechExactVoice').value.trim() : null;
+  s.busy = true; s.error = ''; s.progress = action === 'find'
+    ? 'Checking compatible Azure Speech resources...' : 'Verifying Azure Speech synthesis permissions...'; renderSpeechSetup();
+  try {
+    if (action === 'find') {
+      s.resources = await rpc('findSpeechResources', { subscription: s.subscription, epoch });
+      if (!Array.isArray(s.resources)) throw new Error('Azure returned no resource list.');
+      s.resource = ''; s.voice = '';
+    } else {
+      const settings = await rpc('selectSpeechResource', { resourceId: exactId || s.resource, voice: exactVoice || s.voice, epoch });
+      if (epoch !== S.speechEpoch) return;
+      if (!settings?.videoSpeech) throw new Error('Azure Speech setup was not confirmed.');
+      S.settings = settings;
+      const key = s.key;
+      ++S.speechEpoch; S.speechSetup = null; $('#speechDialog').close(); render();
+      if (key && canVideo(key)) { S.expanded.add(key); renderRows(); await onAction('tiktokPr', {}, key); }
+      else if (key) toast('Azure Speech was saved, but this PR is no longer eligible. No video was started; refresh and choose an active monitored PR.', 'info');
+      else toast('Azure Speech resource and voice saved.', 'info');
+      return;
+    }
+  } catch (e) { if (epoch === S.speechEpoch) s.error = e.message || String(e); }
+  finally { if (epoch === S.speechEpoch) { s.busy = false; renderSpeechSetup(); } }
+}
+
 async function openDrawer() {
   S.drawer = true; $('#drawer').hidden = false; $('#scrim').hidden = false; renderDrawer();
   await loadApprovalSettings();
@@ -1138,6 +1366,9 @@ function renderDrawer() {
         ${[['light', 'Light Mode'], ['dark', 'Dark Mode']].map(([value, label]) => `<option value="${value}" ${AppTheme.effective(st.theme) === value ? 'selected' : ''}>${label}</option>`).join('')}
       </select></div>
     </div>
+    <div class="section"><h4>TikTok narration</h4>
+      <p class="help">${st.videoSpeech ? `Azure Speech / ${esc(st.videoSpeech.region)} / ${esc(st.videoSpeech.voice)}` : 'Choose an Azure Speech resource on your first video. Azure CLI (az) and az login are required.'}</p>
+      <button class="btn" data-dact="speechSetup">Choose Azure Speech resource / voice</button></div>
     ${S.snap.approvalProviderError ? `<div class="section"><h4>Approval provider</h4><p class="help error">${esc(S.snap.approvalProviderError)}</p></div>` : ''}
     ${S.snap.approvalProvider && S.approvalSettings ? `<div class="section">
       <h4>${esc(providerName())}</h4>
@@ -1241,6 +1472,7 @@ async function changeTheme(select) {
 }
 
 async function onDrawerAction(act, el) {
+  if (act === 'speechSetup') { closeDrawer(); await openSpeechSetup(); return; }
   if (act === 'approvalSettingsAction') {
     if (S.approvalSettingsBusy) return;
     S.approvalSettingsBusy = true; renderDrawer();
@@ -1317,6 +1549,39 @@ async function onDrawerAction(act, el) {
 // ------------------------------------------------------------------ wiring
 function wire() {
   const rows = $('#rows');
+  $('#speechDialog').addEventListener('cancel', e => { e.preventDefault(); void closeSpeechSetup(); });
+  $('#speechDialog').addEventListener('click', e => {
+    const button = e.target.closest('[data-sact]');
+    if (button && !button.disabled) void onSpeechAction(button.dataset.sact);
+  });
+  $('#speechDialog').addEventListener('input', e => {
+    const s = S.speechSetup;
+    if (!s || s.busy) return;
+    if (e.target.id === 'speechExactId') s.exactId = e.target.value;
+    if (e.target.id === 'speechExactVoice') s.exactVoice = e.target.value;
+  });
+  $('#speechDialog').addEventListener('toggle', e => {
+    if (S.speechSetup && e.target.id === 'speechExactDetails') S.speechSetup.exactOpen = e.target.open;
+  }, true);
+  $('#speechDialog').addEventListener('change', e => {
+    const s = S.speechSetup;
+    if (!s || s.busy || !['speechSubscription', 'speechResource', 'speechVoice'].includes(e.target.id)) return;
+    if (e.target.id === 'speechSubscription') { s.subscription = e.target.value; s.resources = null; s.resource = ''; s.voice = ''; }
+    if (e.target.id === 'speechResource') {
+      s.resource = e.target.value;
+      const voices = (s.resources || []).find(r => r.resourceId === s.resource)?.voices || [];
+      s.voice = voices.find(v => v === 'en-US-Ava:DragonHDLatestNeural') || voices.find(v => v === 'en-US-AvaMultilingualNeural') || voices[0] || '';
+    }
+    if (e.target.id === 'speechVoice') s.voice = e.target.value;
+    renderSpeechSetup();
+  });
+  document.addEventListener('error', e => {
+    const video = e.target;
+    if (!video.matches?.('video[data-video-media]')) return;
+    const message = $('.video-playback-error', video.closest('.pr-video'));
+    message.textContent = 'The MP4 could not be played. Retry generation or use the displayed local path in a media player; no upload was attempted.';
+    message.hidden = false;
+  }, true);
   document.addEventListener('contextmenu', openRowMenu);
   rows.addEventListener('pointerenter', () => { S.pointerInRows = true; });
   rows.addEventListener('pointerleave', () => { S.pointerInRows = false; flushRowUpdates(); });
@@ -1410,6 +1675,7 @@ async function boot() {
     toast('The saved theme is not supported by this version. Showing Light Mode without changing your preference.', 'info');
   for (const run of init.runs || []) updateCopilotRun(run);
   for (const explanation of init.explanations || []) updateExplanation(explanation);
+  for (const video of init.videos || []) updateVideo(video);
   setSnapshot(init.snapshot);
   render();
   window.chrome?.webview?.postMessage('ready');
