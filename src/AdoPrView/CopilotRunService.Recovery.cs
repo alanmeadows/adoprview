@@ -91,6 +91,8 @@ public sealed partial class CopilotRunService
             }
             if (!saved.LaunchIntent && saved.State.Status is "failed" or "cancelled")
                 return;
+            if (saved.LaunchIntent && !saved.TaskConfirmedStopped)
+                Update(e, s => s with { MayBeRunning = true, FinishedAt = null });
             if (saved.Environment is null || saved.RunDirectory is null)
                 throw new RunSetupException("Preparation was interrupted before a verified workspace/session was recorded. No original prompt was replayed; inspect this run before cancelling or starting another.");
             var old = saved.Environment;
@@ -129,7 +131,7 @@ public sealed partial class CopilotRunService
                     await FinishRecoveredAsync(e, "cancelled", 143).ConfigureAwait(false);
                     return;
                 }
-                Update(e, s => s with { Status = "running", Error = null, FinishedAt = null });
+                Update(e, s => s with { Status = "running", Error = null, FinishedAt = null, MayBeRunning = true });
                 e.Reconciled.TrySetResult();
                 await FollowRecoveredAsync(e, token).ConfigureAwait(false);
                 return;
@@ -155,7 +157,8 @@ public sealed partial class CopilotRunService
                 throw new RunSetupException("No readable saved Copilot session exists for the exact recorded ID. Work is retained; a fresh prompt is not a resume.");
             if (e.State.ResumeAttempts >= 1)
                 throw new RunSetupException("The automatic resume attempt was already used. Work is preserved; inspect the session instead of restarting in a loop.");
-            Update(e, s => s with { Status = "recovering", ResumeAttempts = s.ResumeAttempts + 1, Error = null, FinishedAt = null });
+            Update(e, s => s with { Status = "recovering", ResumeAttempts = s.ResumeAttempts + 1, Error = null, FinishedAt = null,
+                MayBeRunning = true });
             e.TaskIdentity = null;
             Persist(e);
             var launched = await Invoke("launch", env.Distribution, LaunchScript, LaunchArguments(e, resume: true),
@@ -205,21 +208,18 @@ public sealed partial class CopilotRunService
 
     async Task FollowRecoveredAsync(Entry e, CancellationToken token)
     {
-        var env = e.Environment!;
-        var followed = await Invoke("follow", env.Distribution, FollowScript, [env.Bgtask, e.TaskName],
-            stdout: s => Append(e, s, false), stderr: s => Append(e, s, true), token: token).ConfigureAwait(false);
-        RequireSuccess(followed, "Output could not be reattached. The supervised task is not cancelled; inspect its retained run.");
-        var task = ReadOwnedTask(e, await Invoke("status", env.Distribution, StatusScript, [env.Bgtask, e.TaskName], token: token).ConfigureAwait(false));
-        if (task.Status != "exited" || task.ExitCode is null) throw new RunSetupException("The reattached job did not report a real terminal exit code.");
+        var followed = await FollowAsync(e, token).ConfigureAwait(false);
+        var code = await WaitForExitAsync(e, followed, token).ConfigureAwait(false);
         await FinishRecoveredAsync(e, store?.IsCancelled(e.State.RunId) == true ? "cancelled" :
-            task.ExitCode == 0 ? "completed" : "failed", task.ExitCode).ConfigureAwait(false);
+            code == 0 ? "completed" : "failed", code).ConfigureAwait(false);
     }
 
     async Task FinishRecoveredAsync(Entry e, string status, int? code)
     {
         e.TaskConfirmedStopped = true;
         if (status == "failed" && e.State.ResumeAttempts > 0) status = "needs-attention";
-        Update(e, s => s with { Status = status, ExitCode = code, FinishedAt = s.FinishedAt ?? DateTimeOffset.UtcNow,
+        Update(e, s => s with { Status = status, ExitCode = code, MayBeRunning = false,
+            FinishedAt = s.FinishedAt ?? DateTimeOffset.UtcNow,
             Error = status == "needs-attention" ?
                 $"Saved-session continuation exited with code {code}. Inspect its output and WSL authentication/tools; work is retained and no further automatic resume is allowed." :
                 status == "failed" ? $"Recorded Copilot task exited with code {code}; it is not automatically resumed." : null });

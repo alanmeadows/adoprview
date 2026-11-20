@@ -350,11 +350,11 @@ function renderRowsContent(whenIdle = false) {
   });
 }
 
-const runActive = r => !!r && ['preparing', 'recovering', 'running', 'cancelling'].includes(r.status);
+const runActive = r => !!r && (r.mayBeRunning === true || ['preparing', 'recovering', 'running', 'cancelling'].includes(r.status));
 const runCancelable = r => runActive(r) || (r?.status === 'needs-attention' && r.id > 0);
 const runsForPr = key => [...S.runs.values()].reverse().filter(r => r.key === key)
   .sort((a, b) => (Date.parse(b.startedAt) || 0) - (Date.parse(a.startedAt) || 0));
-const runForPr = key => runsForPr(key).at(0);
+const runForPr = key => runsForPr(key).find(runActive) || runsForPr(key).at(0);
 
 const explanationActive = r => !!r && ['preparing', 'running', 'cancelling'].includes(r.status);
 const explanationLabel = r => r?.status === 'failed' || r?.status === 'cancelled' ? 'Retry Explain' : r ? 'Explain again' : 'Explain this PR';
@@ -532,7 +532,7 @@ function runWorktreeText(r) {
   if (!r) return '';
   const label = r.worktreeStatus === 'removed-clean' ? 'Clean worktree removed' : r.worktreeRetained && !runActive(r) ? 'Preserved worktree' : 'Worktree';
   return [r.worktreePath && `${label}: ${r.worktreePath}`, r.sessionId && `Copilot session: ${r.sessionId}`,
-    r.logPath && `Supervised log: ${r.logPath}`].filter(Boolean).join('\n');
+    r.logPath && `Supervised log: ${r.logPath}`, r.preparationLogPath && `Private preparation log (if created): ${r.preparationLogPath}`].filter(Boolean).join('\n');
 }
 
 function renderRunCard(key, r = runForPr(key), earlier = false) {
@@ -548,7 +548,8 @@ function renderRunCard(key, r = runForPr(key), earlier = false) {
 }
 
 function earlierRunCards(key) {
-  const [, ...earlier] = runsForPr(key);
+  const latest = runForPr(key);
+  const earlier = runsForPr(key).filter(r => r.runId !== latest?.runId);
   return earlier.map(r => renderRunCard(key, r, true)).join('');
 }
 
@@ -581,7 +582,7 @@ function updateCopilotRun(r) {
     throw new Error('Copilot returned an invalid run state.');
   const old = S.runs.get(r.runId);
   if (old?.runId === r.runId && ((old.status !== 'preparing' && r.status === 'preparing') ||
-    (['completed', 'failed', 'cancelled'].includes(old.status) && runActive(r)))) return;
+    (['completed', 'failed', 'cancelled'].includes(old.status) && !old.mayBeRunning && runActive(r)))) return;
   if (old?.runId === r.runId && old.updatedAt && r.updatedAt && Date.parse(r.updatedAt) < Date.parse(old.updatedAt)) return;
   S.runs.set(r.runId, r);
   syncCopilotButton(r.key);
@@ -611,11 +612,14 @@ function syncCopilotButton(key) {
   for (const button of document.querySelectorAll('[data-act="triage"]')) {
     if (button.closest('.pr')?.dataset.key !== key) continue;
     const active = runActive(runForPr(key)), busy = isBusy(key, 'triage');
+    const expanded = button.classList.contains('mini');
     button.classList.toggle('running', active);
     button.classList.toggle('busy', busy);
     button.disabled = busy;
-    button.innerHTML = svg(active || busy ? 'refresh' : 'spark');
-    button.title = active ? 'Show the inline Copilot run for this PR' : 'Fix PR with Copilot in an isolated WSL worktree; output stays inline';
+    button.innerHTML = svg(active || busy ? 'refresh' : 'spark') + (expanded ? ` ${active ? 'Show run' : 'Fix PR'}` : '');
+    button.title = active ? runForPr(key)?.status === 'needs-attention'
+      ? 'Copilot task may still be active; show status and cancellation controls'
+      : 'Show the active inline Copilot run for this PR' : 'Fix PR with Copilot in an isolated WSL worktree; output stays inline';
     button.setAttribute('aria-label', button.title);
     if (active || busy) button.setAttribute('aria-busy', 'true');
     else button.removeAttribute('aria-busy');
@@ -880,8 +884,9 @@ function renderDetail(p) {
     ...(p.humanActions || []).map((a) => ['human', { reviews: 'Human reviewer approval needed (+1)', pop: 'Proof of Presence — tap your security key', autocomplete: 'Auto-complete not set', publish: 'Draft — publish when ready' }[a] || a]),
     ...(p.waiting || []).map((x) => ['pending', x]),
   ];
+  const fixActive = runActive(runForPr(p.key)), fixBusy = isBusy(p.key, 'triage');
   right.push(`<div class="card"><h3>Status <span class="grow"></span>
-      <button class="mini" data-act="triage">${svg('spark')} ${runCancelable(runForPr(p.key)) ? 'Show run' : 'Fix PR'}</button>
+      <button class="mini ${fixActive ? 'running' : ''} ${fixBusy ? 'busy' : ''}" data-act="triage" ${fixBusy ? 'disabled' : ''} ${fixActive || fixBusy ? 'aria-busy="true"' : ''}>${svg(fixActive || fixBusy ? 'refresh' : 'spark')} ${runCancelable(runForPr(p.key)) ? 'Show run' : 'Fix PR'}</button>
       <button class="mini" data-act="copyPrompt">${svg('copy')} Copy prompt</button></h3>
     <div class="body"><ul class="list blockers">${items.length ? items.map(([c, t]) => `<li><span class="dot ${c}"></span><span class="k">${esc(t)}</span></li>`).join('') : '<li><span class="dot ok"></span><span class="k">All gates satisfied</span></li>'}</ul></div></div>`);
 

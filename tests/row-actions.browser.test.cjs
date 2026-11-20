@@ -869,17 +869,41 @@ test('real row hit testing and action identity across refreshes', { timeout: 900
           assert.equal(await evaluate("document.querySelector('#refreshBtn').classList.contains('spin')"), false);
           await evaluate(`updateCopilotRun({...S.snap.prs.find(p=>p.key==='${b}'),runId:'independent',status:'running',output:''});`);
           for (const status of ['completed', 'failed', 'cancelled']) {
-            await evaluate(`updateCopilotRun({...runForPr('${a}'),runId:'test-${status}',status:'running',output:''});`);
             assert.deepEqual(await running(a), active);
-            await evaluate(`updateCopilotRun({...runForPr('${a}'),status:'${status}'});`);
+            await evaluate(`updateCopilotRun({...runForPr('${a}'),status:'needs-attention',mayBeRunning:true,message:'Task status temporarily unavailable'});`);
+            assert.deepEqual(await running(a), active, 'Uncertain process liveness must not appear idle');
+            await evaluate(`updateCopilotRun({...runForPr('${a}'),status:'${status}',mayBeRunning:false});`);
             assert.deepEqual(await running(a), idle, 'Collapsed terminal event must clear only its own busy state');
             assert.deepEqual(await running(b), active);
+            await evaluate(`updateCopilotRun({...runForPr('${a}'),runId:'test-after-${status}',status:'running',output:''});`);
           }
         } finally {
           await send('Emulation.setEmulatedMedia', { features: [{ name: 'prefers-reduced-motion', value: 'no-preference' }] });
         }
       });
     }
+
+    await t.test('failed browser-open and Fix setup actions remain visible errors without hiding dashboard or sticking busy', async () => {
+      await reset(true);
+      const key = 'sample-service-id:101';
+      await evaluate(`
+        window.actionRpc=MockHost.rpc;
+        MockHost.rpc=async(method,p)=>{
+          if(method==='openUrl')throw Error('Windows could not open the default browser (Windows error 1155). Check the default HTTPS app.');
+          if(method==='startCopilot')throw Error('Could not set up the isolated worktree at PR source fetch (exit 128). Git authentication was refused. No Copilot task was launched.');
+          return window.actionRpc(method,p);
+        };`);
+      try {
+        await click(await point(key, '.row [data-act="open"]')); await frame();
+        assert.match(await evaluate("document.querySelector('#toasts').textContent"), /default HTTPS app/);
+        await click(await point(key, '.row [data-act="triage"]')); await frame();
+        assert.match(await evaluate("document.querySelector('#toasts').textContent"), /PR source fetch.*exit 128/);
+        assert.equal(await evaluate(`(()=>{const e=document.querySelector('[data-key="${key}"] .row [data-act="triage"]');return e.disabled||e.hasAttribute('aria-busy');})()`), false);
+        assert.equal(await evaluate(`document.querySelector('[data-key="${key}"] .row').getBoundingClientRect().height>0`), true);
+        await click(await point(key, '.row .title')); await frame();
+        assert.equal(await evaluate(`!!document.querySelector('[data-key="${key}"]')`), true);
+      } finally { await evaluate('MockHost.rpc=window.actionRpc;'); }
+    });
 
     await t.test('running Copilot panel stays inside its owning row across lane/search/repo views and collapse/reopen', async () => {
       await send('Emulation.setDeviceMetricsOverride', { width: 1600, height: 1000, deviceScaleFactor: 1, mobile: false });

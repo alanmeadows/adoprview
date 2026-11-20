@@ -143,6 +143,25 @@ dotnet run --project tests\AdoPrView.Tests
 Remove-Item Env:\ADOPRVIEW_TEST_FILTER, Env:\ADOPRVIEW_TEST_WSL_PREFLIGHT
 ```
 
+Worktree preparation and native browser failure checks have separate opt-ins:
+
+```powershell
+$env:ADOPRVIEW_TEST_FILTER = 'Copilot preparation|Native action'
+$env:ADOPRVIEW_TEST_WSL_PREPARE = '1'
+$env:ADOPRVIEW_TEST_NATIVE_ACTION = '1'
+dotnet run --project tests\AdoPrView.Tests -c Release
+Remove-Item Env:\ADOPRVIEW_TEST_FILTER, Env:\ADOPRVIEW_TEST_WSL_PREPARE, Env:\ADOPRVIEW_TEST_NATIVE_ACTION
+```
+
+Preparation uses only disposable `/tmp` Git repositories, a synthetic Git
+failure shim and the production setup script: no live remote, model, supervisor
+job or installed app state. It covers quoted/linked checkouts, preserved dirty
+source files, exact commits and safe stage/reason/exit errors. The native action
+probe uses a disposable WPF WebView2 profile, intercepts popup launch with a
+synthetic Windows failure and verifies the dashboard stays visible/responding.
+Browser row checks cover lost/uncertain process activity and failed action
+feedback with both normal and reduced motion.
+
 Direct reviewer approval has a focused offline native suite:
 
 ```powershell

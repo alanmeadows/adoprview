@@ -542,6 +542,17 @@ source repository; duplicate active runs of the same PR are blocked. A fork whos
 source is not the mapped repository is rejected rather than fixed in the wrong
 checkout. Fetch/worktree metadata are necessarily shared.
 
+Preparation failures identify the failed stage and exit code, distinguishing
+recognized authentication, network, path, conflict, dependency and unsupported
+Git/checkout errors. A changed source commit requires a fresh PR refresh, not a
+retry against an older commit. No existing worktree, branch or lock is removed to
+make setup succeed. A worktree is reported created only after Git creates it.
+When the app-owned run directory exists, its `prepare.stderr` retains the
+original command error with user-only permissions; its path appears in the run
+panel. **This private file may contain remote URLs or authentication details:
+review and redact it before sharing.** Raw Git errors never go into the dashboard
+or lifecycle log. Failed prelaunch records are not resumed.
+
 The inline output is noninteractive, safely rendered and bounded. Each deliberate
 Fix PR run uses **`--yolo`**, the documented equivalent of `--allow-all-tools
 --allow-all-paths --allow-all-urls`. These permissions apply to that process only;
@@ -564,11 +575,22 @@ A run's panel lives in **its own PR's expanded details**. Collapsing the row hid
 the panel; reopening shows it again. Lane, search, repository and scope filters
 hide the panel together with its row, and never move it to another view. The Fix
 icon keeps spinning for that PR's active run, including while its details are
-collapsed or another PR is open; completion, failure or cancellation clears it
-even when collapsed. If the PR leaves the active list entirely (completed,
+collapsed or another PR is open. If output following disconnects, the app keeps
+monitoring the owned task rather than treating the lost output as process exit.
+Completion, failure or cancellation clears the indicator only after the actual
+task ends. Unconfirmed liveness stays busy with a needs-attention message and
+exact-run cancellation controls. Reduced-motion mode keeps the same busy state
+and accessible labels without animation. If the PR leaves the active list entirely (completed,
 abandoned or no longer returned), its runs appear, collapsed, below the table in
 the unfiltered view only. **Cancel run** targets only that app-owned task.
 Changing views never cancels a run.
+
+**Open in Azure DevOps** and external links use the same validated HTTPS
+launcher. If Windows cannot open its default browser, the action reports an
+error instead of closing the dashboard; check Windows' default HTTPS app or
+copy the PR URL manually. Native event or dashboard-delivery failures are
+recorded as `native-action-failed` diagnostics with safe exception structure,
+and report a native error when the dashboard cannot display one.
 
 ## Restart recovery and worktree cleanup
 

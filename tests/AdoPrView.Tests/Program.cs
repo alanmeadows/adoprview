@@ -608,6 +608,8 @@ await InvestigationTests.Run(Test);
 await VideoTests.Run(Test);
 await AzureSpeechTests.Run(Test);
 await AppDiagnosticsTests.Run(Test);
+await NativeActionTests.Run(Test);
+await CopilotPreparationTests.Run(Test);
 
 Console.WriteLine($"{tests} offline tests passed. No live HTTP or approval requests were made.");
 

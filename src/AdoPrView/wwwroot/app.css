@@ -241,7 +241,7 @@ main { flex: 1; overflow: auto; padding: 0 20px 28px; }
 .act[disabled] { color: var(--disabled-text); background: var(--disabled-bg); pointer-events: none; }
 .act.busy { pointer-events: none; }
 .act.busy svg { animation: spin 1s linear infinite; }
-.act.running svg { animation: spin 1s linear infinite; }
+.act.running svg, .mini.running svg, .mini.busy svg { animation: spin 1s linear infinite; }
 
 /* --------------------------------------------------------------- details */
 .detail {

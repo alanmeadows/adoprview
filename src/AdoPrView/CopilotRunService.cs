@@ -1,4 +1,5 @@
 using System.Diagnostics;
+using System.ComponentModel;
 using System.IO;
 using System.Security.Cryptography;
 using System.Text;
@@ -41,6 +42,8 @@ public sealed record CopilotRunState(
     public int ResumeAttempts { get; init; }
     public string? LogPath { get; init; }
     public long OutputOffset { get; init; }
+    public bool MayBeRunning { get; init; }
+    public string? PreparationLogPath { get; init; }
 }
 
 public sealed record CopilotProcessRequest(
@@ -242,7 +245,7 @@ public sealed partial class CopilotRunService : IAsyncDisposable
                     e.State = e.State with
                     {
                         Status = "cancelled", ExitCode = code, Error = "Owned task stopped after retry. Its worktree is retained.",
-                        FinishedAt = DateTimeOffset.UtcNow
+                        FinishedAt = DateTimeOffset.UtcNow, MayBeRunning = false
                     };
                     activePrs.Remove(PrIdentity(e.State.Request));
                     e.Dirty = true;
@@ -335,7 +338,8 @@ public sealed partial class CopilotRunService : IAsyncDisposable
             env = ParseEnvironment(probe.StandardOutput, r);
             e.Environment = env;
             e.RunDirectory = env.Home + "/.local/state/ado-prview/runs/" + e.State.RunId;
-            Update(e, s => s with { Distribution = env.Distribution, SourcePath = env.Root });
+            Update(e, s => s with { Distribution = env.Distribution, SourcePath = env.Root,
+                PreparationLogPath = e.RunDirectory + "/prepare.stderr" });
             CheckCli(env.Help);
             token.ThrowIfCancellationRequested();
             var prepared = await Invoke("prepare", env.Distribution, PrepareScript,
@@ -345,13 +349,16 @@ public sealed partial class CopilotRunService : IAsyncDisposable
                 token: CancellationToken.None).ConfigureAwait(false);
             // Prepare is intentionally not interrupted halfway through Git metadata updates.
             var fields = ProtocolFields(prepared.StandardOutput);
-            if (fields.Length >= 3 && fields[0] == "WORKTREE")
+            var expectedRun = env.Home + "/.local/state/ado-prview/runs/" + e.State.RunId;
+            var verifiedReceipt = fields.Length == 3 && fields[0] == "WORKTREE" &&
+                fields[1] == expectedRun && fields[2] == expectedRun + "/worktree";
+            if (verifiedReceipt)
             {
                 e.RunDirectory = fields[1];
                 Update(e, s => s with { WorktreePath = fields[2], WorktreeStatus = "created" });
             }
-            RequireSuccess(prepared, "Could not create the isolated worktree. Verify Git authentication and that the fresh PR source ref still points to the selected commit.");
-            if (e.RunDirectory is null)
+            RequirePrepareSuccess(prepared);
+            if (!verifiedReceipt)
                 throw new RunSetupException("WSL returned an invalid worktree receipt; no Copilot task was launched.");
             token.ThrowIfCancellationRequested();
             var staged = await Invoke("stage-prompt", env.Distribution, StagePromptScript,
@@ -361,7 +368,7 @@ public sealed partial class CopilotRunService : IAsyncDisposable
             Append(e, "\nStarting isolated worktree run. Interactive approvals are not available.\n", false);
             launchAttempted = true;
             e.LaunchIntent = true;
-            Persist(e);
+            Update(e, s => s with { MayBeRunning = true });
             var launched = await Invoke("launch", env.Distribution, LaunchScript,
                 LaunchArguments(e, resume: false),
                 token: CancellationToken.None).ConfigureAwait(false);
@@ -375,12 +382,8 @@ public sealed partial class CopilotRunService : IAsyncDisposable
                 Update(e, s => s with { LogPath = task.Log });
             }
             token.ThrowIfCancellationRequested();
-            var followed = await Invoke("follow", env.Distribution, FollowScript, [env.Bgtask, e.TaskName],
-                stdout: text => Append(e, text, false), stderr: text => Append(e, text, true), token: token).ConfigureAwait(false);
-            RequireSuccess(followed, "Live output could not be followed. The supervised task was not cancelled; its worktree and reservation are retained.");
-            var status = await Invoke("status", env.Distribution, StatusScript, [env.Bgtask, e.TaskName],
-                token: CancellationToken.None).ConfigureAwait(false);
-            exitCode = ReadExitCode(status);
+            var followed = await FollowAsync(e, token).ConfigureAwait(false);
+            exitCode = await WaitForExitAsync(e, followed, token).ConfigureAwait(false);
             e.TaskConfirmedStopped = true;
             finalStatus = exitCode == 0 ? "completed" : "failed";
             if (store?.IsCancelled(e.State.RunId) == true) finalStatus = "cancelled";
@@ -398,7 +401,13 @@ public sealed partial class CopilotRunService : IAsyncDisposable
         catch (Exception ex)
         {
             // Never forward process exceptions, stderr, URLs, environment or argv into UI diagnostics.
-            error = ex is RunSetupException ? ex.Message : "The WSL run failed. Check WSL availability and the configured CLI tools.";
+            error = ex switch
+            {
+                RunSetupException => ex.Message,
+                Win32Exception native => $"The WSL command could not start (Windows error {native.NativeErrorCode}). Check WSL installation and the configured distribution. " +
+                    (launchAttempted ? "The owned task's status must be checked before retrying." : "No Copilot task was launched."),
+                _ => "The WSL run failed. Check WSL availability and the configured CLI tools."
+            };
         }
         finally
         {
@@ -438,7 +447,9 @@ public sealed partial class CopilotRunService : IAsyncDisposable
                 finalStatus = "needs-attention";
                 error ??= "Task liveness is uncertain; its worktree and PR reservation are preserved for startup reconciliation.";
             }
-            Update(e, s => s with { Status = finalStatus, ExitCode = exitCode, Error = error, FinishedAt = DateTimeOffset.UtcNow });
+            Update(e, s => s with { Status = finalStatus, ExitCode = exitCode, Error = error,
+                MayBeRunning = launchAttempted && !e.TaskConfirmedStopped,
+                FinishedAt = launchAttempted && !e.TaskConfirmedStopped ? null : DateTimeOffset.UtcNow });
             // Terminal completion is durable before cleanup; a cleanup failure must never become a resumable run.
             if (env is not null && e.RunDirectory is not null)
             {
@@ -460,9 +471,9 @@ public sealed partial class CopilotRunService : IAsyncDisposable
                                 "Completed; worktree retained: " + (disposition.ElementAtOrDefault(1) ?? "safe ownership/liveness/publication could not be verified.")
                         });
                     }
-                    else Update(e, s => s with { WorktreeStatus = "retained" });
+                    else if (e.State.WorktreePath is not null) Update(e, s => s with { WorktreeStatus = "retained" });
                 }
-                catch { Update(e, s => s with { WorktreeStatus = "retained",
+                catch { Update(e, s => s with { WorktreeStatus = s.WorktreePath is null ? "not-created" : "retained",
                     Error = finalStatus == "completed" ? "Completed; cleanup failed. Worktree retained; completion is not resumable." : s.Error }); }
             }
             lock (gate)
@@ -511,6 +522,90 @@ public sealed partial class CopilotRunService : IAsyncDisposable
         }
         // Only host-owned stage names and the exit code cross the diagnostic boundary, never raw stderr or URLs.
         throw new RunSetupException($"WSL preflight failed at {stage} (exit {result.ExitCode}). This preflight did not start a Fix task.");
+    }
+
+    internal static void RequirePrepareSuccess(CopilotProcessResult result)
+    {
+        if (result.ExitCode == 0) return;
+        var stage = "environment or worktree preparation";
+        var reason = result.ExitCode == 124 ? "The 120-second preparation limit expired; check Git connectivity and metadata lock contention." :
+            "Check the configured WSL checkout, Git access and the app-owned run directory.";
+        foreach (var line in result.StandardError.Split('\n'))
+        {
+            var fields = line.TrimEnd('\r').Split(':');
+            if (fields.Length != 4 || fields[0] != "ADOPRVIEW_PREPARE" ||
+                !int.TryParse(fields[3], out var code) || code != result.ExitCode) continue;
+            stage = fields[1] switch
+            {
+                "checkout" => "checkout validation",
+                "source-ref" => "source ref validation",
+                "remote" => "remote identity revalidation",
+                "run-directory" => "app-owned run directory creation",
+                "metadata-lock" => "Git metadata lock",
+                "fetch" => "PR source fetch",
+                "source-commit" => "PR source commit comparison",
+                "worktree" => "Git worktree creation",
+                "ownership" => "worktree ownership receipt",
+                _ => stage
+            };
+            reason = fields[2] switch
+            {
+                "authentication" => "Git authentication or repository access was refused. Sign in to Git in the configured WSL distribution, then retry.",
+                "network" => "Git could not reach the remote. Check network, DNS, proxy and SSH host verification in the configured WSL distribution.",
+                "path" => "Git or the filesystem refused a path. Check directory access, available space and path length.",
+                "conflict" => "Git reported an existing branch, path or lock. Inspect it; no existing worktree or user files were removed.",
+                "dependency" => "A Git helper or checkout filter could not run. Check Git LFS and required WSL executables.",
+                "unsupported" => "The configured checkout or Git version does not support this WSL worktree operation. Use a Linux Git checkout and a Git version supporting worktrees; do not rewrite existing checkout metadata.",
+                "source-moved" => "The PR source ref no longer matches the captured commit. Refresh the PR and retry.",
+                "remote-changed" => "The configured Git remote changed after preflight. Check the checkout's fetch/push mapping before retrying.",
+                "lock" => "The Git metadata lock could not be acquired. Let other Git work finish before retrying; no lock was removed.",
+                _ => reason
+            };
+        }
+        throw new RunSetupException($"Could not set up the isolated worktree at {stage} (exit {result.ExitCode}). {reason} " +
+            "No Copilot task was launched. Existing work is preserved. If the run directory was created, its private prepare.stderr contains the original command error; review/redact it before sharing.");
+    }
+
+    async Task<int> WaitForExitAsync(Entry e, CopilotProcessResult followed, CancellationToken token)
+    {
+        if (followed.ExitCode != 0)
+            Update(e, s => s with { Error = $"Live output disconnected ({(followed.ExitCode == -1 ? "transport failure" : $"exit {followed.ExitCode}")}); still monitoring the owned task. " +
+                "It has not been cancelled. Inspect its supervised log for output." });
+        while (true)
+        {
+            token.ThrowIfCancellationRequested();
+            var result = await Invoke("status", e.Environment!.Distribution, StatusScript,
+                [e.Environment.Bgtask, e.TaskName], token: token).ConfigureAwait(false);
+            if (store is not null)
+            {
+                var task = ReadOwnedTask(e, result);
+                if (task.Status == "exited" && task.ExitCode is { } code) return code;
+                if (task.Status != "running")
+                    throw new RunSetupException("The owned task's terminal state could not be confirmed. Work and its reservation are retained; check its supervised status.");
+            }
+            else
+            {
+                RequireSuccess(result, "Could not read the owned managed task status. Its actual exit is unconfirmed.");
+                using var json = JsonDocument.Parse(result.StandardOutput);
+                if (json.RootElement.GetProperty("status").GetProperty("state").GetString() != "running")
+                    return ReadExitCode(result);
+            }
+            await Task.Delay(TimeSpan.FromSeconds(2), token).ConfigureAwait(false);
+        }
+    }
+
+    async Task<CopilotProcessResult> FollowAsync(Entry e, CancellationToken token)
+    {
+        try
+        {
+            return await Invoke("follow", e.Environment!.Distribution, FollowScript, [e.Environment.Bgtask, e.TaskName],
+                stdout: text => Append(e, text, false), stderr: text => Append(e, text, true), token: token).ConfigureAwait(false);
+        }
+        catch (Exception ex) when (ex is IOException or Win32Exception)
+        {
+            token.ThrowIfCancellationRequested();
+            return new(-1, "", "");
+        }
     }
 
     static void RequireSuccess(CopilotProcessResult result, string message)
@@ -769,31 +864,64 @@ public sealed partial class CopilotRunService : IAsyncDisposable
         """;
 
     internal const string PrepareScript = """
+        prepare_stage=checkout; prepare_reason=command; prepare_error=""
+        exec 6>&2
+        prepare_fail() {
+          code="$1"
+          trap - ERR
+          if [[ -n "$prepare_error" && -f "$prepare_error" ]]; then
+            detail="$(tail -c 8192 -- "$prepare_error")"; detail="${detail,,}"
+            case "$detail" in
+              *"authentication failed"*|*"permission denied (publickey)"*|*"could not read username"*|*"could not read password"*|*"access denied"*|*"repository not found"*|*"tf401019"*|*"returned error: 401"*|*"returned error: 403"*) prepare_reason=authentication ;;
+              *"could not resolve"*|*"unable to access"*|*"connection refused"*|*"connection timed out"*|*"host key verification failed"*) prepare_reason=network ;;
+              *"already exists"*|*"already locked"*|*"is already checked out"*|*"could not lock"*) prepare_reason=conflict ;;
+              *"unknown option"*|*"not a git repository"*|*"not a git command"*|*"invalid gitfile"*|*"not supported"*) prepare_reason=unsupported ;;
+              *"git-lfs"*|*"filter-process"*|*"smudge filter"*|*"external filter"*|*"not found"*|*"cannot run"*) prepare_reason=dependency ;;
+              *"permission denied"*|*"no space left"*|*"file name too long"*|*"read-only file system"*|*"cannot create"*|*"no such file or directory"*) prepare_reason=path ;;
+            esac
+          fi
+          printf 'ADOPRVIEW_PREPARE:%s:%s:%s\n' "$prepare_stage" "$prepare_reason" "$code" >&6
+          exit "$code"
+        }
+        set -E
+        trap 'prepare_fail "$?"' ERR
         root="$1"; common="$2"; remote="$3"; remotehash="$4"; sourceref="$5"; commit="$6"; id="$7"; prid="$8"; nonce="$9"; session="${10}"; pushhash="${11-}"
-        [[ "$id" =~ ^[0-9a-f]{32}$ && "$commit" =~ ^([0-9a-f]{40}|[0-9a-f]{64})$ ]] || exit 74
+        [[ "$id" =~ ^[0-9a-f]{32}$ && "$commit" =~ ^([0-9a-f]{40}|[0-9a-f]{64})$ ]] || prepare_fail 74
         cd -- "$root"
-        [[ "$(cd -- "$(git rev-parse --git-common-dir)" && pwd -P)" == "$common" ]] || exit 74
+        [[ "$(cd -- "$(git rev-parse --git-common-dir)" && pwd -P)" == "$common" ]] || prepare_fail 74
+        prepare_stage=source-ref
         git check-ref-format "$sourceref" >/dev/null
-        [[ "$sourceref" == refs/heads/* ]] || exit 74
+        [[ "$sourceref" == refs/heads/* ]] || prepare_fail 74
+        prepare_stage=remote; prepare_reason=remote-changed
         actual="$(git remote get-url "$remote")"; actual="$(printf %s "$actual" | sha256sum)"; actual="${actual%% *}"
-        [[ "$actual" == "$remotehash" ]] || exit 74
+        [[ "$actual" == "$remotehash" ]] || prepare_fail 74
         if [[ -n "$pushhash" ]]; then
           actual="$(git remote get-url --push --all "$remote" | sha256sum)"
-          [[ "${actual%% *}" == "$pushhash" ]] || exit 74
+          [[ "${actual%% *}" == "$pushhash" ]] || prepare_fail 74
         fi
+        prepare_stage=run-directory; prepare_reason=path
         base="$HOME/.local/state/ado-prview/runs"
         mkdir -p -- "$base"
-        [[ -O "$base" && ! -L "$base" ]] || exit 74
+        [[ -O "$base" && ! -L "$base" ]] || prepare_fail 74
         run="$base/$id"; mkdir -m 700 -- "$run"
         worktree="$run/worktree"; branch="ado-prview/pr-$prid-$id"; ref="refs/ado-prview/$id/source"
-        printf 'ADOPRVIEW1\0WORKTREE\0%s\0%s\0' "$run" "$worktree"
+        prepare_error="$run/prepare.stderr"
+        umask 077
+        exec 2>"$prepare_error"
+        prepare_stage=metadata-lock; prepare_reason=lock
         exec 9>"$common/ado-prview.metadata.lock"
         flock -w 60 9
-        git -c core.hooksPath=/dev/null fetch --quiet --no-tags --no-recurse-submodules --no-write-fetch-head -- "$remote" "$sourceref:$ref" 2>/dev/null
-        [[ "$(git rev-parse "$ref^{commit}")" == "$commit" ]] || exit 75
-        git -c core.hooksPath=/dev/null worktree add --quiet --no-track -b "$branch" -- "$worktree" "$commit" 2>/dev/null
+        prepare_stage=fetch; prepare_reason=command
+        git -c core.hooksPath=/dev/null fetch --quiet --no-tags --no-recurse-submodules --no-write-fetch-head -- "$remote" "$sourceref:$ref"
+        prepare_stage=source-commit; prepare_reason=source-moved
+        [[ "$(git rev-parse "$ref^{commit}")" == "$commit" ]] || prepare_fail 75
+        prepare_stage=worktree; prepare_reason=command
+        git -c core.hooksPath=/dev/null worktree add --quiet --no-track -b "$branch" -- "$worktree" "$commit"
+        printf 'ADOPRVIEW1\0WORKTREE\0%s\0%s\0' "$run" "$worktree"
+        prepare_stage=ownership; prepare_reason=path
         printf '%s\n%s\n%s\n%s\n%s\n' "$root" "$branch" "$commit" "$nonce" "$session" > "$run/ownership"
         chmod 600 "$run/ownership"
+        trap - ERR
         """;
 
     internal const string StagePromptScript = """

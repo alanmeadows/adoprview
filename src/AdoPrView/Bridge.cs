@@ -1,4 +1,3 @@
-using System.Diagnostics;
 using System.Runtime.InteropServices;
 using System.Text.Json;
 using System.Text.Json.Nodes;
@@ -12,7 +11,7 @@ public sealed class Bridge(PrService prs, SettingsStore store, Func<string, Task
     IApprovalProvider? approval = null, IApprovalUi? approvalUi = null, Func<string, JsonObject, Task<object>>? copilotAction = null,
     Func<string, Task<object>>? popAction = null, Func<string, JsonObject, Task<object>>? explainAction = null,
     Action<string>? themeChanged = null, Func<string, JsonObject, Task<object>>? videoAction = null,
-    Func<string, JsonObject, Task<object>>? investigationAction = null)
+    Func<string, JsonObject, Task<object>>? investigationAction = null, Action<string>? openBrowser = null)
 {
     public static readonly JsonSerializerOptions Json = new(JsonSerializerDefaults.Web)
     {
@@ -32,19 +31,25 @@ public sealed class Bridge(PrService prs, SettingsStore store, Func<string, Task
 
     public async Task HandleAsync(string message)
     {
-        JsonNode? req = null;
+        int? id = null;
+        string response;
         try
         {
-            req = JsonNode.Parse(message);
+            var req = JsonNode.Parse(message) as JsonObject ?? throw new ArgumentException("Expected a JSON request object.");
+            if (req["id"] is not JsonValue idValue || !idValue.TryGetValue<int>(out var requestId))
+                throw new ArgumentException("Expected an integer request ID.");
+            id = requestId;
             var method = req?["method"]?.GetValue<string>() ?? "";
             var p = req?["params"] as JsonObject ?? new JsonObject();
             var result = await DispatchAsync(method, p);
-            await post(JsonSerializer.Serialize(new { id = req?["id"]?.GetValue<int>(), result }, Json));
+            response = JsonSerializer.Serialize(new { id, result }, Json);
         }
         catch (Exception ex)
         {
-            await post(JsonSerializer.Serialize(new { id = req?["id"]?.GetValue<int>(), error = ex.Message }, Json));
+            response = JsonSerializer.Serialize(new { id, error = ex.Message }, Json);
         }
+        // A delivery failure is not a second RPC failure; the native owner reports it out of band.
+        await post(response);
     }
 
     IApprovalProvider Provider() => approval ?? throw new InvalidOperationException("No approval provider is enabled.");
@@ -104,8 +109,8 @@ public sealed class Bridge(PrService prs, SettingsStore store, Func<string, Task
                 return await prs.GetLogTailAsync(Str(p, "key"), p["buildId"]!.GetValue<int>(), p["logId"]!.GetValue<int>(), p["lines"]?.GetValue<int>() ?? 200);
             case "openUrl":
                 var url = Str(p, "url");
-                if (!url.StartsWith("https://", StringComparison.OrdinalIgnoreCase)) throw new ArgumentException("Only https URLs can be opened");
-                Process.Start(new ProcessStartInfo(url) { UseShellExecute = true });
+                if (openBrowser is not null) openBrowser(url);
+                else NativeActions.OpenBrowser(url);
                 return null;
             case "copy":
                 await SetClipboardAsync(Str(p, "text"));
