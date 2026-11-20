@@ -235,7 +235,7 @@ internal sealed class InvestigationSource : IInvestigationSource
 
     internal const string ReadScript = """
         set -euo pipefail
-        python3 - "$@" <<'PY'
+        python3 -I -S - "$@" <<'PY'
         import sys, subprocess, json
         sys.stdout.reconfigure(encoding='utf-8')
         work, head, op, commit, path, start = sys.argv[1:]

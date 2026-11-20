@@ -371,7 +371,9 @@ worktree honestly: source tools read its pinned Git objects, not a populated
 filesystem checkout. This avoids executing checkout filters, hooks, submodules,
 skills, build steps or other PR-supplied commands. Symlinks are not followed.
 Local Git replacement objects are disabled so inspected content comes from the
-captured commit, not an unrelated local substitute.
+captured commit, not an unrelated local substitute. The Python reader uses
+isolated mode without site initialization, so working-directory modules,
+`PYTHONPATH`, user packages and site hooks cannot run before its pinned reads.
 Copilot gets only bounded host-controlled source readers, not a shell or arbitrary
 filesystem access. Inference still uses the native Windows Copilot SDK/default
 model and native Copilot sign-in, separately from WSL Git authentication; it does

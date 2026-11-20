@@ -512,6 +512,20 @@ static class InvestigationTests
             using var after = await Read("/code.txt", commits[0]);
             using var before = await Read("/code.txt", commits[1]);
             Check(after.RootElement.GetProperty("lines")[0].GetString() == "new behavior" && before.RootElement.GetProperty("lines")[0].GetString() == "old behavior", "Pinned before/after content confused");
+            await Shell("""
+                set -euo pipefail
+                mkdir "$1/python-ambient"
+                printf 'open("%s/python-import-executed", "w").write("unexpected import")\nraise RuntimeError("ambient code executed")\n' "$1" > "$1/python-ambient/json.py"
+                cp -- "$1/python-ambient/json.py" "$1/python-ambient/sitecustomize.py"
+                """, directory);
+            using var isolatedImport = JsonDocument.Parse(await Shell("""
+                cd -- "$1/python-ambient"
+                export PYTHONPATH="$PWD"
+                shift
+                """ + "\n" + InvestigationSource.ReadScript, directory, work, commits[0], "file", commits[0], "/code.txt", "1"));
+            Check(isolatedImport.RootElement.GetProperty("lines")[0].GetString() == "new behavior",
+                "Ambient Python modules changed pinned source");
+            await Shell("test ! -e \"$1/python-import-executed\"", directory);
             foreach (var path in new[] { "/outside", "/pointer", "/large", "/wide-window" })
             {
                 using var omitted = await Read(path, commits[0]);
