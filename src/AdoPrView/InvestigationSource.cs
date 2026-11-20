@@ -38,7 +38,7 @@ internal sealed class InvestigationSource : IInvestigationSource
     static async Task<string> Execute(ICopilotRunTransport transport, string? distro, string script,
         string[] args, CancellationToken ct)
     {
-        var result = await transport.ExecuteAsync(new("investigation-source", distro, CopilotRunService.EnvironmentScript + "\n" + script, args), null, null, ct);
+        var result = await transport.ExecuteAsync(new("investigation-source", distro, CopilotRunService.SourceEnvironmentScript + "\n" + script, args), null, null, ct);
         ct.ThrowIfCancellationRequested();
         if (result.ExitCode != 0)
             throw new InvalidOperationException($"Worktree source operation failed (exit {result.ExitCode}). Check the configured WSL checkout, Git authentication and PR revisions. No model shell or ADO write was run.");

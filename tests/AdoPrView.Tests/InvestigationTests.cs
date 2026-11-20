@@ -149,6 +149,30 @@ static class InvestigationTests
             await Throws<ArgumentException>(() => source.ReadFileAsync("/RetryPolicy.cs", "main", 1, default));
             Check(transport.Calls.Count == before, "Invalid tool arguments reached WSL");
         });
+        await test("Investigation accepts omitted diff attempts only with actual worktree content and retains omission notices", async () =>
+        {
+            foreach (var (index, content, notice) in new[]
+            {
+                (0, "version https://git-lfs.github.com/spec/v1\noid sha256:offline", "Git LFS"),
+                (0, new string('x', 80_001), "80,000"),
+                (2, "", "binary"),
+            })
+            {
+                using var f = new ExplainTests.Fixture { ContentOverride = content };
+                await using var source = await InvestigationSource.CreateAsync(await f.Capture(), f.Pr, f.Store.Current, default, new Transport());
+                await Throws<InvalidOperationException>(() => Task.FromResult(Inspect()));
+                await source.Context.ReadChangeAsync(index, default);
+                Check(source.Context.DiffReads == 1 && !source.Context.Evidence().Any(e => e.StartsWith("Diff: ")),
+                    "Omitted diff was reported as inspected content");
+                await Throws<InvalidOperationException>(() => Task.FromResult(Inspect()));
+                await source.ReadFileAsync("/RetryPolicy.cs", "after", 1, default);
+                Inspect();
+                Check(source.Context.Coverage().Any(e => e.Contains(notice)),
+                    "Accepted limited investigation lost the diff omission");
+                await source.VerifyAsync(default);
+                bool Inspect() { InvestigationModel.RequireInspection(source); return true; }
+            }
+        });
         await test("Investigation source rejects an unrelated configured checkout before worktree creation", async () =>
         {
             using var f = new ExplainTests.Fixture();
@@ -289,9 +313,10 @@ static class InvestigationTests
             await source.VerifyAsync(default);
             await source.DisposeAsync();
             Check(transport.Calls.Count >= 9 && transport.Calls.All(call =>
-                call.Script.StartsWith(CopilotRunService.EnvironmentScript + "\n", StringComparison.Ordinal) &&
-                call.Script.IndexOf(CopilotRunService.EnvironmentScript, StringComparison.Ordinal) ==
-                call.Script.LastIndexOf(CopilotRunService.EnvironmentScript, StringComparison.Ordinal)),
+                call.Script.StartsWith(CopilotRunService.SourceEnvironmentScript + "\n", StringComparison.Ordinal) &&
+                call.Script.IndexOf(CopilotRunService.SourceEnvironmentScript, StringComparison.Ordinal) ==
+                call.Script.LastIndexOf(CopilotRunService.SourceEnvironmentScript, StringComparison.Ordinal) &&
+                !call.Script.Contains("nvm use", StringComparison.Ordinal)),
                 "Fresh source shells lost the authenticated environment or initialized it twice");
         });
         if (Environment.GetEnvironmentVariable("ADOPRVIEW_TEST_WSL_INVESTIGATION") == "1")
@@ -349,6 +374,28 @@ static class InvestigationTests
         var work = directory + "/checkout/.git/ado-prview-investigations/" + id;
         try
         {
+            await Shell("""
+                set -euo pipefail
+                mkdir -p "$1/home/.config/bash" "$1/home/.nvm"
+                printf 'export GIT_SSH_COMMAND=synthetic-auth-command\nexport BASH_ENV="$HOME/extra-env"\n' > "$1/home/.config/bash/environment"
+                printf 'export SSH_AUTH_SOCK=synthetic-agent-socket\n' > "$1/home/extra-env"
+                printf 'touch "$HOME/nvm-executed"\nnvm() { return 59; }\n' > "$1/home/.nvm/nvm.sh"
+                """, directory);
+            var isolatedEnvironment = """
+                export HOME="$1/home" PATH=/usr/bin:/bin
+                unset ADO_PRVIEW_BASH_ENV BASH_ENV
+                ! command -v copilot >/dev/null 2>&1
+                """;
+            var cliEnvironment = await transport.ExecuteAsync(new("investigation-fixture", null,
+                isolatedEnvironment + "\n" + CopilotRunService.EnvironmentScript, [directory]), null, null, default);
+            Check(cliEnvironment.ExitCode == 59, "Fixture did not reproduce failing CLI-specific NVM initialization");
+            await Shell("test -f \"$1/home/nvm-executed\"; rm -- \"$1/home/nvm-executed\"", directory);
+            await Shell(isolatedEnvironment + "\n" + CopilotRunService.SourceEnvironmentScript + "\n" + """
+                [[ "$GIT_SSH_COMMAND" == synthetic-auth-command && "$SSH_AUTH_SOCK" == synthetic-agent-socket ]]
+                [[ "$BASH_ENV" == "$HOME/extra-env" && "$GIT_TERMINAL_PROMPT" == 0 ]]
+                command -v git >/dev/null; command -v python3 >/dev/null
+                [[ ! -e "$HOME/nvm-executed" ]]
+                """, directory);
             var commits = (await Shell("""
                 set -euo pipefail
                 base="$1"

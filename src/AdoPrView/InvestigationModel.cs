@@ -119,6 +119,13 @@ internal sealed class InvestigationModel : IInvestigationModel
         return new(text.Trim(), []);
     }
 
+    internal static void RequireInspection(IInvestigationSource source)
+    {
+        if (source.Context.DiffReads == 0 ||
+            !source.Evidence.Any(s => s.StartsWith("Worktree ", StringComparison.Ordinal) && s.Contains(", lines ", StringComparison.Ordinal)))
+            throw new InvalidOperationException("Copilot did not request PR diff inspection and read worktree file content. No verified answer or findings are available; retry.");
+    }
+
     public async Task<InvestigationAnswer> AskAsync(IInvestigationSource source, InvestigationTurn[] history, string kind,
         string question, CancellationToken ct)
     {
@@ -155,9 +162,7 @@ internal sealed class InvestigationModel : IInvestigationModel
                         (kind == "lens" ? "Return the required lens-review JSON." : "Answer the question completely in Markdown, not JSON."),
                 }, TimeSpan.FromMinutes(8), ct);
                 ct.ThrowIfCancellationRequested();
-                if (!source.Context.Evidence().Any(s => s.StartsWith("Diff: ", StringComparison.Ordinal)) ||
-                    !source.Evidence.Any(s => s.StartsWith("Worktree ", StringComparison.Ordinal) && s.Contains(", lines ", StringComparison.Ordinal)))
-                    throw new InvalidOperationException("Copilot did not inspect both PR diffs and worktree file content. No verified answer or findings are available; retry.");
+                RequireInspection(source);
                 var content = response?.Data.Content ?? "";
                 return kind == "lens" ? Parse(content, kind, source) : ParseQuestion(content);
             }

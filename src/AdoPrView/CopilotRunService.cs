@@ -783,7 +783,7 @@ public sealed partial class CopilotRunService : IAsyncDisposable
         }
     }
 
-    internal const string EnvironmentScript = """
+    internal const string SourceEnvironmentScript = """
         set -euo pipefail
         # Source only the current Linux user's regular environment files; never print their values.
         inherited_env="${ADO_PRVIEW_BASH_ENV-}"
@@ -798,6 +798,10 @@ public sealed partial class CopilotRunService : IAsyncDisposable
           [[ -f "$requested_env" && -O "$requested_env" && ! -L "$requested_env" ]] || exit 71
           export BASH_ENV="$requested_env"
         fi
+        export NO_COLOR=1 TERM=dumb GIT_TERMINAL_PROMPT=0 GCM_INTERACTIVE=never
+        """;
+
+    internal const string EnvironmentScript = SourceEnvironmentScript + "\n" + """
         if ! command -v copilot >/dev/null 2>&1 && [[ -f "$HOME/.nvm/nvm.sh" && -O "$HOME/.nvm/nvm.sh" && ! -L "$HOME/.nvm/nvm.sh" ]]; then
           source "$HOME/.nvm/nvm.sh" >/dev/null
           nvm use default --silent >/dev/null

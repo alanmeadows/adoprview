@@ -362,6 +362,8 @@ Questions and lens reviews require WSL, Git, Python 3 and the existing per-repo
 WSL checkout mapping in Settings (otherwise `~/clones/<repo>`). The configured
 checkout must have a remote matching the PR's exact organization/project/repository
 and existing Git authentication. No extra tokens or keys are requested.
+The same validated user environment is loaded for each source operation, without
+Fix's WSL Copilot/NVM initialization; questions do not require a WSL Copilot CLI.
 The app fetches the source and target refs into unique private refs and creates
 a detached **no-checkout Git worktree under the Git common metadata directory**.
 It never switches or edits your primary working files. The popup identifies this
@@ -402,7 +404,10 @@ turns, up to 100,000 prior conversation characters, 4,000 characters per questio
 are limited to regular tracked files of 80,000 bytes and 120-line/16,000-character
 windows; binary/LFS content is omitted. Shared PR diff limits above still apply.
 Inspected source and unread areas are shown separately. No tests are run by source
-inspection. **New conversation** or normal app exit removes only the owned empty
+inspection. Binary, LFS or oversized diff omissions do not by themselves block an
+answer if diff inspection was attempted and relevant worktree text was read;
+the unread diff areas remain disclosed, not treated as inspected evidence.
+**New conversation** or normal app exit removes only the owned empty
 worktree; cleanup refuses if files or index entries were added or HEAD was changed.
 An interrupted app or refused cleanup can leave its worktree registered for inspection.
 
