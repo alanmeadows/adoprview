@@ -409,6 +409,8 @@ Inspected source and unread areas are shown separately. No tests are run by sour
 inspection. Binary, LFS or oversized diff omissions do not by themselves block an
 answer if diff inspection was attempted and relevant worktree text was read;
 the unread diff areas remain disclosed, not treated as inspected evidence.
+An empty captured change inventory can still support questions after worktree text
+is read; it cannot supply changed-path evidence for postable findings.
 **New conversation** or normal app exit removes only the owned empty
 worktree; cleanup refuses if files or index entries were added or HEAD was changed.
 An interrupted app or refused cleanup can leave its worktree registered for inspection.

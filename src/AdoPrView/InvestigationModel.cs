@@ -121,7 +121,7 @@ internal sealed class InvestigationModel : IInvestigationModel
 
     internal static void RequireInspection(IInvestigationSource source)
     {
-        if (source.Context.DiffReads == 0 ||
+        if ((source.Context.Changes.Count != 0 && source.Context.DiffReads == 0) ||
             !source.Evidence.Any(s => s.StartsWith("Worktree ", StringComparison.Ordinal) && s.Contains(", lines ", StringComparison.Ordinal)))
             throw new InvalidOperationException("Copilot did not request PR diff inspection and read worktree file content. No verified answer or findings are available; retry.");
     }

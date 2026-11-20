@@ -204,6 +204,23 @@ static class InvestigationTests
                 bool Inspect() { InvestigationModel.RequireInspection(source); return true; }
             }
         });
+        await test("Investigation permits an empty captured change inventory only after actual worktree content is read", async () =>
+        {
+            using var f = new ExplainTests.Fixture();
+            f.AdditionalResponse = request => request.RequestUri!.AbsolutePath.EndsWith("/changes")
+                ? Json(new { changeEntries = Array.Empty<object>(), nextSkip = 0 }) : null;
+            await using var source = await InvestigationSource.CreateAsync(await f.Capture(), f.Pr, f.Store.Current, default, new Transport());
+            Check(source.Context.Changes.Count == 0, "Fixture did not capture an empty inventory");
+            await Throws<InvalidOperationException>(() => Task.FromResult(Inspect()));
+            await source.ReadFileAsync("/RetryPolicy.cs", "after", 1, default);
+            Inspect();
+            await Throws<InvalidDataException>(() =>
+            {
+                source.ValidateFinding(new("0", "Failure", "Consequence", "/RetryPolicy.cs", 2, "line two"));
+                return Task.CompletedTask;
+            });
+            bool Inspect() { InvestigationModel.RequireInspection(source); return true; }
+        });
         await test("Investigation source rejects an unrelated configured checkout before worktree creation", async () =>
         {
             using var f = new ExplainTests.Fixture();
