@@ -150,6 +150,8 @@ public sealed partial class CopilotRunService
             }
             if (task.Status is not ("exited" or "dead"))
                 throw new RunSetupException("The task did not provide a definite inactive state. No resume was attempted.");
+            e.TaskConfirmedStopped = true;
+            Update(e, s => s with { MayBeRunning = false });
             if (e.DriverLease is null)
                 throw new RunSetupException("Another dashboard owns recovery of this run. No duplicate resume or cleanup was attempted.");
             CheckCli(env.Help);
@@ -157,6 +159,7 @@ public sealed partial class CopilotRunService
                 throw new RunSetupException("No readable saved Copilot session exists for the exact recorded ID. Work is retained; a fresh prompt is not a resume.");
             if (e.State.ResumeAttempts >= 1)
                 throw new RunSetupException("The automatic resume attempt was already used. Work is preserved; inspect the session instead of restarting in a loop.");
+            e.TaskConfirmedStopped = false;
             Update(e, s => s with { Status = "recovering", ResumeAttempts = s.ResumeAttempts + 1, Error = null, FinishedAt = null,
                 MayBeRunning = true });
             e.TaskIdentity = null;

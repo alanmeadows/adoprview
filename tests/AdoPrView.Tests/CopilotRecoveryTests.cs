@@ -165,6 +165,10 @@ static class CopilotRecoveryTests
                 await recovered.RecoverAsync();
                 Check(recovered.Get(run.RunId)!.Status == "needs-attention" && recovered.Get(run.RunId)!.WorktreeRetained &&
                     f.Transport.Launches == 1 && f.Transport.Cleanups == 0, "Ambiguous recovery launched/deleted work or hid its blocker");
+                var provenStopped = fault is "session" or "resume-used";
+                Check(recovered.Get(run.RunId)!.MayBeRunning == !provenStopped &&
+                    f.Store.Load().Single().Saved!.TaskConfirmedStopped == provenStopped,
+                    "Verified stopped recovery kept a false running indicator or ambiguous liveness was marked stopped");
                 try { await recovered.StartAsync(Request()); throw new Exception("Lost durable PR reservation"); }
                 catch (InvalidOperationException) { }
             });
