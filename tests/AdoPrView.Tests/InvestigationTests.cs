@@ -380,6 +380,11 @@ static class InvestigationTests
             var source = await InvestigationSource.CreateAsync(await f.Capture(), f.Pr, f.Store.Current, default, transport);
             await source.ReadFileAsync("/RetryPolicy.cs", "after", 1, default);
             await source.ListDirectoryAsync("/", "after", default);
+            var absent = await source.ListDirectoryAsync("/absent", "before", default);
+            Check(absent.Contains("omission") && source.Evidence.Any(e => e.Contains("directory /absent: not a tracked directory")) &&
+                !source.Evidence.Contains("Worktree before: directory /absent (names only)."),
+                "Absent directory was reported as inspected names instead of an explicit omission");
+            await source.ReadFileAsync("/RetryPolicy.cs", "after", 1, default);
             await source.VerifyAsync(default);
             await source.DisposeAsync();
             Check(transport.Calls.Count >= 9 && transport.Calls.All(call =>
@@ -425,7 +430,11 @@ static class InvestigationTests
             Calls.Add(r);
             var text = r.Script.Contains(InvestigationSource.DiscoverScript, StringComparison.Ordinal)
                 ? "ADOINSPECT1\0Ubuntu\0/tmp/offline\0/tmp/offline/.git\0origin\0https://dev.azure.com/offline/Sample/_git/" + (WrongRemote ? "other" : "retry") + "\0"
-                : r.Script.Contains(InvestigationSource.ReadScript, StringComparison.Ordinal) ? """{"lines":["line one","line two","line three"],"total":3}""" : "";
+                : r.Script.Contains(InvestigationSource.ReadScript, StringComparison.Ordinal)
+                    ? r.Arguments[4] == "/absent"
+                        ? """{"entries":[],"omission":"not a tracked directory at the captured revision"}"""
+                        : """{"lines":["line one","line two","line three"],"total":3}"""
+                    : "";
             return Task.FromResult(new CopilotProcessResult(0, text, ""));
         }
     }
@@ -533,6 +542,14 @@ static class InvestigationTests
             }
             using var listing = await Read("/", commits[0], "directory");
             Check(listing.RootElement.GetProperty("entries").GetArrayLength() >= 4, "Directory discovery unavailable");
+            foreach (var (path, commit) in new[] { ("/absent", commits[0]), ("/unicode", commits[1]), ("/code.txt", commits[0]) })
+            {
+                using var absent = await Read(path, commit, "directory");
+                Check(absent.RootElement.GetProperty("entries").GetArrayLength() == 0 &&
+                    absent.RootElement.TryGetProperty("omission", out _), "Missing/non-directory lookup did not return a truthful omission");
+            }
+            using var continued = await Read("/code.txt", commits[0]);
+            Check(continued.RootElement.GetProperty("lines")[0].GetString() == "new behavior", "Directory absence blocked a subsequent valid read");
             using var unicodeFile = JsonDocument.Parse(await Shell("export PYTHONIOENCODING=ascii\n" + InvestigationSource.ReadScript,
                 work, commits[0], "file", commits[0], "/emoji", "1"));
             Check(unicodeFile.RootElement.GetProperty("lines")[0].GetString()!.Length == 32000,

@@ -131,7 +131,9 @@ internal sealed class InvestigationSource : IInvestigationSource
         using var result = await ReadAsync("directory", path, side, 1, ct);
         lock (_evidenceGate)
         {
-            _evidence.Add($"Worktree {side}: directory {path} (names only).");
+            if (result.RootElement.TryGetProperty("omission", out var omission))
+                _evidence.Add($"{side}: directory {path}: {omission.GetString()}");
+            else _evidence.Add($"Worktree {side}: directory {path} (names only).");
             if (result.RootElement.TryGetProperty("omitted", out var omitted) && omitted.GetInt32() > 0)
                 _evidence.Add($"Worktree {side}: directory {path}: {omitted.GetInt32()} entries omitted by the 200-name limit.");
         }
@@ -247,6 +249,12 @@ internal sealed class InvestigationSource : IInvestigationSource
         assert path.startswith('/') and not path.startswith('//') and '\\' not in path and not any(p in ('.','..') for p in path.split('/'))
         spec = commit + ':' + path.lstrip('/')
         if op == 'directory':
+            directory = path.strip('/')
+            spec = commit + ':' + directory
+            if directory:
+                entry = git('ls-tree','-z',commit,'--',':(literal)'+directory).split(b'\0')[0]
+                if not entry or not entry.startswith(b'040000 tree '):
+                    print(json.dumps({'entries':[], 'omission':'not a tracked directory at the captured revision'})); sys.exit(0)
             assert git('cat-file','-t',spec).strip() == b'tree'
             raw = git('ls-tree','-z',spec)
             assert len(raw) <= 1000000, 'Directory too large'

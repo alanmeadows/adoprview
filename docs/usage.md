@@ -374,6 +374,8 @@ Local Git replacement objects are disabled so inspected content comes from the
 captured commit, not an unrelated local substitute. The Python reader uses
 isolated mode without site initialization, so working-directory modules,
 `PYTHONPATH`, user packages and site hooks cannot run before its pinned reads.
+Missing directories (including directories absent before a change) are reported
+as explicit omissions, not verified name listings or errors that block follow-ups.
 Copilot gets only bounded host-controlled source readers, not a shell or arbitrary
 filesystem access. Inference still uses the native Windows Copilot SDK/default
 model and native Copilot sign-in, separately from WSL Git authentication; it does
