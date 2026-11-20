@@ -386,7 +386,8 @@ static class InvestigationTests
                 call.Script.StartsWith(CopilotRunService.SourceEnvironmentScript + "\n", StringComparison.Ordinal) &&
                 call.Script.IndexOf(CopilotRunService.SourceEnvironmentScript, StringComparison.Ordinal) ==
                 call.Script.LastIndexOf(CopilotRunService.SourceEnvironmentScript, StringComparison.Ordinal) &&
-                !call.Script.Contains("nvm use", StringComparison.Ordinal)),
+                !call.Script.Contains("nvm use", StringComparison.Ordinal) &&
+                call.Script.Contains("export GIT_NO_REPLACE_OBJECTS=1", StringComparison.Ordinal)),
                 "Fresh source shells lost the authenticated environment or initialized it twice");
         });
         if (Environment.GetEnvironmentVariable("ADOPRVIEW_TEST_WSL_INVESTIGATION") == "1")
@@ -482,6 +483,7 @@ static class InvestigationTests
                 ln -s /etc/passwd outside
                 printf 'version https://git-lfs.github.com/spec/v1\noid sha256:offline\n' > pointer
                 python3 -c 'from pathlib import Path; Path("large").write_bytes(b"x"*80001)'
+                python3 -c 'from pathlib import Path; Path("wide-window").write_text(("x"*200+"\n")*120, encoding="utf-8")'
                 python3 -c 'from pathlib import Path; Path("emoji").write_text(chr(0x1f431)*16000, encoding="utf-8"); d=Path("unicode"); d.mkdir(); [(d/(chr(0x1f431)*55+str(i))).touch() for i in range(200)]'
                 git add .; git -c core.hooksPath=/dev/null commit --quiet -m source
                 git remote add origin "$base/upstream"
@@ -493,6 +495,13 @@ static class InvestigationTests
                 git config core.hooksPath "$base/hooks"
                 printf '%s\n%s\n' "$(git rev-parse HEAD)" "$basecommit"
                 """, directory)).Trim().Split('\n').Select(s => s.Trim()).ToArray();
+            await Shell("""
+                set -euo pipefail
+                cd "$1/checkout"
+                original="$(git rev-parse "$2:code.txt")"
+                replacement="$(printf 'replacement behavior\nline two\n' | git hash-object -w --stdin)"
+                git -c core.hooksPath=/dev/null replace "$original" "$replacement"
+                """, directory, commits[0]);
             await Shell(InvestigationSource.PrepareScript, directory + "/checkout", "origin", "refs/heads/topic", "refs/heads/release",
                 commits[0], commits[1], commits[1], id, work, directory + "/upstream");
             await Shell(InvestigationSource.VerifyScript, work, commits[0]);
@@ -503,7 +512,7 @@ static class InvestigationTests
             using var after = await Read("/code.txt", commits[0]);
             using var before = await Read("/code.txt", commits[1]);
             Check(after.RootElement.GetProperty("lines")[0].GetString() == "new behavior" && before.RootElement.GetProperty("lines")[0].GetString() == "old behavior", "Pinned before/after content confused");
-            foreach (var path in new[] { "/outside", "/pointer", "/large" })
+            foreach (var path in new[] { "/outside", "/pointer", "/large", "/wide-window" })
             {
                 using var omitted = await Read(path, commits[0]);
                 Check(omitted.RootElement.TryGetProperty("omission", out _), "Unsafe/oversized content was read: " + path);

@@ -38,7 +38,8 @@ internal sealed class InvestigationSource : IInvestigationSource
     static async Task<string> Execute(ICopilotRunTransport transport, string? distro, string script,
         string[] args, CancellationToken ct)
     {
-        var result = await transport.ExecuteAsync(new("investigation-source", distro, CopilotRunService.SourceEnvironmentScript + "\n" + script, args), null, null, ct);
+        var result = await transport.ExecuteAsync(new("investigation-source", distro,
+            CopilotRunService.SourceEnvironmentScript + "\nexport GIT_NO_REPLACE_OBJECTS=1\n" + script, args), null, null, ct);
         ct.ThrowIfCancellationRequested();
         if (result.ExitCode != 0)
             throw new InvalidOperationException($"Worktree source operation failed (exit {result.ExitCode}). Check the configured WSL checkout, Git authentication and PR revisions. No model shell or ADO write was run.");
@@ -239,7 +240,7 @@ internal sealed class InvestigationSource : IInvestigationSource
         sys.stdout.reconfigure(encoding='utf-8')
         work, head, op, commit, path, start = sys.argv[1:]
         def git(*args):
-            return subprocess.check_output(['git', '-C', work, '-c', 'core.fsmonitor=false', '-c', 'core.hooksPath=/dev/null', *args], stderr=subprocess.DEVNULL)
+            return subprocess.check_output(['git', '--no-replace-objects', '-C', work, '-c', 'core.fsmonitor=false', '-c', 'core.hooksPath=/dev/null', *args], stderr=subprocess.DEVNULL)
         assert git('rev-parse', 'HEAD').decode().strip() == head
         assert git('rev-parse', '--show-toplevel').decode().strip() == work
         assert op in ('file','directory') and len(commit)==40 and all(c in '0123456789abcdef' for c in commit)
@@ -266,7 +267,8 @@ internal sealed class InvestigationSource : IInvestigationSource
             lines = data.decode('utf-8',errors='strict').replace('\r\n','\n').split('\n')
             start = int(start); assert 1 <= start <= len(lines)
             window = lines[start-1:start+119]
-            assert sum(len(l) for l in window) <= 16000, 'Window exceeds 16,000 characters'
+            if sum(len(l) for l in window) > 16000:
+                print(json.dumps({'omission':'requested window exceeds 16,000 characters; choose another starting line or file'})); sys.exit(0)
             print(json.dumps({'lines':window,'total':len(lines)}, ensure_ascii=False))
         PY
         """;

@@ -370,6 +370,8 @@ It never switches or edits your primary working files. The popup identifies this
 worktree honestly: source tools read its pinned Git objects, not a populated
 filesystem checkout. This avoids executing checkout filters, hooks, submodules,
 skills, build steps or other PR-supplied commands. Symlinks are not followed.
+Local Git replacement objects are disabled so inspected content comes from the
+captured commit, not an unrelated local substitute.
 Copilot gets only bounded host-controlled source readers, not a shell or arbitrary
 filesystem access. Inference still uses the native Windows Copilot SDK/default
 model and native Copilot sign-in, separately from WSL Git authentication; it does
@@ -405,6 +407,8 @@ and posting outcomes), 4,000 characters per question,
 120 local source reads and eight preview findings per lens turn. Local text reads
 are limited to regular tracked files of 80,000 bytes and 120-line/16,000-character
 windows; binary/LFS content is omitted. Shared PR diff limits above still apply.
+Oversized text windows are reported as omitted without invalidating later source
+reads; select another starting line or file for context.
 Inspected source and unread areas are shown separately. No tests are run by source
 inspection. Binary, LFS or oversized diff omissions do not by themselves block an
 answer if diff inspection was attempted and relevant worktree text was read;
