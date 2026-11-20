@@ -383,6 +383,9 @@ reachable. Closing the popup does not cancel the job. The popup survives dashboa
 refreshes and keeps drafts/conversations separate for each PR.
 
 Lens findings show the affected path, line and exact inspected source quote.
+Finding bodies and the supplied lens are shown as literal text; comment publication
+escapes Markdown/HTML so image URLs, hidden link targets or markup cannot be posted
+without being visible in the confirmed preview.
 **Nothing is selected or posted automatically.** Select the findings you want,
 choose **Post selected findings...**, and confirm the exact count and PR.
 The host rechecks PR identity and revisions, posts only that selection through

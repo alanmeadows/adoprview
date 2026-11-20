@@ -19,8 +19,6 @@ internal sealed class ExplainContext : IDisposable
     readonly PrView _pr;
     readonly string _repoApi;
     readonly string _prApi;
-    readonly string _sourceRef;
-    readonly string _targetRef;
     readonly bool _requireActive;
     readonly Func<bool>? _ignoreDrafts;
     readonly List<ExplainChange> _changes;
@@ -37,15 +35,13 @@ internal sealed class ExplainContext : IDisposable
     public int DiffReads { get; private set; }
     public int ContextReads { get; private set; }
 
-    ExplainContext(AdoClient ado, PrView pr, string repoApi, string sourceRef, string targetRef,
+    ExplainContext(AdoClient ado, PrView pr, string repoApi,
         ExplainRevision revision, List<ExplainChange> changes, bool capped, bool requireActive, Func<bool>? ignoreDrafts)
     {
         _ado = ado;
         _pr = pr;
         _repoApi = repoApi;
         _prApi = repoApi + "/pullrequests/" + pr.Id;
-        _sourceRef = sourceRef;
-        _targetRef = targetRef;
         _requireActive = requireActive;
         _ignoreDrafts = ignoreDrafts;
         Revision = revision;
@@ -129,7 +125,7 @@ internal sealed class ExplainContext : IDisposable
             more = next > 0 || entries.Count > remaining;
             skip = next;
         } while (more && changes.Count < MaxChanges);
-        var context = new ExplainContext(ado, pr, repoApi, sourceRef, targetRef,
+        var context = new ExplainContext(ado, pr, repoApi,
             new(pr.Key, pr.Id, S(fresh["title"]), pr.Repo, source, common, id,
                 Commit(fresh["lastMergeTargetCommit"] ?? latest["targetRefCommit"]), sourceRef, targetRef),
             changes, more, requireActive, ignoreDrafts);
@@ -141,17 +137,26 @@ internal sealed class ExplainContext : IDisposable
     {
         if (_toolFailure is { } failure)
             throw new InvalidOperationException("PR context could not be verified: " + failure.Message, failure);
-        var fresh = await _ado.GetAsync(_prApi + "?api-version=7.1", ct);
-        CheckIdentity(fresh, _pr);
-        CheckVideoEligibility(fresh, _requireActive, _ignoreDrafts?.Invoke() == true);
-        var iterations = await _ado.GetAsync(_prApi + "/iterations?api-version=7.1", ct);
+        await VerifyRevisionAsync(_ado, _pr, Revision, ct, _requireActive, _ignoreDrafts);
+    }
+
+    internal static async Task VerifyRevisionAsync(AdoClient ado, PrView pr, ExplainRevision revision, CancellationToken ct,
+        bool requireActive = false, Func<bool>? ignoreDrafts = null)
+    {
+        if (pr.Key != revision.Key || pr.Id != revision.Id || pr.Repo != revision.Repo)
+            throw new InvalidOperationException("The selected PR identity changed. Refresh and retry.");
+        var prApi = $"https://dev.azure.com/{pr.Org}/{pr.ProjectId}/_apis/git/repositories/{pr.RepoId}/pullrequests/{pr.Id}";
+        var fresh = await ado.GetAsync(prApi + "?api-version=7.1", ct);
+        CheckIdentity(fresh, pr);
+        CheckVideoEligibility(fresh, requireActive, ignoreDrafts?.Invoke() == true);
+        var iterations = await ado.GetAsync(prApi + "/iterations?api-version=7.1", ct);
         var iteration = (iterations["value"] as JsonArray)?.OrderByDescending(n => n?["id"]?.GetValue<int>()).FirstOrDefault()
             ?? throw new InvalidDataException("ADO returned no PR iterations during verification.");
-        if (iteration["id"]?.GetValue<int>() != Revision.Iteration ||
-            S(fresh["sourceRefName"]) != _sourceRef || S(fresh["targetRefName"]) != _targetRef ||
-            (fresh["lastMergeSourceCommit"] is { } source && Commit(source) != Revision.SourceCommit) ||
-            Commit(iteration["sourceRefCommit"]) != Revision.SourceCommit || Commit(iteration["commonRefCommit"]) != Revision.BaseCommit ||
-            Commit(fresh["lastMergeTargetCommit"] ?? iteration["targetRefCommit"]) != Revision.TargetCommit)
+        if (iteration["id"]?.GetValue<int>() != revision.Iteration ||
+            S(fresh["sourceRefName"]) != revision.SourceRef || S(fresh["targetRefName"]) != revision.TargetRef ||
+            (fresh["lastMergeSourceCommit"] is { } source && Commit(source) != revision.SourceCommit) ||
+            Commit(iteration["sourceRefCommit"]) != revision.SourceCommit || Commit(iteration["commonRefCommit"]) != revision.BaseCommit ||
+            Commit(fresh["lastMergeTargetCommit"] ?? iteration["targetRefCommit"]) != revision.TargetCommit)
             throw new InvalidOperationException("The PR revisions changed during source inspection. The partial result is for the displayed pinned commits; refresh and retry.");
     }
 
@@ -187,13 +192,14 @@ internal sealed class ExplainContext : IDisposable
                     output.AppendLine(" " + diff.PiecesNew[i]);
             }
             if (!diff.DiffBlocks.Any()) output.AppendLine("No textual change (possibly a rename or metadata-only change).");
+            NoteEvidence($"Diff: {change.OriginalPath ?? change.Path} -> {change.Path}." +
+                (output.Length > 24_000 ? " Partial inspection; diff truncated after 24,000 characters." : ""));
             if (output.Length > 24_000)
             {
                 Omit(change.Path, "diff truncated after 24,000 characters; use read_pr_file for targeted context");
                 return output.ToString(0, 24_000) + "\n[DIFF TRUNCATED]";
             }
             lock (_coverageGate) _inspected.Add(index);
-            NoteEvidence($"Diff: {change.OriginalPath ?? change.Path} -> {change.Path}.");
             return output.ToString();
         }
         catch (Exception ex) when (ex is not ArgumentException && !ct.IsCancellationRequested)

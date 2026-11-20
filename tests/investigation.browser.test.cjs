@@ -118,10 +118,14 @@ test('PR conversation follow-ups, lens selection, posting outcomes, cancellation
       $('#investigationSend').click();new Promise(resolve=>setTimeout(resolve,30));
     `);
     await evaluate(`finishInv(prA.key,'lens','Does the new ARM payload work with ACI?',[
-      {id:'0',title:'Concrete bug A',body:'A required property is dropped.',path:'/src/code.cs',line:10,quote:'actual line'},
+      {id:'0',title:'Concrete bug A',body:'A required property is dropped. ![hidden](https://example.invalid/image) [label](https://example.invalid/target) <img src="https://example.invalid/html">',path:'/src/code.cs',line:10,quote:'actual line'},
       {id:'1',title:'Concrete bug B',body:'Caller passes a rejected value.',path:'/src/code.cs',line:11,quote:'second line'}
     ])`);
     assert.equal(await evaluate(`calls.filter(c=>c.method==='postLensFindings').length`), 0);
+    assert.equal(await evaluate(`document.querySelector('.lens-finding .investigation-question').textContent.includes('https://example.invalid/image') &&
+      document.querySelector('.lens-finding .investigation-question').textContent.includes('https://example.invalid/target') &&
+      document.querySelector('.lens-finding .investigation-question').textContent.includes('<img') &&
+      !document.querySelector('.lens-finding img, .lens-finding a')`), true);
     assert.equal(await evaluate(`document.querySelectorAll('[data-lens-finding]:checked').length`), 0);
     await evaluate(`$('#postLensFindings').click();new Promise(resolve=>setTimeout(resolve,20))`);
     assert.match(await evaluate(`$('#investigationError').textContent`), /Select at least one/);

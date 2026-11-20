@@ -69,7 +69,7 @@ function renderInvestigation() {
         <label><input type="checkbox" data-lens-finding="${esc(f.id)}" ${selectable ? '' : 'disabled'}>
           <strong>${esc(f.title)}</strong></label>
         <p class="small">${esc(f.path)}:${esc(f.line)} · pinned source ${esc(r.revision.sourceCommit.slice(0, 12))}</p>
-        <div class="md">${explanationBody({ output: f.body, status: 'completed' })}</div>
+        <div class="investigation-question">${esc(f.body)}</div>
         <pre>${esc(f.quote)}</pre>
         ${outcome ? `<p class="${posted ? '' : 'error'}">${esc(outcome.message)}
           ${posted && /^https:\/\/dev\.azure\.com\//i.test(outcome.url || '') ? `<button type="button" class="mini" data-investigation-url="${esc(outcome.url)}">Open confirmed comment</button>` : ''}</p>` : ''}

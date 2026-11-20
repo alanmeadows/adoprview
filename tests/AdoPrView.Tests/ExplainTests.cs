@@ -140,6 +140,29 @@ static class ExplainTests
                 Check(!f.Urls.Any(u => u.Contains("/items?")), "Unverified identity read files");
             }
         });
+        await test("Explain records truncated diff evidence without claiming complete change coverage", async () =>
+        {
+            using var f = new Fixture();
+            using var context = await f.Capture();
+            f.AdditionalResponse = request =>
+            {
+                if (!request.RequestUri!.AbsolutePath.EndsWith("/items")) return null;
+                var before = request.RequestUri.Query.Contains(Fixture.Base);
+                return new(HttpStatusCode.OK) { Content = new StringContent(JsonSerializer.Serialize(new
+                {
+                    path = "/RetryPolicy.cs", commitId = before ? Fixture.Base : Fixture.Source, gitObjectType = "blob",
+                    contentMetadata = new { isBinary = false },
+                    content = request.RequestUri.Query.Contains("includeContent=true")
+                        ? string.Join('\n', Enumerable.Range(0, 600).Select(i => (before ? "before" : "after") + new string('x', 40) + i)) : null,
+                })) };
+            };
+            var diff = await context.ReadChangeAsync(0, default);
+            Check(diff.EndsWith("[DIFF TRUNCATED]") && context.Evidence().Any(e => e.StartsWith("Diff: ") && e.Contains("Partial inspection")),
+                "Successful truncated diff was rejected as no evidence");
+            Check(context.Coverage().Any(c => c.Contains("truncated")) && context.Coverage().Any(c => c.Contains("not had a complete")),
+                "Partial diff was presented as fully inspected");
+            await context.VerifyAsync(default);
+        });
         await test("Explain refuses moved source/base/branch and nonadvancing pagination", async () =>
         {
             using var f = new Fixture();

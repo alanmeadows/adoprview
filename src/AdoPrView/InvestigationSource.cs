@@ -38,7 +38,7 @@ internal sealed class InvestigationSource : IInvestigationSource
     static async Task<string> Execute(ICopilotRunTransport transport, string? distro, string script,
         string[] args, CancellationToken ct)
     {
-        var result = await transport.ExecuteAsync(new("investigation-source", distro, script, args), null, null, ct);
+        var result = await transport.ExecuteAsync(new("investigation-source", distro, CopilotRunService.EnvironmentScript + "\n" + script, args), null, null, ct);
         ct.ThrowIfCancellationRequested();
         if (result.ExitCode != 0)
             throw new InvalidOperationException($"Worktree source operation failed (exit {result.ExitCode}). Check the configured WSL checkout, Git authentication and PR revisions. No model shell or ADO write was run.");
@@ -50,7 +50,7 @@ internal sealed class InvestigationSource : IInvestigationSource
     {
         transport ??= new WslCopilotRunTransport();
         settings.WslRepoDirectories.TryGetValue($"{pr.Org}/{pr.Project}/{pr.Repo}".ToLowerInvariant(), out var directory);
-        var output = await Execute(transport, settings.WslDistro, CopilotRunService.EnvironmentScript + "\n" + DiscoverScript,
+        var output = await Execute(transport, settings.WslDistro, DiscoverScript,
             [directory ?? "", pr.Repo], ct);
         var fields = output.Split('\0');
         if (fields.Length < 7 || fields[0] != "ADOINSPECT1" || fields[1].Length == 0 || !fields[2].StartsWith('/') || !fields[3].StartsWith('/'))
@@ -288,7 +288,7 @@ internal sealed class InvestigationSource : IInvestigationSource
           [[ "$(find "$work" -mindepth 1 -maxdepth 1 ! -name .git -print -quit)" == "" ]] || exit 77
           git -c core.hooksPath=/dev/null -c core.fsmonitor=false worktree remove --force -- "$work"
         fi
-        git update-ref -d "refs/ado-prview-investigations/$id/source"
-        git update-ref -d "refs/ado-prview-investigations/$id/target"
+        git -c core.hooksPath=/dev/null -c core.fsmonitor=false update-ref -d "refs/ado-prview-investigations/$id/source"
+        git -c core.hooksPath=/dev/null -c core.fsmonitor=false update-ref -d "refs/ado-prview-investigations/$id/target"
         """;
 }

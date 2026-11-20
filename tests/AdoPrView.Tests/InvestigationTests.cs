@@ -207,7 +207,8 @@ static class InvestigationTests
                 [new("0", "Failure", "Trigger and consequence", "/RetryPolicy.cs", 2, "{")], [], default);
             Check(posts == 1 && result.Single().Status == "failed" && result[0].Url is null, "Denied comment became success or retried");
         });
-        await test("Investigation reconciles a committed comment after malformed POST JSON without losing earlier confirmed outcomes", async () =>
+        foreach (var invalidResponse in new[] { "{bad JSON", "null" })
+        await test($"Investigation reconciles a committed comment after invalid POST JSON ({invalidResponse}) without losing earlier outcomes", async () =>
         {
             using var f = new ExplainTests.Fixture();
             using var context = await f.Capture();
@@ -220,12 +221,78 @@ static class InvestigationTests
                 posts++;
                 var thread = JsonNode.Parse(request.Content!.ReadAsStringAsync().GetAwaiter().GetResult())!;
                 thread["id"] = posts + 50; thread["comments"]![0]!["id"] = 1; threads.Add(thread);
-                return posts == 1 ? Json(thread) : new(HttpStatusCode.OK) { Content = new StringContent("{bad JSON") };
+                return posts == 1 ? Json(thread) : new(HttpStatusCode.OK) { Content = new StringContent(invalidResponse) };
             };
             var result = await f.Service.PostLensFindingsAsync(f.Pr.Key, context.Revision, "conversation", "turn", "Compatibility",
                 [new("0", "First", "Concrete first failure", "/RetryPolicy.cs", 2, "{"),
                  new("1", "Second", "Concrete second failure", "/RetryPolicy.cs", 2, "{")], [], default);
             Check(posts == 2 && result.Length == 2 && result.All(o => o.Status == "posted" && o.Url is not null), "Malformed response lost confirmed comments or retried POST");
+        });
+        foreach (var drift in new[] { false, true })
+        await test($"Investigation uncertain replay stays uncertain after failed read-back or revision check (drift={drift})", async () =>
+        {
+            using var f = new ExplainTests.Fixture();
+            using var context = await f.Capture();
+            var posts = 0;
+            var reads = 0;
+            var blocked = true;
+            f.AdditionalResponse = request =>
+            {
+                if (request.RequestUri!.AbsolutePath.EndsWith("/pullrequests/123") && blocked && drift && ++reads == 2)
+                    f.MovedSource = true;
+                if (!request.RequestUri.AbsolutePath.EndsWith("/threads")) return null;
+                if (request.Method == HttpMethod.Post) { posts++; throw new HttpRequestException("Unexpected replay"); }
+                if (blocked && !drift) throw new HttpRequestException("Synthetic read-back unavailable");
+                return Json(new { value = Array.Empty<object>() });
+            };
+            var findings = new[] { new LensFinding("0", "Failure", "Trigger", "/RetryPolicy.cs", 2, "{") };
+            var prior = new[] { new CommentOutcome("0", "uncertain", "Earlier response lost.", null) };
+            var result = await f.Service.PostLensFindingsAsync(f.Pr.Key, context.Revision, "conversation", "turn", "Compatibility", findings, prior, default);
+            Check(result.Single().Status == "uncertain" && posts == 0, "Uncertain write became definitely unposted");
+            blocked = false; f.MovedSource = false;
+            result = await f.Service.PostLensFindingsAsync(f.Pr.Key, context.Revision, "conversation", "turn", "Compatibility", findings, result, default);
+            Check(result.Single().Status == "uncertain" && posts == 0, "Blocked reconciliation removed the no-replay guard");
+        });
+        await test("Investigation confirmed text cannot publish hidden Markdown targets or HTML and freshness reads no diff inventory", async () =>
+        {
+            using var f = new ExplainTests.Fixture();
+            using var context = await f.Capture();
+            var start = f.Urls.Count;
+            var posts = 0;
+            f.AdditionalResponse = request =>
+            {
+                if (!request.RequestUri!.AbsolutePath.EndsWith("/threads")) return null;
+                if (request.Method == HttpMethod.Get) return Json(new { value = Array.Empty<object>() });
+                posts++;
+                var thread = JsonNode.Parse(request.Content!.ReadAsStringAsync().GetAwaiter().GetResult())!;
+                var content = thread["comments"]![0]!["content"]!.GetValue<string>();
+                Check(content.Contains(@"\!\[hidden\]\(https://example\.invalid/image\)") &&
+                    content.Contains(@"\[label\]\(https://example\.invalid/target\)") && content.Contains("&lt;img"),
+                    "Comment published Markdown/HTML absent from literal preview");
+                thread["id"] = posts + 60; thread["comments"]![0]!["id"] = 1;
+                return Json(thread);
+            };
+            var result = await f.Service.PostLensFindingsAsync(f.Pr.Key, context.Revision, "conversation", "turn",
+                "[label](https://example.invalid/target)", Enumerable.Range(0, 8).Select(i => new LensFinding(i.ToString(), "Failure",
+                    "![hidden](https://example.invalid/image) <img src='https://example.invalid/html'>", "/RetryPolicy.cs", 2, "{")).ToArray(), [], default);
+            Check(posts == 8 && result.All(o => o.Status == "posted"), "Confirmed batch did not finish");
+            var requests = f.Urls.Skip(start).ToArray();
+            Check(requests.Length == 34 && requests.All(u => !u.Contains("/changes?")), "Freshness recaptured the change inventory");
+        });
+        await test("Investigation initializes the validated environment exactly once per source operation", async () =>
+        {
+            using var f = new ExplainTests.Fixture();
+            var transport = new Transport();
+            var source = await InvestigationSource.CreateAsync(await f.Capture(), f.Pr, f.Store.Current, default, transport);
+            await source.ReadFileAsync("/RetryPolicy.cs", "after", 1, default);
+            await source.ListDirectoryAsync("/", "after", default);
+            await source.VerifyAsync(default);
+            await source.DisposeAsync();
+            Check(transport.Calls.Count >= 9 && transport.Calls.All(call =>
+                call.Script.StartsWith(CopilotRunService.EnvironmentScript + "\n", StringComparison.Ordinal) &&
+                call.Script.IndexOf(CopilotRunService.EnvironmentScript, StringComparison.Ordinal) ==
+                call.Script.LastIndexOf(CopilotRunService.EnvironmentScript, StringComparison.Ordinal)),
+                "Fresh source shells lost the authenticated environment or initialized it twice");
         });
         if (Environment.GetEnvironmentVariable("ADOPRVIEW_TEST_WSL_INVESTIGATION") == "1")
             await test("Investigation synthetic Git worktree readers never run filters or follow symlinks and preserve primary checkout", RunGitFixture);
@@ -262,7 +329,7 @@ static class InvestigationTests
             Calls.Add(r);
             var text = r.Script.Contains(InvestigationSource.DiscoverScript, StringComparison.Ordinal)
                 ? "ADOINSPECT1\0Ubuntu\0/tmp/offline\0/tmp/offline/.git\0origin\0https://dev.azure.com/offline/Sample/_git/" + (WrongRemote ? "other" : "retry") + "\0"
-                : r.Script == InvestigationSource.ReadScript ? """{"lines":["line one","line two","line three"],"total":3}""" : "";
+                : r.Script.Contains(InvestigationSource.ReadScript, StringComparison.Ordinal) ? """{"lines":["line one","line two","line three"],"total":3}""" : "";
             return Task.FromResult(new CopilotProcessResult(0, text, ""));
         }
     }
@@ -302,6 +369,10 @@ static class InvestigationTests
                 git remote add origin "$base/upstream"
                 git push --quiet origin release topic
                 git config filter.fixture.smudge "touch '$base/filter-executed'; cat"
+                mkdir "$base/hooks"
+                printf '#!/bin/sh\ntouch "%s/reference-hook-executed"\n' "$base" > "$base/hooks/reference-transaction"
+                chmod +x "$base/hooks/reference-transaction"
+                git config core.hooksPath "$base/hooks"
                 printf '%s\n%s\n' "$(git rev-parse HEAD)" "$basecommit"
                 """, directory)).Trim().Split('\n').Select(s => s.Trim()).ToArray();
             await Shell(InvestigationSource.PrepareScript, directory + "/checkout", "origin", "refs/heads/topic", "refs/heads/release",
@@ -329,7 +400,7 @@ static class InvestigationTests
                 [[ -z "$(git -C "$1/checkout" status --porcelain)" ]]
                 """, directory);
             await Shell(InvestigationSource.CleanupScript, directory + "/checkout", work, id, commits[0]);
-            await Shell("test ! -e \"$1\"", work);
+            await Shell("test ! -e \"$1\" && test ! -e \"$2/reference-hook-executed\"", work, directory);
             await Shell(InvestigationSource.PrepareScript, directory + "/checkout", "origin", "refs/heads/topic", "refs/heads/release",
                 commits[0], commits[1], commits[1], id, work, directory + "/upstream");
             await Shell("printf 'keep user files' > \"$1/user-added\"", work);
