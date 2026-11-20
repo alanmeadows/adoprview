@@ -139,8 +139,12 @@ static class ApprovalProviderTests
 
         public async Task<string?> Rpc(string request)
         {
-            await _bridge.HandleAsync(request);
-            return JsonNode.Parse(_reply!)!["error"]?.GetValue<string>();
+            var call = JsonNode.Parse(request)!;
+            call["id"] = 1;
+            await _bridge.HandleAsync(call.ToJsonString());
+            var response = JsonNode.Parse(_reply!)!;
+            Check(response["id"]?.GetValue<int>() == 1, "Approval response lost its captured request ID");
+            return response["error"]?.GetValue<string>();
         }
 
         public Task<T> OnUiThreadAsync<T>(Func<System.Windows.Window?, T> action) => Task.FromResult(action(null));
