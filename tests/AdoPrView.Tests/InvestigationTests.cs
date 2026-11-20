@@ -49,6 +49,37 @@ static class InvestigationTests
             done = await Finish(service);
             Check(done.Status == "failed" && done.Message.Contains("revisions changed") && done.Turns.Length == 2, "Stale PR accepted a new answer");
         });
+        foreach (var postOutcomes in new[] { false, true })
+        await test($"Investigation context limit counts serialized findings and posting outcomes (posted={postOutcomes})", async () =>
+        {
+            using var f = new ExplainTests.Fixture();
+            var source = new Source(await f.Capture());
+            var requests = 0;
+            var findings = Enumerable.Range(0, 8).Select(i => new LensFinding(i.ToString(), new string('t', 200),
+                new string('b', 4000), "/RetryPolicy.cs", 1, new string('q', 2000))).ToArray();
+            await using var service = new InvestigationService((_, _) => Task.FromResult<IInvestigationSource>(source),
+                (_, _, _, _, _, selected, _, _) => Task.FromResult(selected.Select(finding =>
+                    new CommentOutcome(finding.Id, "failed", new string('m', 5000), null)).ToArray()),
+                new Model((_, _, _, _, _) =>
+                {
+                    requests++;
+                    return Task.FromResult(new InvestigationAnswer(new string('a', 16000), findings));
+                }));
+            var start = service.Ask(f.Pr.Key, "", "lens", "Synthetic bounded lens");
+            var done = await Finish(service);
+            if (postOutcomes)
+                done = await service.PostAsync(f.Pr.Key, start.ConversationId, start.RequestId, findings.Select(x => x.Id).ToArray(), true);
+            else
+            {
+                service.Ask(f.Pr.Key, start.ConversationId, "lens", "Synthetic follow-up lens");
+                done = await Finish(service);
+            }
+            Check(done.Turns.Sum(turn => turn.Answer.Length + turn.Question.Length) < 100000 &&
+                JsonSerializer.Serialize(done.Turns, Bridge.Json).Length > 100000, "Fixture did not exceed the serialized history budget");
+            var before = requests;
+            await Throws<InvalidOperationException>(() => Task.FromResult(service.Ask(f.Pr.Key, start.ConversationId, "question", "Too much history")));
+            Check(requests == before, "Oversized history reached the model");
+        });
         await test("Investigation cancellation fences turn IDs, keeps prior turns, and source setup failures are explicit", async () =>
         {
             using var f = new ExplainTests.Fixture();
@@ -301,7 +332,29 @@ static class InvestigationTests
                     "![hidden](https://example.invalid/image) <img src='https://example.invalid/html'>", "/RetryPolicy.cs", 2, "{")).ToArray(), [], default);
             Check(posts == 8 && result.All(o => o.Status == "posted"), "Confirmed batch did not finish");
             var requests = f.Urls.Skip(start).ToArray();
-            Check(requests.Length == 34 && requests.All(u => !u.Contains("/changes?")), "Freshness recaptured the change inventory");
+            Check(requests.Length == 68 && requests.All(u => !u.Contains("/changes?")), "Freshness recaptured the change inventory");
+        });
+        foreach (var sourceMoves in new[] { false, true })
+        await test($"Investigation final write check rejects live branch drift despite unchanged merge previews (source={sourceMoves})", async () =>
+        {
+            using var f = new ExplainTests.Fixture { TargetPreview = ExplainTests.Fixture.Target };
+            using var context = await f.Capture();
+            var posts = 0;
+            var reads = 0;
+            f.AdditionalResponse = request =>
+            {
+                if (!request.RequestUri!.AbsolutePath.EndsWith("/threads")) return null;
+                if (request.Method == HttpMethod.Post) { posts++; throw new Exception("Stale branch reached POST"); }
+                if (++reads == 1)
+                {
+                    if (sourceMoves) f.SourceHead = ExplainTests.Fixture.Base;
+                    else f.TargetHead = ExplainTests.Fixture.Base;
+                }
+                return Json(new { value = Array.Empty<object>() });
+            };
+            var result = await f.Service.PostLensFindingsAsync(f.Pr.Key, context.Revision, "conversation", "turn", "Compatibility",
+                [new("0", "Failure", "Concrete consequence", "/RetryPolicy.cs", 2, "{")], [], default);
+            Check(result.Single().Status == "failed" && posts == 0, "Stale source or target branch was posted");
         });
         await test("Investigation initializes the validated environment exactly once per source operation", async () =>
         {
@@ -412,6 +465,7 @@ static class InvestigationTests
                 ln -s /etc/passwd outside
                 printf 'version https://git-lfs.github.com/spec/v1\noid sha256:offline\n' > pointer
                 python3 -c 'from pathlib import Path; Path("large").write_bytes(b"x"*80001)'
+                python3 -c 'from pathlib import Path; Path("emoji").write_text(chr(0x1f431)*16000, encoding="utf-8"); d=Path("unicode"); d.mkdir(); [(d/(chr(0x1f431)*55+str(i))).touch() for i in range(200)]'
                 git add .; git -c core.hooksPath=/dev/null commit --quiet -m source
                 git remote add origin "$base/upstream"
                 git push --quiet origin release topic
@@ -439,6 +493,15 @@ static class InvestigationTests
             }
             using var listing = await Read("/", commits[0], "directory");
             Check(listing.RootElement.GetProperty("entries").GetArrayLength() >= 4, "Directory discovery unavailable");
+            using var unicodeFile = JsonDocument.Parse(await Shell("export PYTHONIOENCODING=ascii\n" + InvestigationSource.ReadScript,
+                work, commits[0], "file", commits[0], "/emoji", "1"));
+            Check(unicodeFile.RootElement.GetProperty("lines")[0].GetString()!.Length == 32000,
+                "Accepted Unicode file window was truncated by ASCII JSON expansion");
+            using var unicodeDirectory = JsonDocument.Parse(await Shell("export PYTHONIOENCODING=ascii\n" + InvestigationSource.ReadScript,
+                work, commits[0], "directory", commits[0], "/unicode", "1"));
+            Check(unicodeDirectory.RootElement.GetProperty("entries").GetArrayLength() == 200 &&
+                unicodeDirectory.RootElement.GetProperty("entries")[199].GetString()!.Contains(char.ConvertFromUtf32(0x1f431)),
+                "Accepted Unicode directory names were truncated by ASCII JSON expansion");
             await Shell("""
                 set -euo pipefail
                 [[ ! -e "$1/filter-executed" ]]

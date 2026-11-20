@@ -50,12 +50,21 @@ internal sealed class ExplainContext : IDisposable
     }
 
     static string S(JsonNode? n) => n?.GetValue<string>() ?? "";
-    static string Commit(JsonNode? n)
+    static string Commit(JsonNode? n, string field = "commitId")
     {
-        var value = S(n?["commitId"]);
+        var value = S(n?[field]);
         if (!Regex.IsMatch(value, @"\A[a-fA-F0-9]{40}\z"))
             throw new InvalidDataException("ADO did not return a valid pinned commit.");
         return value;
+    }
+
+    static async Task<string> BranchHeadAsync(AdoClient ado, string repoApi, string name, CancellationToken ct)
+    {
+        if (!name.StartsWith("refs/heads/", StringComparison.Ordinal))
+            throw new InvalidDataException("ADO did not return a branch ref.");
+        var refs = await ado.GetAsync($"{repoApi}/refs?filter={Uri.EscapeDataString(name["refs/".Length..])}&api-version=7.1", ct);
+        var head = (refs["value"] as JsonArray)?.SingleOrDefault(r => S(r?["name"]) == name);
+        return Commit(head, "objectId");
     }
 
     static void CheckIdentity(JsonNode fresh, PrView pr)
@@ -101,6 +110,17 @@ internal sealed class ExplainContext : IDisposable
         var common = Commit(latest["commonRefCommit"]);
         if (fresh["lastMergeSourceCommit"] is { } preview && Commit(preview) != source)
             throw new InvalidOperationException("The PR changed while ADO was updating its preview. Refresh and retry.");
+        string target;
+        if (S(fresh["status"]) == "active")
+        {
+            var sourceHead = BranchHeadAsync(ado, repoApi, sourceRef, ct);
+            var targetHead = BranchHeadAsync(ado, repoApi, targetRef, ct);
+            await Task.WhenAll(sourceHead, targetHead);
+            if (await sourceHead != source)
+                throw new InvalidOperationException("The PR source branch changed during capture. Refresh and retry.");
+            target = await targetHead;
+        }
+        else target = Commit(fresh["lastMergeTargetCommit"] ?? latest["targetRefCommit"]);
         var changes = new List<ExplainChange>();
         var skip = 0;
         bool more;
@@ -127,7 +147,7 @@ internal sealed class ExplainContext : IDisposable
         } while (more && changes.Count < MaxChanges);
         var context = new ExplainContext(ado, pr, repoApi,
             new(pr.Key, pr.Id, S(fresh["title"]), pr.Repo, source, common, id,
-                Commit(fresh["lastMergeTargetCommit"] ?? latest["targetRefCommit"]), sourceRef, targetRef),
+                target, sourceRef, targetRef),
             changes, more, requireActive, ignoreDrafts);
         try { await context.VerifyAsync(ct); return context; }
         catch { context.Dispose(); throw; }
@@ -145,7 +165,8 @@ internal sealed class ExplainContext : IDisposable
     {
         if (pr.Key != revision.Key || pr.Id != revision.Id || pr.Repo != revision.Repo)
             throw new InvalidOperationException("The selected PR identity changed. Refresh and retry.");
-        var prApi = $"https://dev.azure.com/{pr.Org}/{pr.ProjectId}/_apis/git/repositories/{pr.RepoId}/pullrequests/{pr.Id}";
+        var repoApi = $"https://dev.azure.com/{pr.Org}/{pr.ProjectId}/_apis/git/repositories/{pr.RepoId}";
+        var prApi = repoApi + "/pullrequests/" + pr.Id;
         var fresh = await ado.GetAsync(prApi + "?api-version=7.1", ct);
         CheckIdentity(fresh, pr);
         CheckVideoEligibility(fresh, requireActive, ignoreDrafts?.Invoke() == true);
@@ -156,8 +177,16 @@ internal sealed class ExplainContext : IDisposable
             S(fresh["sourceRefName"]) != revision.SourceRef || S(fresh["targetRefName"]) != revision.TargetRef ||
             (fresh["lastMergeSourceCommit"] is { } source && Commit(source) != revision.SourceCommit) ||
             Commit(iteration["sourceRefCommit"]) != revision.SourceCommit || Commit(iteration["commonRefCommit"]) != revision.BaseCommit ||
-            Commit(fresh["lastMergeTargetCommit"] ?? iteration["targetRefCommit"]) != revision.TargetCommit)
+            S(fresh["status"]) != "active" && Commit(fresh["lastMergeTargetCommit"] ?? iteration["targetRefCommit"]) != revision.TargetCommit)
             throw new InvalidOperationException("The PR revisions changed during source inspection. The partial result is for the displayed pinned commits; refresh and retry.");
+        if (S(fresh["status"]) == "active")
+        {
+            var sourceHead = BranchHeadAsync(ado, repoApi, revision.SourceRef, ct);
+            var targetHead = BranchHeadAsync(ado, repoApi, revision.TargetRef, ct);
+            await Task.WhenAll(sourceHead, targetHead);
+            if (await sourceHead != revision.SourceCommit || await targetHead != revision.TargetCommit)
+                throw new InvalidOperationException("The PR branch revisions changed during source inspection. Refresh and retry.");
+        }
     }
 
     public string ListChanges(int page)

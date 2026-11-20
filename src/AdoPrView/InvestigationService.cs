@@ -1,3 +1,5 @@
+using System.Text.Json;
+
 namespace AdoPrView;
 
 internal sealed record CommentOutcome(string FindingId, string Status, string Message, string? Url);
@@ -45,7 +47,7 @@ internal sealed class InvestigationService(
             }
             else if (c.State.ConversationId != conversationId)
                 throw new InvalidOperationException("The selected PR conversation changed. Reopen it before sending.");
-            if (c.State.Turns.Length >= 12 || c.State.Turns.Sum(t => t.Answer.Length + t.Question.Length) > 100000)
+            if (c.State.Turns.Length >= 12 || JsonSerializer.Serialize(c.State.Turns, Bridge.Json).Length > 100000)
                 throw new InvalidOperationException("This conversation reached its context limit. Start a new conversation.");
             c.Cancel?.Dispose();
             c.Cancel = new CancellationTokenSource(TimeSpan.FromMinutes(10));

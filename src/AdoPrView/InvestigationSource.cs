@@ -236,6 +236,7 @@ internal sealed class InvestigationSource : IInvestigationSource
         set -euo pipefail
         python3 - "$@" <<'PY'
         import sys, subprocess, json
+        sys.stdout.reconfigure(encoding='utf-8')
         work, head, op, commit, path, start = sys.argv[1:]
         def git(*args):
             return subprocess.check_output(['git', '-C', work, '-c', 'core.fsmonitor=false', '-c', 'core.hooksPath=/dev/null', *args], stderr=subprocess.DEVNULL)
@@ -250,7 +251,7 @@ internal sealed class InvestigationSource : IInvestigationSource
             assert len(raw) <= 1000000, 'Directory too large'
             entries = raw.decode('utf-8',errors='strict').split('\0')
             entries = [e for e in entries if e]
-            print(json.dumps({'entries':entries[:200], 'omitted':max(0,len(entries)-200)}))
+            print(json.dumps({'entries':entries[:200], 'omitted':max(0,len(entries)-200)}, ensure_ascii=False))
         else:
             # Inspect object type/mode, never dereference symlinks, submodules or worktree files.
             entry = git('ls-tree','-z',commit,'--',':(literal)'+path.lstrip('/')).split(b'\0')[0]
@@ -266,7 +267,7 @@ internal sealed class InvestigationSource : IInvestigationSource
             start = int(start); assert 1 <= start <= len(lines)
             window = lines[start-1:start+119]
             assert sum(len(l) for l in window) <= 16000, 'Window exceeds 16,000 characters'
-            print(json.dumps({'lines':window,'total':len(lines)}))
+            print(json.dumps({'lines':window,'total':len(lines)}, ensure_ascii=False))
         PY
         """;
 

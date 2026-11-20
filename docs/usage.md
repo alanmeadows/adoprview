@@ -376,8 +376,9 @@ model and native Copilot sign-in, separately from WSL Git authentication; it doe
 not reuse Fix's broad-permission WSL model session.
 
 Follow-ups retain completed turns and the same PR/source identity. Source and
-target refs are rechecked before and after generation and before posting;
-changes block further answers or posting until **New conversation** captures fresh
+target refs are rechecked before and after generation and before posting.
+Active PRs pin and verify actual branch heads, not a possibly stale merge preview.
+Changes block further answers or posting until **New conversation** captures fresh
 revisions. Setup, cancellation and source failures are explicit, with no silent
 remote-only fallback. **PR investigation activity...** reopens an active job even
 after its row is filtered or removed, so its exact cancellation control stays
@@ -399,7 +400,8 @@ ADO offers no atomic revision precondition on thread creation, so a change racin
 the final revision check can still make a posted comment refer to older pinned code.
 
 Conversations/results stay in memory until exit. A conversation allows 12 completed
-turns, up to 100,000 prior conversation characters, 4,000 characters per question,
+turns, up to 100,000 serialized prior conversation characters (including findings
+and posting outcomes), 4,000 characters per question,
 120 local source reads and eight preview findings per lens turn. Local text reads
 are limited to regular tracked files of 80,000 bytes and 120-line/16,000-character
 windows; binary/LFS content is omitted. Shared PR diff limits above still apply.

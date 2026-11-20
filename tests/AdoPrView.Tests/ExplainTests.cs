@@ -187,6 +187,18 @@ static class ExplainTests
             f.TargetPreview = Fixture.Target;
             await Throws<InvalidOperationException>(() => context.VerifyAsync(default));
         });
+        await test("Explain pins live branch heads and rejects branch drift even when merge previews are stale", async () =>
+        {
+            using var f = new Fixture { TargetPreview = Fixture.Target, TargetHead = Fixture.Base };
+            using var context = await f.Capture();
+            Check(context.Revision.TargetCommit == Fixture.Base, "Target was pinned from the stale merge preview");
+            f.TargetHead = Fixture.Target;
+            await Throws<InvalidOperationException>(() => context.VerifyAsync(default));
+            f.TargetHead = Fixture.Base; f.SourceHead = Fixture.Target;
+            await Throws<InvalidOperationException>(() => context.VerifyAsync(default));
+            f.SourceHead = Fixture.Source; f.TargetHead = "";
+            await Throws<InvalidDataException>(() => context.VerifyAsync(default));
+        });
         await test("Explain invalid paths/sides/ranges cannot change repository/revision or issue HTTP requests", async () =>
         {
             using var f = new Fixture();
@@ -393,7 +405,7 @@ static class ExplainTests
         readonly AdoClient _ado;
         readonly bool _dependencyOnly;
         public Func<HttpRequestMessage, HttpResponseMessage?>? AdditionalResponse;
-        public string? Mismatch, OriginalPath, ContentOverride, TargetPreview;
+        public string? Mismatch, OriginalPath, ContentOverride, TargetPreview, SourceHead, TargetHead;
         public string Kind = "edit";
         public string FreshStatus = "active";
         public bool FreshDraft = true;
@@ -435,6 +447,11 @@ static class ExplainTests
                     forkSource = Mismatch == "fork" ? new { repository = new { id = ProjectId } } : null,
                     lastMergeSourceCommit = new { commitId = source }, lastMergeTargetCommit = TargetPreview is null ? null : new { commitId = TargetPreview } };
             else if (uri.AbsolutePath.EndsWith("/iterations")) result = new { value = new[] { iteration } };
+            else if (uri.AbsolutePath.EndsWith("/refs"))
+            {
+                var name = "refs/" + Uri.UnescapeDataString(uri.Query.TrimStart('?').Split('&').Single(p => p.StartsWith("filter="))["filter=".Length..]);
+                result = new { value = new[] { new { name, objectId = name == "refs/heads/retry" ? SourceHead ?? source : TargetHead ?? TargetPreview ?? Target } } };
+            }
             else if (uri.AbsolutePath.EndsWith("/iterations/4")) result = iteration;
             else if (uri.AbsolutePath.EndsWith("/changes"))
             {
