@@ -137,6 +137,13 @@ static class InvestigationTests
             await Throws<System.IO.InvalidDataException>(() => Task.FromResult(InvestigationModel.Parse(Response(), "question", source)));
             var none = InvestigationModel.Parse("""{"answer":"No findings established within the inspected scope.","findings":[]}""", "lens", source);
             Check(none.Findings.Length == 0, "No findings manufactured");
+            var question = InvestigationModel.ParseQuestion("  The `case \"conflicts\"` branch moves classification to **Blocked**.\n\nThis does not merge anything.  ");
+            Check(question.Answer.EndsWith("anything.") && question.Answer.Contains("\"conflicts\"") && question.Findings.Length == 0,
+                "Ordinary Markdown question lost code/text or gained postable findings");
+            Check(InvestigationModel.ParseQuestion("""{"answer":"Quoted data","findings":[{"title":"not a postable finding"}]}""").Findings.Length == 0,
+                "Question text was interpreted as postable findings");
+            foreach (var invalid in new[] { "", " \n ", new string('x', 32001) })
+                await Throws<System.IO.InvalidDataException>(() => Task.FromResult(InvestigationModel.ParseQuestion(invalid)));
             var before = transport.Calls.Count;
             await Throws<ArgumentException>(() => source.ReadFileAsync("/../secret", "after", 1, default));
             await Throws<ArgumentException>(() => source.ReadFileAsync("/RetryPolicy.cs", "main", 1, default));

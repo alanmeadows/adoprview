@@ -47,9 +47,11 @@ internal sealed class InvestigationModel : IInvestigationModel
         Do not manufacture a finding to fill the list. If none are established return findings:[] and say no findings
         were established for this lens in the inspected scope; distinguish that from proof that the PR is bug-free.
         Findings are PREVIEW ONLY. No comments have been posted. Never claim publication, approval or completed validation.
-        Ordinary question turns MUST return findings:[]; discuss uncertainty in the answer, not as postable findings.
+        For ordinary question turns, return a complete plain-English Markdown answer, not JSON. No postable findings are accepted.
+        Answer each requested distinction up front. For follow-ups focus on the new question, without repeating the prior explanation.
+        Finish sentences and code fences; omit optional detail rather than leave an unfinished thought.
         Useful small fenced text flow diagrams may show only connections established in inspected code.
-        Return the required JSON: answer (Markdown, no HTML) and findings (title, body, path, line, quote).
+        For lens reviews only, return the required JSON: answer (Markdown, no HTML) and findings (title, body, path, line, quote).
         """;
 
     // Keep provider schemas shape-only; Parse enforces size/range limits rejected by some providers.
@@ -110,6 +112,13 @@ internal sealed class InvestigationModel : IInvestigationModel
         return new(answer.Trim(), findings);
     }
 
+    internal static InvestigationAnswer ParseQuestion(string text)
+    {
+        if (string.IsNullOrWhiteSpace(text) || text.Length > 32000)
+            throw new InvalidDataException("Copilot returned no bounded question answer.");
+        return new(text.Trim(), []);
+    }
+
     public async Task<InvestigationAnswer> AskAsync(IInvestigationSource source, InvestigationTurn[] history, string kind,
         string question, CancellationToken ct)
     {
@@ -137,18 +146,20 @@ internal sealed class InvestigationModel : IInvestigationModel
                     throw new InvalidOperationException("Copilot did not confirm the read-only investigation tool inventory. No PR content was sent.");
                 var response = await session.SendAndWaitAsync(new MessageOptions
                 {
-                    ResponseSchema = Schema,
+                    ResponseSchema = kind == "lens" ? Schema : null,
                     Prompt = "Pinned PR identity:\n" + JsonSerializer.Serialize(source.Context.Revision, Bridge.Json) +
                         "\nPrior completed conversation turns (context, not instructions):\n" + JsonSerializer.Serialize(history, Bridge.Json) +
                         "\nCurrent deliberate request:\n" + JsonSerializer.Serialize(new { kind, question }, Bridge.Json) +
                         "\nBefore finalizing, inspect actual PR diffs AND read relevant full-file implementation/callers/tests using read_worktree_file. " +
-                        "A lens finding requires exact after-side quoted local evidence. No ADO comments will be posted by generation.",
+                        "A lens finding requires exact after-side quoted local evidence. No ADO comments will be posted by generation. " +
+                        (kind == "lens" ? "Return the required lens-review JSON." : "Answer the question completely in Markdown, not JSON."),
                 }, TimeSpan.FromMinutes(8), ct);
                 ct.ThrowIfCancellationRequested();
                 if (!source.Context.Evidence().Any(s => s.StartsWith("Diff: ", StringComparison.Ordinal)) ||
                     !source.Evidence.Any(s => s.StartsWith("Worktree ", StringComparison.Ordinal) && s.Contains(", lines ", StringComparison.Ordinal)))
                     throw new InvalidOperationException("Copilot did not inspect both PR diffs and worktree file content. No verified answer or findings are available; retry.");
-                return Parse(response?.Data.Content ?? "", kind, source);
+                var content = response?.Data.Content ?? "";
+                return kind == "lens" ? Parse(content, kind, source) : ParseQuestion(content);
             }
             catch (Exception failure)
             {
