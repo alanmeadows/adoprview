@@ -20,6 +20,7 @@ public sealed class MainWindow : Window, IApprovalUi
     readonly IApprovalProvider? _approval;
     readonly CopilotRunService _copilot = new();
     readonly ExplainService _explain;
+    readonly InvestigationService _investigation;
     readonly AzureSpeech _speech = new();
     readonly VideoArtifacts _videoArtifacts = new();
     readonly VideoRenderer _videoRenderer;
@@ -49,6 +50,7 @@ public sealed class MainWindow : Window, IApprovalUi
         (_approval, var approvalError) = ApprovalProviderLoader.Load(_store.Current.ApprovalProvider);
         _prs = new PrService(new AdoClient(), _store, _approval, approvalError);
         _explain = new ExplainService(_prs.GetExplainContextAsync);
+        _investigation = new InvestigationService(_prs.GetInvestigationSourceAsync, _prs.PostLensFindingsAsync);
         _videoRenderer = new VideoRenderer(new AzureSpeechVoice(_speech, () => _store.Current.VideoSpeech), warning: message =>
         {
             _diagnostics.Record("video-cleanup-warning", message);
@@ -138,6 +140,7 @@ public sealed class MainWindow : Window, IApprovalUi
                 _speechSetup = null;
                 _speech.Dispose();
                 await _explain.DisposeAsync();
+                await _investigation.DisposeAsync();
                 await _copilot.DisposeAsync();
                 _pop.Dispose();
                 _shutdownComplete = true;
@@ -197,9 +200,10 @@ public sealed class MainWindow : Window, IApprovalUi
         };
 
         _bridge = new Bridge(_prs, _store, PostAsync, Kick, _approval, this, HandleCopilotAsync, HandlePopAsync,
-            HandleExplainAsync, themeChanged: ApplyTheme, videoAction: HandleVideoAsync);
+            HandleExplainAsync, themeChanged: ApplyTheme, videoAction: HandleVideoAsync, investigationAction: HandleInvestigationAsync);
         _copilot.Changed += run => _ = _bridge.PushCopilotRunAsync(RunForUi(run));
         _explain.Changed += state => _ = _bridge.PushExplanationAsync(state);
+        _investigation.Changed += state => _ = _bridge.PushInvestigationAsync(state);
         _video.Changed += state => _ = _bridge.PushVideoAsync(state);
         core.WebMessageReceived += (_, e) =>
         {
@@ -239,6 +243,26 @@ public sealed class MainWindow : Window, IApprovalUi
             return await _explain.CancelAsync(key, parameters["requestId"]?.GetValue<string>() ?? throw new ArgumentException("Missing explanation ID."));
         _prs.Find(key); // Reject keys that are not in the loaded dashboard before starting work.
         return _explain.Start(key);
+    }
+
+    async Task<object> HandleInvestigationAsync(string action, JsonObject p)
+    {
+        if (action == "listInvestigations") return _investigation.States;
+        var key = p["key"]?.GetValue<string>() ?? throw new ArgumentException("Missing PR key.");
+        if (action == "askPr") _prs.Find(key);
+        var conversation = p["conversationId"]?.GetValue<string>() ?? "";
+        var request = p["requestId"]?.GetValue<string>() ?? "";
+        return action switch
+        {
+            "askPr" => _investigation.Ask(key, conversation, p["kind"]?.GetValue<string>() ?? "question",
+                p["question"]?.GetValue<string>() ?? ""),
+            "cancelInvestigation" => await _investigation.CancelAsync(key, conversation, request),
+            "resetInvestigation" => await _investigation.ResetAsync(key, conversation),
+            "postLensFindings" => await _investigation.PostAsync(key, conversation, request,
+                (p["findingIds"] as JsonArray)?.Select(n => n!.GetValue<string>()).ToArray() ?? [],
+                p["confirmed"]?.GetValue<bool>() == true),
+            _ => throw new ArgumentException("Unknown investigation action."),
+        };
     }
 
     async Task<object> HandleVideoAsync(string action, JsonObject parameters)

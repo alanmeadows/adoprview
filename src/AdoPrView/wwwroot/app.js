@@ -31,6 +31,8 @@ function onHostMessage(m) {
     try { updateCopilotRun(m.data); } catch (e) { toast(e.message || String(e), 'error'); }
   } else if (m.event === 'explanation') {
     try { updateExplanation(m.data); } catch (e) { toast(e.message || String(e), 'error'); }
+  } else if (m.event === 'investigation') {
+    try { updateInvestigation(m.data); } catch (e) { toast(e.message || String(e), 'error'); }
   } else if (m.event === 'prVideo') {
     try { updateVideo(m.data); } catch (e) { toast(e.message || String(e), 'error'); }
   } else if (m.event === 'speechSetupProgress' && S.speechSetup?.busy && m.data?.epoch === S.speechEpoch) {
@@ -68,6 +70,7 @@ const S = {
   approvalSettingsBusy: false,
   runs: new Map(),
   explanations: new Map(),
+  investigations: new Map(),
   videos: new Map(),
   speechSetup: null,
   speechEpoch: 0,
@@ -362,7 +365,7 @@ function canExplain(key) {
 
 function explanationRevision(r) {
   const v = r?.revision;
-  return v ? `Iteration ${v.iteration} · source ${v.sourceCommit.slice(0, 12)} · merge base ${v.baseCommit.slice(0, 12)}` : '';
+  return v ? `Iteration ${v.iteration} · source ${v.sourceCommit.slice(0, 12)} · merge base ${v.baseCommit.slice(0, 12)}${v.targetCommit ? ` · target ${v.targetCommit.slice(0, 12)}` : ''}` : '';
 }
 
 function explanationBody(r) {
@@ -384,7 +387,9 @@ function renderExplanation(key) {
       <button class="mini" data-act="explainPr" ${active || isBusy(key, 'explainPr') || !canExplain(key) ? 'disabled' : ''}>${svg('spark')} ${explanationLabel(r)}</button>
       <button class="mini" data-act="cancelExplanation" data-request-id="${esc(r?.requestId || '')}" ${active ? '' : 'hidden'} ${r?.status === 'cancelling' ? 'disabled' : ''}>${svg('x')} Cancel</button></h3>
     <div class="body">
-      <p class="explain-status small${r?.status === 'failed' ? ' error' : ''}" role="status" aria-live="polite">${esc(r?.message || 'A brief summary of what changes and where it fits in this repository.')}</p>
+      <p class="explain-status small${r?.status === 'failed' ? ' error' : ''}" role="status" aria-live="polite">${esc(r?.message || 'A plain-spoken, code-grounded investigation of what improves, architecture, API changes and meaningful risks.')}</p>
+      <p><button class="mini" data-act="askPr" ${canExplain(key) ? '' : 'disabled'}>Ask Copilot about this PR...</button>
+        <button class="mini" data-act="lensPr" ${canExplain(key) ? '' : 'disabled'}>Review with a lens...</button></p>
       <div class="explain-output md" tabindex="0" aria-label="PR explanation" ${r?.output ? '' : 'hidden'}>${explanationBody(r)}</div>
       <details class="explain-details">
         <summary>Evidence and coverage<span class="explain-notices">${r?.coverage?.length ? ` · ${r.coverage.length} notices` : ''}</span></summary>
@@ -1161,6 +1166,10 @@ async function onAction(act, el, key) {
         updateCopilotRun(r);
       });
       break;
+    case 'askPr':
+    case 'lensPr':
+      openInvestigation(key, act === 'lensPr' ? 'lens' : 'question');
+      break;
     case 'explainPr':
       if (!canExplain(key) || isBusy(key, act) || explanationActive(S.explanations.get(key))) return;
       S.busy.add(`${key}:${act}`);
@@ -1548,6 +1557,7 @@ async function onDrawerAction(act, el) {
 
 // ------------------------------------------------------------------ wiring
 function wire() {
+  wireInvestigation();
   const rows = $('#rows');
   $('#speechDialog').addEventListener('cancel', e => { e.preventDefault(); void closeSpeechSetup(); });
   $('#speechDialog').addEventListener('click', e => {
@@ -1675,6 +1685,7 @@ async function boot() {
     toast('The saved theme is not supported by this version. Showing Light Mode without changing your preference.', 'info');
   for (const run of init.runs || []) updateCopilotRun(run);
   for (const explanation of init.explanations || []) updateExplanation(explanation);
+  for (const investigation of init.investigations || []) updateInvestigation(investigation);
   for (const video of init.videos || []) updateVideo(video);
   setSnapshot(init.snapshot);
   render();

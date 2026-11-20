@@ -103,6 +103,9 @@ static class ExplainTests
             Check(diff.Contains("-        return TimeSpan.FromSeconds(2);") && diff.Contains("+        return TimeSpan.FromSeconds(Math.Min(300, 2 * Math.Pow(2, attempt)));"), "Diff omitted actual behavior");
             Check(f.Urls.Where(u => u.Contains("/items?")).All(u => u.Contains("versionDescriptor.versionType=commit") && (u.Contains(Fixture.Base) || u.Contains(Fixture.Source))), "Unpinned file read");
             Check(!f.Urls.Any(u => u.Contains(Fixture.Target)), "Target-only changes leaked into PR diff");
+            var requests = f.Urls.Count;
+            await context.ReadFileAsync("/RetryPolicy.cs", "target", 1, default);
+            Check(f.Urls.Skip(requests).Where(u => u.Contains("/items?")).All(u => u.Contains(Fixture.Target)), "Target context was read from the source or main branch");
         });
         await test("Explain handles additions deletions renames binaries LFS and oversized files without inventing content", async () =>
         {
@@ -243,33 +246,15 @@ static class ExplainTests
             Check(environment.Keys.All(k => !k.Contains("TOKEN", StringComparison.OrdinalIgnoreCase) && !k.Contains("PAT", StringComparison.OrdinalIgnoreCase) || k is "PATH" or "PATHEXT"), "Credentials inherited");
             Check(!environment.ContainsKey("NODE_OPTIONS") && !environment.ContainsKey("COPILOT_HOME"), "Ambient overrides inherited");
         });
-        await test("Explain summary contract permits brief contextual prose but rejects reports and long output", () =>
+        await test("Explain preserves deep multi-section output instead of compressing it into a PR description", async () =>
         {
-            Check(ExplainModel.IsBriefSummary("The developer utility that regenerates HTTP test fixtures upgrades x/text from v0.29.0 to v0.30.0. Its dependency changes; runtime behavior is not established."), "Short contextual summary rejected");
-            Check(!ExplainModel.IsBriefSummary("One. Two. Three. Four."), "Four-sentence report accepted");
-            Check(!ExplainModel.IsBriefSummary("one. two. three. four.") &&
-                !ExplainModel.IsBriefSummary("`One.` Two. Three. Four."), "Sentence casing/formatting bypassed the limit");
-            Check(!ExplainModel.IsBriefSummary(string.Join(" ", Enumerable.Repeat("word", 81))), "Word limit not enforced");
-            Check(!ExplainModel.IsBriefSummary("## Summary\nDetails") && !ExplainModel.IsBriefSummary("- Update the module.") &&
-                !ExplainModel.IsBriefSummary("A paragraph.\n\nAnother paragraph."), "Report formatting accepted");
-            return Task.CompletedTask;
-        });
-        await test("Explain structured compression validates response shape and preserves the brief summary contract", async () =>
-        {
-            Check(ExplainModel.ReadStructuredSummary("""{"summary":"The fixture generator is a developer utility. Its dependency is updated."}""") ==
-                "The fixture generator is a developer utility. Its dependency is updated.", "Structured summary content changed");
-            await Throws<System.Text.Json.JsonException>(() => Task.FromResult(ExplainModel.ReadStructuredSummary("not JSON")));
-            await Throws<InvalidDataException>(() => Task.FromResult(ExplainModel.ReadStructuredSummary("""{"summary":42}""")));
-            await Throws<InvalidDataException>(() => Task.FromResult(ExplainModel.ReadStructuredSummary("""{"other":"A summary."}""")));
-            await Throws<InvalidDataException>(() => Task.FromResult(ExplainModel.ReadStructuredSummary("""{"summary":"A summary.","extra":true}""")));
-            await Throws<InvalidDataException>(() => Task.FromResult(ExplainModel.ReadStructuredSummary("""{"summary":"First.","summary":"Second."}""")));
-            await Throws<InvalidDataException>(() => Task.FromResult(ExplainModel.ReadStructuredSummary(
-                JsonSerializer.Serialize(new { summary = new string('x', 481) }))));
-            await Throws<InvalidDataException>(() => Task.FromResult(ExplainModel.ReadStructuredSummary("""{"summary":"One. Two. Three. Four."}""")));
-            Check(ExplainModel.SummarySchema.GetProperty("properties").GetProperty("summary").GetProperty("maxLength").GetInt32() == 480,
-                "Structured response length is not bounded");
-            await Throws<InvalidDataException>(() => Task.FromResult(ExplainModel.ReadStructuredSummary(
-                System.Text.Json.JsonSerializer.Serialize(new { summary = string.Join(" ", Enumerable.Repeat("word", 81)) }))));
+            using var f = new Fixture();
+            var answer = "## What improves\n" + string.Join(" ", Enumerable.Repeat("Evidence-backed before/after behavior.", 90)) +
+                "\n## Architecture\nThe integration-test harness owns these retries, not the shipped runtime.\n## Limits\nTests were read, not run.";
+            await using var service = new ExplainService((_, ct) => f.Capture(ct), new Model((_, _, _) => Task.FromResult(answer)));
+            service.Start(f.Pr.Key);
+            var result = await Finish(service);
+            Check(result.Status == "completed" && result.Output == answer, "Deep explanation was rejected or compressed");
         });
         await test("Explain service deduplicates requests, fences cancellation IDs, streams and acknowledges cancellation", async () =>
         {
@@ -375,6 +360,7 @@ static class ExplainTests
         readonly HttpClient _http;
         readonly AdoClient _ado;
         readonly bool _dependencyOnly;
+        public Func<HttpRequestMessage, HttpResponseMessage?>? AdditionalResponse;
         public string? Mismatch, OriginalPath, ContentOverride;
         public string Kind = "edit";
         public string FreshStatus = "active";
@@ -402,6 +388,7 @@ static class ExplainTests
         public Task<ExplainContext> Capture(CancellationToken ct = default) => ExplainContext.CaptureAsync(_ado, Pr, ct);
         HttpResponseMessage Respond(HttpRequestMessage request)
         {
+            if (AdditionalResponse?.Invoke(request) is { } handled) return handled;
             Check(request.Method == HttpMethod.Get, "Explanation attempted an ADO write");
             var uri = request.RequestUri!;
             Check(uri.Host == "dev.azure.com" && uri.AbsolutePath.StartsWith($"/offline/{ProjectId}/_apis/git/repositories/{RepoId}/", StringComparison.Ordinal), "Explanation escaped repository scope");

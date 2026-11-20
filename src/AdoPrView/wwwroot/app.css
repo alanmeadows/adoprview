@@ -20,6 +20,26 @@ a { color: var(--accent2); text-decoration: none; }
 a:hover { text-decoration: underline; }
 ::selection { background: var(--selection); }
 :focus-visible { outline: 2px solid var(--focus-ring); outline-offset: 2px; }
+.investigation-dialog {
+  width: min(1000px, 94vw); max-height: 92vh; overflow: auto; padding: 20px;
+  color: var(--text); background: var(--surface); border: 1px solid var(--border2); border-radius: var(--card-radius);
+}
+.investigation-dialog::backdrop { background: var(--overlay); }
+.investigation-dialog header, .investigation-actions { display: flex; align-items: center; gap: 10px; }
+.investigation-dialog header h2 { flex: 1; margin: 0; font-size: 18px; }
+.investigation-dialog label { display: block; margin-top: 8px; }
+.investigation-dialog textarea {
+  width: 100%; padding: 10px; resize: vertical; font: inherit; border-radius: var(--radius);
+  color: var(--text); background: var(--bg); border: 1px solid var(--control-border);
+}
+.investigation-dialog select { max-width: 100%; }
+.investigation-dialog pre { white-space: pre-wrap; overflow-wrap: anywhere; font-family: var(--mono); }
+#investigationSource, .investigation-question { white-space: pre-wrap; overflow-wrap: anywhere; }
+#investigationTranscript { max-height: 42vh; overflow: auto; }
+.investigation-turn { border-top: 1px solid var(--border); padding: 10px 0; }
+.lens-finding { border: 1px solid var(--border); border-radius: var(--radius); padding: 12px; margin: 12px 0; }
+.investigation-actions { flex-wrap: wrap; margin-top: 10px; }
+.investigation-activity { position: fixed; right: 24px; bottom: 36px; z-index: 20; box-shadow: var(--shadow); }
 input::placeholder, textarea::placeholder { color: var(--muted); opacity: 1; }
 button:disabled, select:disabled {
   cursor: not-allowed; color: var(--disabled-text); background: var(--disabled-bg);

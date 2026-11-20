@@ -604,6 +604,7 @@ await CopilotRecoveryTests.Run(Test);
 await PopPaneTests.Run(Test);
 await AutoCompleteTests.Run(Test);
 await ExplainTests.Run(Test);
+await InvestigationTests.Run(Test);
 await VideoTests.Run(Test);
 await AzureSpeechTests.Run(Test);
 await AppDiagnosticsTests.Run(Test);
