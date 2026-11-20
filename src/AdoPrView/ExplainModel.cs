@@ -125,6 +125,9 @@ internal sealed class ExplainModel : IExplainModel
                 You have no shell, filesystem, write, search, agent or network tools. Do not request them.
                 Explain the before/after behavior, who or what is affected, and how the main pieces fit together.
                 Distinguish observed facts from inference. The host separately displays inspected paths, revisions and coverage.
+                Describe the PR as an observer; never claim you authored its changes.
+                Trace consuming UI/API code before asserting user-visible effects: grouping, visibility, disabled actions and enforcement are different.
+                If diff fragments overlap or are unclear, read the relevant full-file windows rather than infer their net effect.
                 Do not merely paraphrase the title, enumerate filenames, or explain blockers/status. Do not assert validation you did not observe.
                 Write a technically deep explanation in plain-spoken English, not a PR-description paraphrase.
                 Lead with what genuinely improves for a user or maintainer and show the code evidence for the before/after claim.

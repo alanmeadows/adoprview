@@ -155,6 +155,15 @@ static class ExplainTests
             f.NewIteration = false; f.BadPaging = true;
             await Throws<InvalidDataException>(async () => { using var unused = await f.Capture(); });
         });
+        await test("Explain pins a refreshed target preview independently of the source iteration target and rejects later target drift", async () =>
+        {
+            using var f = new Fixture { TargetPreview = Fixture.Base };
+            using var context = await f.Capture();
+            Check(context.Revision.TargetCommit == Fixture.Base && context.Revision.SourceCommit == Fixture.Source, "Target preview confused with iteration target or source");
+            await context.VerifyAsync(default);
+            f.TargetPreview = Fixture.Target;
+            await Throws<InvalidOperationException>(() => context.VerifyAsync(default));
+        });
         await test("Explain invalid paths/sides/ranges cannot change repository/revision or issue HTTP requests", async () =>
         {
             using var f = new Fixture();
@@ -361,7 +370,7 @@ static class ExplainTests
         readonly AdoClient _ado;
         readonly bool _dependencyOnly;
         public Func<HttpRequestMessage, HttpResponseMessage?>? AdditionalResponse;
-        public string? Mismatch, OriginalPath, ContentOverride;
+        public string? Mismatch, OriginalPath, ContentOverride, TargetPreview;
         public string Kind = "edit";
         public string FreshStatus = "active";
         public bool FreshDraft = true;
@@ -401,7 +410,7 @@ static class ExplainTests
                     sourceRefName = "refs/heads/retry", targetRefName = Retargeted ? "refs/heads/other" : "refs/heads/main",
                     repository = new { id = Mismatch == "repo" ? ProjectId : RepoId, project = new { id = Mismatch == "project" ? RepoId : ProjectId } },
                     forkSource = Mismatch == "fork" ? new { repository = new { id = ProjectId } } : null,
-                    lastMergeSourceCommit = new { commitId = source } };
+                    lastMergeSourceCommit = new { commitId = source }, lastMergeTargetCommit = TargetPreview is null ? null : new { commitId = TargetPreview } };
             else if (uri.AbsolutePath.EndsWith("/iterations")) result = new { value = new[] { iteration } };
             else if (uri.AbsolutePath.EndsWith("/iterations/4")) result = iteration;
             else if (uri.AbsolutePath.EndsWith("/changes"))

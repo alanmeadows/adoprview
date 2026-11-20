@@ -95,7 +95,8 @@ static class VideoPilot
                     sourceRefName = "refs/heads/public-pr-19-fixture", targetRefName = "refs/heads/main",
                     repository = new { id = RepoId, project = new { id = ProjectId } }, lastMergeSourceCommit = new { commitId = Source } };
             else if (uri.AbsolutePath.EndsWith("/iterations", StringComparison.Ordinal))
-                result = new { value = new[] { new { id = 1, sourceRefCommit = new { commitId = Source }, commonRefCommit = new { commitId = Base } } } };
+                result = new { value = new[] { new { id = 1, sourceRefCommit = new { commitId = Source }, commonRefCommit = new { commitId = Base },
+                    targetRefCommit = new { commitId = Base } } } };
             else if (uri.AbsolutePath.EndsWith("/changes", StringComparison.Ordinal))
                 result = new { changeEntries = changes, nextSkip = 0 };
             else if (uri.AbsolutePath.EndsWith("/items", StringComparison.Ordinal))

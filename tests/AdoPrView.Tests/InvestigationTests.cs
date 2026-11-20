@@ -124,12 +124,15 @@ static class InvestigationTests
             var context = await f.Capture();
             var transport = new Transport();
             await using var source = await InvestigationSource.CreateAsync(context, f.Pr, f.Store.Current, default, transport);
-            string Response(string quote = "line two", int line = 2, string path = "/RetryPolicy.cs") => JsonSerializer.Serialize(new
-            { answer = "A scoped finding.", findings = new[] { new { title = "Trigger", body = "Meaningful consequence.", path, line, quote } } });
+            string Response(string quote = "line two", int line = 2, string path = "/RetryPolicy.cs", string title = "Trigger",
+                string body = "Meaningful consequence.", int count = 1) => JsonSerializer.Serialize(new
+            { answer = "A scoped finding.", findings = Enumerable.Repeat(new { title, body, path, line, quote }, count) });
             await Throws<System.IO.InvalidDataException>(() => Task.FromResult(InvestigationModel.Parse(Response(), "lens", source)));
             await source.ReadFileAsync("/RetryPolicy.cs", "after", 1, default);
             Check(InvestigationModel.Parse(Response(), "lens", source).Findings.Single().Line == 2, "Exact observed evidence rejected");
-            foreach (var invalid in new[] { Response("invented"), Response(line: 9), Response(path: "/Unchanged.cs") })
+            foreach (var invalid in new[] { Response("invented"), Response(line: 0), Response(line: 9), Response(path: "/Unchanged.cs"),
+                Response(title: new string('x', 201)), Response(body: new string('x', 4001)), Response(count: 9),
+                JsonSerializer.Serialize(new { answer = new string('x', 32001), findings = Array.Empty<object>() }) })
                 await Throws<System.IO.InvalidDataException>(() => Task.FromResult(InvestigationModel.Parse(invalid, "lens", source)));
             await Throws<System.IO.InvalidDataException>(() => Task.FromResult(InvestigationModel.Parse(Response(), "question", source)));
             var none = InvestigationModel.Parse("""{"answer":"No findings established within the inspected scope.","findings":[]}""", "lens", source);

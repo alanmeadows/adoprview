@@ -36,6 +36,8 @@ internal sealed class InvestigationModel : IInvestigationModel
         Read actual diffs and necessary implementation, callers, comparable providers and tests beyond the diff.
         Cite concrete paths and line numbers. Explain observed before/after behavior, not just filenames or the PR title.
         Answer the actual question and follow-ups, keeping facts separate from uncertainty; do not claim tests were run.
+        Describe changes as an observer, not their author. Read consuming UI/API code before inferring visibility or enforcement.
+        If diff fragments overlap or are unclear, read the relevant full-file windows rather than guess their net effect.
         For a lens review, judge ONLY meaningful bugs or compatibility failures relative to the supplied concrete lens.
         NO GOLD PLATING: no style comments, speculative issues, unrelated best practices or broad security audit.
         Trace the triggering inputs, affected callers/contracts and actual failure consequence before raising a finding.
@@ -50,25 +52,26 @@ internal sealed class InvestigationModel : IInvestigationModel
         Return the required JSON: answer (Markdown, no HTML) and findings (title, body, path, line, quote).
         """;
 
+    // Keep provider schemas shape-only; Parse enforces size/range limits rejected by some providers.
     internal static readonly JsonElement Schema = JsonSerializer.SerializeToElement(new
     {
         type = "object",
         properties = new
         {
-            answer = new { type = "string", minLength = 1, maxLength = 32000 },
+            answer = new { type = "string", description = "A nonempty plain-English Markdown answer, at most 32,000 characters." },
             findings = new
             {
-                type = "array", maxItems = 8,
+                type = "array", description = "At most 8 evidence-backed lens findings; empty for ordinary questions or no established findings. The host enforces all limits.",
                 items = new
                 {
                     type = "object",
                     properties = new
                     {
-                        title = new { type = "string", minLength = 1, maxLength = 200 },
-                        body = new { type = "string", minLength = 1, maxLength = 4000 },
-                        path = new { type = "string", minLength = 1, maxLength = 2048 },
-                        line = new { type = "integer", minimum = 1 },
-                        quote = new { type = "string", minLength = 1, maxLength = 2000 },
+                        title = new { type = "string", description = "Nonempty finding title, at most 200 characters." },
+                        body = new { type = "string", description = "Nonempty evidenced failure and triggering case, at most 4,000 characters." },
+                        path = new { type = "string", description = "Exact changed after-side repository path, at most 2,048 characters." },
+                        line = new { type = "integer", description = "Positive one-based line number where the inspected quote starts." },
+                        quote = new { type = "string", description = "Nonempty exact inspected after-side lines, at most 2,000 characters." },
                     },
                     required = new[] { "title", "body", "path", "line", "quote" },
                     additionalProperties = false,
