@@ -142,6 +142,50 @@ static class CopilotRecoveryTests
                 else Check(f.Transport.Cleanups == 0, "Failed/cancelled work was cleaned on startup");
             });
 
+        foreach (var recovered in new[] { false, true })
+            foreach (var fault in new[] { "held-lock", "ownership" })
+                await test($"Copilot exited supervisor cannot prove stopped work without a free owned lock (recovered={recovered}, fault={fault})", async () =>
+                {
+                    using var f = new Fixture();
+                    var first = f.Service();
+                    var run = await first.StartAsync(Request());
+                    await Wait(first, run.RunId, s => s.Output.Contains("FAKE-READY"));
+                    var service = first;
+                    if (recovered)
+                    {
+                        await first.DisposeAsync();
+                        service = f.Service();
+                        await service.RecoverAsync();
+                        await Wait(service, run.RunId, s => s.Status == "running");
+                    }
+                    await using var active = service;
+                    if (fault == "held-lock") f.Transport.LockHeld = true;
+                    else f.Transport.Failure = "verify-run";
+                    f.Transport.End(0);
+                    var blocked = await Wait(active, run.RunId, s => s.Status == "needs-attention");
+                    Check(blocked.MayBeRunning && blocked.FinishedAt is null && f.Transport.Cleanups == 0 &&
+                        !f.Store.Load().Single().Saved!.TaskConfirmedStopped,
+                        "Supervisor exit released liveness or cleaned work without owned process-group stop proof");
+                    try { await active.StartAsync(Request()); throw new Exception("Uncertain descendants lost their PR reservation"); }
+                    catch (InvalidOperationException) { }
+                    if (recovered)
+                    {
+                        try { await active.CancelAsync(run.Key, run.RunId); throw new Exception("Unverified cancellation claimed success"); }
+                        catch (InvalidOperationException) { }
+                    }
+                    try { await active.StopAllAsync(); throw new Exception("Shutdown claimed all descendants stopped"); }
+                    catch (InvalidOperationException) { }
+                    Check(active.Get(run.RunId)!.MayBeRunning && !f.Store.Load().Single().Saved!.TaskConfirmedStopped,
+                        "Stop retry discarded the uncertain execution-lock proof");
+                    f.Transport.LockHeld = false;
+                    f.Transport.Failure = null;
+                    if (recovered) await active.CancelAsync(run.Key, run.RunId);
+                    else await active.StopAllAsync();
+                    Check(active.Get(run.RunId)!.Status == "cancelled" && !active.Get(run.RunId)!.MayBeRunning &&
+                        f.Store.Load().Single().Saved!.TaskConfirmedStopped && f.Transport.Cleanups == 0,
+                        "A free owned execution lock did not permit verified cancellation while retaining work");
+                });
+
         foreach (var fault in new[] { "session", "wsl", "status", "ownership", "held-lock", "resume-used" })
             await test("Copilot recovery preserves work and reports blocker: " + fault, async () =>
             {

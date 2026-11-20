@@ -594,8 +594,11 @@ icon keeps spinning for that PR's active run, including while its details are
 collapsed or another PR is open. If output following disconnects, the app keeps
 monitoring the owned task rather than treating the lost output as process exit.
 Completion, failure or cancellation clears the indicator only after the actual
-task ends. Unconfirmed liveness stays busy with a needs-attention message and
-exact-run cancellation controls. Reduced-motion mode keeps the same busy state
+task ends. For tracked runs, an exited supervisor alone is not enough: the app
+also verifies workspace ownership and a free execution lock before recording
+stopped proof or releasing the same-PR reservation. Unconfirmed liveness stays
+busy with a needs-attention message and exact-run cancellation controls.
+Reduced-motion mode keeps the same busy state
 and accessible labels without animation. If the PR leaves the active list entirely (completed,
 abandoned or no longer returned), its runs appear, collapsed, below the table in
 the unfiltered view only. **Cancel run** targets only that app-owned task.

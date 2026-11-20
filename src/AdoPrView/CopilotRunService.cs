@@ -225,17 +225,25 @@ public sealed partial class CopilotRunService : IAsyncDisposable
         lock (gate)
         {
             if (disposed) return runs.Values.Select(e => e.State).ToArray();
-            pending = runs.Values.Where(e => e.State.IsActive || e.UncertainStop).ToArray();
+            pending = runs.Values.Where(e => e.State.IsActive || e.UncertainStop || e.State.MayBeRunning).ToArray();
             foreach (var e in pending.Where(e => e.State.IsActive)) e.Cancellation.Cancel();
         }
         await Task.WhenAll(pending.Select(e => e.Completion)).ConfigureAwait(false);
-        foreach (var e in pending.Where(e => e.UncertainStop))
+        foreach (var e in pending.Where(e => e.UncertainStop || e.State.MayBeRunning))
         {
             try
             {
+                if (store is not null)
+                {
+                    var stopped = await CancelAsync(e.State.RunId).ConfigureAwait(false);
+                    if (stopped is null || stopped.MayBeRunning || stopped.Status is not ("completed" or "cancelled" or "failed"))
+                        throw new RunSetupException("The owned task stop could not be confirmed.");
+                    lock (gate) e.UncertainStop = false;
+                    continue;
+                }
                 var env = e.Environment!;
-                var stopped = await Invoke("stop", env.Distribution, StopScript, [env.Bgtask, e.TaskName]).ConfigureAwait(false);
-                RequireSuccess(stopped, "The owned task stop could not be confirmed.");
+                var result = await Invoke("stop", env.Distribution, StopScript, [env.Bgtask, e.TaskName]).ConfigureAwait(false);
+                RequireSuccess(result, "The owned task stop could not be confirmed.");
                 var status = await Invoke("status", env.Distribution, StatusScript, [env.Bgtask, e.TaskName]).ConfigureAwait(false);
                 var code = ReadExitCode(status);
                 lock (gate)
@@ -255,7 +263,7 @@ public sealed partial class CopilotRunService : IAsyncDisposable
         }
         FlushNotifications();
         lock (gate)
-            if (runs.Values.Any(e => e.UncertainStop))
+            if (runs.Values.Any(e => e.UncertainStop || e.State.MayBeRunning))
                 throw new InvalidOperationException("An owned Copilot task could not be confirmed stopped. Keep the app open, inspect its run diagnostic and retry shutdown.");
         return List();
     }
@@ -579,7 +587,14 @@ public sealed partial class CopilotRunService : IAsyncDisposable
             if (store is not null)
             {
                 var task = ReadOwnedTask(e, result);
-                if (task.Status == "exited" && task.ExitCode is { } code) return code;
+                if (task.Status == "exited" && task.ExitCode is { } code)
+                {
+                    var ownership = await VerifyRunAsync(e, token).ConfigureAwait(false);
+                    if (ownership[0] != "OWNED" || ownership[1] != "FREE")
+                        throw new RunSetupException("The recorded supervisor exited but owned workspace/process-group stop could not be confirmed. " +
+                            "Work and its reservation are retained; inspect its execution lock before retrying.");
+                    return code;
+                }
                 if (task.Status != "running")
                     throw new RunSetupException("The owned task's terminal state could not be confirmed. Work and its reservation are retained; check its supervised status.");
             }
