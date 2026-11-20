@@ -20,6 +20,7 @@ public sealed class MainWindow : Window, IApprovalUi
     readonly IApprovalProvider? _approval;
     readonly CopilotRunService _copilot = new();
     readonly ExplainService _explain;
+    readonly InvestigationService _investigation;
     readonly AzureSpeech _speech = new();
     readonly VideoArtifacts _videoArtifacts = new();
     readonly VideoRenderer _videoRenderer;
@@ -32,6 +33,7 @@ public sealed class MainWindow : Window, IApprovalUi
     readonly System.Windows.Forms.NotifyIcon _tray;
     readonly HumanAttentionSound _attentionSound = new();
     readonly Dictionary<string, Lane> _pendingNotices = new(StringComparer.OrdinalIgnoreCase);
+    readonly HashSet<string> _failedNativeActions = new(StringComparer.Ordinal);
     Bridge? _bridge;
     CancellationTokenSource _wake = new();
     bool _uiReady;
@@ -49,10 +51,11 @@ public sealed class MainWindow : Window, IApprovalUi
         (_approval, var approvalError) = ApprovalProviderLoader.Load(_store.Current.ApprovalProvider);
         _prs = new PrService(new AdoClient(), _store, _approval, approvalError);
         _explain = new ExplainService(_prs.GetExplainContextAsync);
+        _investigation = new InvestigationService(_prs.GetInvestigationSourceAsync, _prs.PostLensFindingsAsync);
         _videoRenderer = new VideoRenderer(new AzureSpeechVoice(_speech, () => _store.Current.VideoSpeech), warning: message =>
         {
             _diagnostics.Record("video-cleanup-warning", message);
-            _ = _bridge?.PushToastAsync("error", message);
+            _ = RunNativeActionAsync("video-warning-delivery", () => _bridge?.PushToastAsync("error", message) ?? Task.CompletedTask);
         });
         _video = new VideoService(_prs.GetVideoContextAsync, _prs.CheckVideoAvailable, _videoArtifacts, _videoRenderer);
         _pop = new PopBrowserPane(_prs.RefreshPopAsync);
@@ -81,9 +84,10 @@ public sealed class MainWindow : Window, IApprovalUi
             popRow.MinHeight = open ? 220 : 0;
             divider.Visibility = open ? Visibility.Visible : Visibility.Collapsed;
         };
-        _pop.PolicyChecked += (target, result) => _ = _bridge?.PushToastAsync("info", $"{target.Repo} !{target.Id}: {result.Message}");
-        _pop.Error += message => _ = _bridge?.PushToastAsync("error", message);
-        _web.GotKeyboardFocus += async (_, _) => await _pop.CheckAfterReturnAsync();
+        _pop.PolicyChecked += (target, result) => _ = RunNativeActionAsync("pop-result-delivery",
+            () => _bridge?.PushToastAsync("info", $"{target.Repo} !{target.Id}: {result.Message}") ?? Task.CompletedTask);
+        _pop.Error += message => _ = RunNativeActionAsync("pop-error-delivery", () => _bridge?.PushToastAsync("error", message) ?? Task.CompletedTask);
+        _web.GotKeyboardFocus += (_, _) => _ = RunNativeActionAsync("pop-return-check", _pop.CheckAfterReturnAsync);
         Content = layout;
         MinWidth = 900;
         MinHeight = 500;
@@ -138,6 +142,7 @@ public sealed class MainWindow : Window, IApprovalUi
                 _speechSetup = null;
                 _speech.Dispose();
                 await _explain.DisposeAsync();
+                await _investigation.DisposeAsync();
                 await _copilot.DisposeAsync();
                 _pop.Dispose();
                 _shutdownComplete = true;
@@ -189,26 +194,25 @@ public sealed class MainWindow : Window, IApprovalUi
         core.Settings.IsZoomControlEnabled = true;
         core.SetVirtualHostNameToFolderMapping("app.local", Path.Combine(AppContext.BaseDirectory, "wwwroot"), CoreWebView2HostResourceAccessKind.Deny);
         VideoMedia.Attach(core, _videoArtifacts, ex => _diagnostics.Record("video-media-failed", ex.Message));
-        core.NewWindowRequested += (_, e) =>
-        {
-            e.Handled = true;
-            if (e.Uri.StartsWith("https://", StringComparison.OrdinalIgnoreCase))
-                System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo(e.Uri) { UseShellExecute = true });
-        };
+        core.NewWindowRequested += (_, e) => _ = NativeActions.OpenNewWindowAsync(e, ex => ReportNativeActionFailure("open-browser", ex));
 
         _bridge = new Bridge(_prs, _store, PostAsync, Kick, _approval, this, HandleCopilotAsync, HandlePopAsync,
-            HandleExplainAsync, themeChanged: ApplyTheme, videoAction: HandleVideoAsync);
-        _copilot.Changed += run => _ = _bridge.PushCopilotRunAsync(RunForUi(run));
-        _explain.Changed += state => _ = _bridge.PushExplanationAsync(state);
-        _video.Changed += state => _ = _bridge.PushVideoAsync(state);
+            HandleExplainAsync, themeChanged: ApplyTheme, videoAction: HandleVideoAsync, investigationAction: HandleInvestigationAsync);
+        _copilot.Changed += run => _ = RunNativeActionAsync("copilot-state-delivery", () => _bridge.PushCopilotRunAsync(RunForUi(run)));
+        _explain.Changed += state => _ = RunNativeActionAsync("explanation-state-delivery", () => _bridge.PushExplanationAsync(state));
+        _investigation.Changed += state => _ = RunNativeActionAsync("investigation-state-delivery", () => _bridge.PushInvestigationAsync(state));
+        _video.Changed += state => _ = RunNativeActionAsync("video-state-delivery", () => _bridge.PushVideoAsync(state));
         core.WebMessageReceived += (_, e) =>
         {
             if (!PopTarget.IsDashboardSource(e.Source)) return;
-            var msg = e.TryGetWebMessageAsString();
-            if (msg == "ready") { _uiReady = true; return; }
-            _ = _bridge.HandleAsync(msg);
+            _ = RunNativeActionAsync("dashboard-action", async () =>
+            {
+                var msg = e.TryGetWebMessageAsString();
+                if (msg == "ready") { _uiReady = true; return; }
+                await _bridge.HandleAsync(msg);
+            });
         };
-        _prs.Changed += s => Dispatcher.InvokeAsync(() => OnSnapshot(s));
+        _prs.Changed += s => _ = RunNativeActionAsync("snapshot-update", async () => await Dispatcher.InvokeAsync(() => OnSnapshot(s)));
         _prs.LaneChanged += (pr, _) =>
         {
             if (!pr.IsIgnoredDraft && pr.Lane is Lane.NeedsHuman or Lane.Blocked)
@@ -219,7 +223,7 @@ public sealed class MainWindow : Window, IApprovalUi
         };
 
         core.Navigate(AppTheme.DashboardUri(_store.Current.Theme, _opts.Mock));
-        if (!_opts.Mock) _ = RecoverCopilotAsync();
+        if (!_opts.Mock) _ = RunNativeActionAsync("copilot-recovery", RecoverCopilotAsync);
         if (!_opts.Mock) _ = PollLoopAsync();
         if (_opts.ScreenshotPath != null) _ = CaptureAsync();
     }
@@ -228,7 +232,7 @@ public sealed class MainWindow : Window, IApprovalUi
     {
         run.Key, run.Id, run.Title, run.Repo, run.RunId, run.Status, run.Message, run.Output, run.ExitCode,
         run.WorktreePath, run.WorktreeStatus, run.WorktreeRetained, run.Distro, run.SourceDirectory, run.StartedAt, run.FinishedAt,
-        run.SessionId, run.ResumeAttempts, run.LogPath, run.OutputOffset,
+        run.SessionId, run.ResumeAttempts, run.LogPath, run.OutputOffset, run.MayBeRunning, run.PreparationLogPath,
     };
 
     async Task<object> HandleExplainAsync(string action, JsonObject parameters)
@@ -239,6 +243,26 @@ public sealed class MainWindow : Window, IApprovalUi
             return await _explain.CancelAsync(key, parameters["requestId"]?.GetValue<string>() ?? throw new ArgumentException("Missing explanation ID."));
         _prs.Find(key); // Reject keys that are not in the loaded dashboard before starting work.
         return _explain.Start(key);
+    }
+
+    async Task<object> HandleInvestigationAsync(string action, JsonObject p)
+    {
+        if (action == "listInvestigations") return _investigation.States;
+        var key = p["key"]?.GetValue<string>() ?? throw new ArgumentException("Missing PR key.");
+        if (action == "askPr") _prs.Find(key);
+        var conversation = p["conversationId"]?.GetValue<string>() ?? "";
+        var request = p["requestId"]?.GetValue<string>() ?? "";
+        return action switch
+        {
+            "askPr" => _investigation.Ask(key, conversation, p["kind"]?.GetValue<string>() ?? "question",
+                p["question"]?.GetValue<string>() ?? ""),
+            "cancelInvestigation" => await _investigation.CancelAsync(key, conversation, request),
+            "resetInvestigation" => await _investigation.ResetAsync(key, conversation),
+            "postLensFindings" => await _investigation.PostAsync(key, conversation, request,
+                (p["findingIds"] as JsonArray)?.Select(n => n!.GetValue<string>()).ToArray() ?? [],
+                p["confirmed"]?.GetValue<bool>() == true),
+            _ => throw new ArgumentException("Unknown investigation action."),
+        };
     }
 
     async Task<object> HandleVideoAsync(string action, JsonObject parameters)
@@ -334,13 +358,34 @@ public sealed class MainWindow : Window, IApprovalUi
     {
         await Dispatcher.InvokeAsync(() =>
         {
-            try { _web.CoreWebView2?.PostWebMessageAsJson(json); } catch { }
+            if (_shutdownComplete || Dispatcher.HasShutdownStarted) return;
+            if (_web.CoreWebView2 is not { } core) throw new InvalidOperationException("The dashboard browser is not available. Reopen the dashboard before retrying the action.");
+            core.PostWebMessageAsJson(json);
         });
+    }
+
+    Task RunNativeActionAsync(string action, Func<Task> work) => NativeActions.RunAsync(async () =>
+    {
+        await work();
+        lock (_failedNativeActions) _failedNativeActions.Remove(action);
+    }, ex => ReportNativeActionFailure(action, ex));
+
+    void ReportNativeActionFailure(string action, Exception ex)
+    {
+        if (action.EndsWith("-delivery", StringComparison.Ordinal) || action == "snapshot-update")
+            lock (_failedNativeActions)
+                if (!_failedNativeActions.Add(action)) return;
+        _diagnostics.Record("native-action-failed", action, ex);
+        if (_shutdownComplete || Dispatcher.HasShutdownStarted) return;
+        Dispatcher.Invoke(() => MessageBox.Show(this,
+            $"The {action.Replace('-', ' ')} action could not complete: {ex.Message}\n\n" +
+            "The dashboard has not been closed. Check the action's status before retrying; any owned Copilot task may still be running.",
+            "ADO PR View action failed", MessageBoxButton.OK, MessageBoxImage.Error));
     }
 
     void OnSnapshot(Snapshot s)
     {
-        _ = _bridge?.PushSnapshotAsync(s);
+        _ = RunNativeActionAsync("snapshot-delivery", () => _bridge?.PushSnapshotAsync(s) ?? Task.CompletedTask);
         var visible = s.Prs.Where(p => !p.IsHidden && !p.IsIgnoredDraft && !(_store.Current.IgnoreDrafts && p.IsDraft)).ToList();
         var needs = visible.Count(p => p.Lane == Lane.NeedsHuman);
         var blocked = visible.Count(p => p.Lane == Lane.Blocked);

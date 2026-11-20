@@ -1130,10 +1130,26 @@ test('Copilot indicator follows per-PR run state through collapse, another PR, r
   hooks.updateCopilotRun({ ...run, key: b.key, runId: 'independent', status: 'cancelling' });
   for (const status of ['completed', 'failed', 'cancelled']) {
     hooks.S.expanded.delete(pr.key);
-    hooks.updateCopilotRun({ ...run, runId: 'offline-' + status, status });
+    hooks.updateCopilotRun({ ...run, status });
     assert.doesNotMatch(button(pr), /running|aria-busy/);
     assert.match(button(b), /running/);
+    run.runId = 'offline-after-' + status;
+    hooks.updateCopilotRun(run);
   }
+});
+
+test('Copilot uncertain owned task remains busy despite newer terminal history until its actual stop', () => {
+  const { hooks, pr } = setup();
+  const live = { key: pr.key, runId: 'uncertain', status: 'needs-attention', mayBeRunning: true,
+    output: '', message: 'Task status unavailable; check supervised status', startedAt: '2026-01-01T00:00:00Z' };
+  hooks.updateCopilotRun(live);
+  hooks.updateCopilotRun({ ...live, runId: 'later-terminal', status: 'failed', mayBeRunning: false,
+    startedAt: '2026-01-02T00:00:00Z' });
+  assert.equal(hooks.runForPr(pr.key).runId, live.runId);
+  assert.match(hooks.actionButtons(pr).match(/<button[^>]*data-act="triage"[^>]*>/)[0], /running.*aria-busy/);
+  assert.match(hooks.renderDetail(pr), /data-act="triage"[^>]*aria-busy="true"/);
+  hooks.updateCopilotRun({ ...live, status: 'cancelled', mayBeRunning: false, exitCode: 143 });
+  assert.doesNotMatch(hooks.actionButtons(pr).match(/<button[^>]*data-act="triage"[^>]*>/)[0], /running|aria-busy/);
 });
 
 test('PoP requests only the captured native key and never opens an external tab or infers approval', async () => {

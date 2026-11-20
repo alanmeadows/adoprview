@@ -103,6 +103,9 @@ static class ExplainTests
             Check(diff.Contains("-        return TimeSpan.FromSeconds(2);") && diff.Contains("+        return TimeSpan.FromSeconds(Math.Min(300, 2 * Math.Pow(2, attempt)));"), "Diff omitted actual behavior");
             Check(f.Urls.Where(u => u.Contains("/items?")).All(u => u.Contains("versionDescriptor.versionType=commit") && (u.Contains(Fixture.Base) || u.Contains(Fixture.Source))), "Unpinned file read");
             Check(!f.Urls.Any(u => u.Contains(Fixture.Target)), "Target-only changes leaked into PR diff");
+            var requests = f.Urls.Count;
+            await context.ReadFileAsync("/RetryPolicy.cs", "target", 1, default);
+            Check(f.Urls.Skip(requests).Where(u => u.Contains("/items?")).All(u => u.Contains(Fixture.Target)), "Target context was read from the source or main branch");
         });
         await test("Explain handles additions deletions renames binaries LFS and oversized files without inventing content", async () =>
         {
@@ -137,6 +140,29 @@ static class ExplainTests
                 Check(!f.Urls.Any(u => u.Contains("/items?")), "Unverified identity read files");
             }
         });
+        await test("Explain records truncated diff evidence without claiming complete change coverage", async () =>
+        {
+            using var f = new Fixture();
+            using var context = await f.Capture();
+            f.AdditionalResponse = request =>
+            {
+                if (!request.RequestUri!.AbsolutePath.EndsWith("/items")) return null;
+                var before = request.RequestUri.Query.Contains(Fixture.Base);
+                return new(HttpStatusCode.OK) { Content = new StringContent(JsonSerializer.Serialize(new
+                {
+                    path = "/RetryPolicy.cs", commitId = before ? Fixture.Base : Fixture.Source, gitObjectType = "blob",
+                    contentMetadata = new { isBinary = false },
+                    content = request.RequestUri.Query.Contains("includeContent=true")
+                        ? string.Join('\n', Enumerable.Range(0, 600).Select(i => (before ? "before" : "after") + new string('x', 40) + i)) : null,
+                })) };
+            };
+            var diff = await context.ReadChangeAsync(0, default);
+            Check(diff.EndsWith("[DIFF TRUNCATED]") && context.Evidence().Any(e => e.StartsWith("Diff: ") && e.Contains("Partial inspection")),
+                "Successful truncated diff was rejected as no evidence");
+            Check(context.Coverage().Any(c => c.Contains("truncated")) && context.Coverage().Any(c => c.Contains("not had a complete")),
+                "Partial diff was presented as fully inspected");
+            await context.VerifyAsync(default);
+        });
         await test("Explain refuses moved source/base/branch and nonadvancing pagination", async () =>
         {
             using var f = new Fixture();
@@ -151,6 +177,27 @@ static class ExplainTests
             await Throws<InvalidOperationException>(() => context.VerifyAsync(default));
             f.NewIteration = false; f.BadPaging = true;
             await Throws<InvalidDataException>(async () => { using var unused = await f.Capture(); });
+        });
+        await test("Explain pins a refreshed target preview independently of the source iteration target and rejects later target drift", async () =>
+        {
+            using var f = new Fixture { TargetPreview = Fixture.Base };
+            using var context = await f.Capture();
+            Check(context.Revision.TargetCommit == Fixture.Base && context.Revision.SourceCommit == Fixture.Source, "Target preview confused with iteration target or source");
+            await context.VerifyAsync(default);
+            f.TargetPreview = Fixture.Target;
+            await Throws<InvalidOperationException>(() => context.VerifyAsync(default));
+        });
+        await test("Explain pins live branch heads and rejects branch drift even when merge previews are stale", async () =>
+        {
+            using var f = new Fixture { TargetPreview = Fixture.Target, TargetHead = Fixture.Base };
+            using var context = await f.Capture();
+            Check(context.Revision.TargetCommit == Fixture.Base, "Target was pinned from the stale merge preview");
+            f.TargetHead = Fixture.Target;
+            await Throws<InvalidOperationException>(() => context.VerifyAsync(default));
+            f.TargetHead = Fixture.Base; f.SourceHead = Fixture.Target;
+            await Throws<InvalidOperationException>(() => context.VerifyAsync(default));
+            f.SourceHead = Fixture.Source; f.TargetHead = "";
+            await Throws<InvalidDataException>(() => context.VerifyAsync(default));
         });
         await test("Explain invalid paths/sides/ranges cannot change repository/revision or issue HTTP requests", async () =>
         {
@@ -243,33 +290,15 @@ static class ExplainTests
             Check(environment.Keys.All(k => !k.Contains("TOKEN", StringComparison.OrdinalIgnoreCase) && !k.Contains("PAT", StringComparison.OrdinalIgnoreCase) || k is "PATH" or "PATHEXT"), "Credentials inherited");
             Check(!environment.ContainsKey("NODE_OPTIONS") && !environment.ContainsKey("COPILOT_HOME"), "Ambient overrides inherited");
         });
-        await test("Explain summary contract permits brief contextual prose but rejects reports and long output", () =>
+        await test("Explain preserves deep multi-section output instead of compressing it into a PR description", async () =>
         {
-            Check(ExplainModel.IsBriefSummary("The developer utility that regenerates HTTP test fixtures upgrades x/text from v0.29.0 to v0.30.0. Its dependency changes; runtime behavior is not established."), "Short contextual summary rejected");
-            Check(!ExplainModel.IsBriefSummary("One. Two. Three. Four."), "Four-sentence report accepted");
-            Check(!ExplainModel.IsBriefSummary("one. two. three. four.") &&
-                !ExplainModel.IsBriefSummary("`One.` Two. Three. Four."), "Sentence casing/formatting bypassed the limit");
-            Check(!ExplainModel.IsBriefSummary(string.Join(" ", Enumerable.Repeat("word", 81))), "Word limit not enforced");
-            Check(!ExplainModel.IsBriefSummary("## Summary\nDetails") && !ExplainModel.IsBriefSummary("- Update the module.") &&
-                !ExplainModel.IsBriefSummary("A paragraph.\n\nAnother paragraph."), "Report formatting accepted");
-            return Task.CompletedTask;
-        });
-        await test("Explain structured compression validates response shape and preserves the brief summary contract", async () =>
-        {
-            Check(ExplainModel.ReadStructuredSummary("""{"summary":"The fixture generator is a developer utility. Its dependency is updated."}""") ==
-                "The fixture generator is a developer utility. Its dependency is updated.", "Structured summary content changed");
-            await Throws<System.Text.Json.JsonException>(() => Task.FromResult(ExplainModel.ReadStructuredSummary("not JSON")));
-            await Throws<InvalidDataException>(() => Task.FromResult(ExplainModel.ReadStructuredSummary("""{"summary":42}""")));
-            await Throws<InvalidDataException>(() => Task.FromResult(ExplainModel.ReadStructuredSummary("""{"other":"A summary."}""")));
-            await Throws<InvalidDataException>(() => Task.FromResult(ExplainModel.ReadStructuredSummary("""{"summary":"A summary.","extra":true}""")));
-            await Throws<InvalidDataException>(() => Task.FromResult(ExplainModel.ReadStructuredSummary("""{"summary":"First.","summary":"Second."}""")));
-            await Throws<InvalidDataException>(() => Task.FromResult(ExplainModel.ReadStructuredSummary(
-                JsonSerializer.Serialize(new { summary = new string('x', 481) }))));
-            await Throws<InvalidDataException>(() => Task.FromResult(ExplainModel.ReadStructuredSummary("""{"summary":"One. Two. Three. Four."}""")));
-            Check(ExplainModel.SummarySchema.GetProperty("properties").GetProperty("summary").GetProperty("maxLength").GetInt32() == 480,
-                "Structured response length is not bounded");
-            await Throws<InvalidDataException>(() => Task.FromResult(ExplainModel.ReadStructuredSummary(
-                System.Text.Json.JsonSerializer.Serialize(new { summary = string.Join(" ", Enumerable.Repeat("word", 81)) }))));
+            using var f = new Fixture();
+            var answer = "## What improves\n" + string.Join(" ", Enumerable.Repeat("Evidence-backed before/after behavior.", 90)) +
+                "\n## Architecture\nThe integration-test harness owns these retries, not the shipped runtime.\n## Limits\nTests were read, not run.";
+            await using var service = new ExplainService((_, ct) => f.Capture(ct), new Model((_, _, _) => Task.FromResult(answer)));
+            service.Start(f.Pr.Key);
+            var result = await Finish(service);
+            Check(result.Status == "completed" && result.Output == answer, "Deep explanation was rejected or compressed");
         });
         await test("Explain service deduplicates requests, fences cancellation IDs, streams and acknowledges cancellation", async () =>
         {
@@ -375,7 +404,8 @@ static class ExplainTests
         readonly HttpClient _http;
         readonly AdoClient _ado;
         readonly bool _dependencyOnly;
-        public string? Mismatch, OriginalPath, ContentOverride;
+        public Func<HttpRequestMessage, HttpResponseMessage?>? AdditionalResponse;
+        public string? Mismatch, OriginalPath, ContentOverride, TargetPreview, SourceHead, TargetHead;
         public string Kind = "edit";
         public string FreshStatus = "active";
         public bool FreshDraft = true;
@@ -402,6 +432,7 @@ static class ExplainTests
         public Task<ExplainContext> Capture(CancellationToken ct = default) => ExplainContext.CaptureAsync(_ado, Pr, ct);
         HttpResponseMessage Respond(HttpRequestMessage request)
         {
+            if (AdditionalResponse?.Invoke(request) is { } handled) return handled;
             Check(request.Method == HttpMethod.Get, "Explanation attempted an ADO write");
             var uri = request.RequestUri!;
             Check(uri.Host == "dev.azure.com" && uri.AbsolutePath.StartsWith($"/offline/{ProjectId}/_apis/git/repositories/{RepoId}/", StringComparison.Ordinal), "Explanation escaped repository scope");
@@ -414,8 +445,13 @@ static class ExplainTests
                     sourceRefName = "refs/heads/retry", targetRefName = Retargeted ? "refs/heads/other" : "refs/heads/main",
                     repository = new { id = Mismatch == "repo" ? ProjectId : RepoId, project = new { id = Mismatch == "project" ? RepoId : ProjectId } },
                     forkSource = Mismatch == "fork" ? new { repository = new { id = ProjectId } } : null,
-                    lastMergeSourceCommit = new { commitId = source } };
+                    lastMergeSourceCommit = new { commitId = source }, lastMergeTargetCommit = TargetPreview is null ? null : new { commitId = TargetPreview } };
             else if (uri.AbsolutePath.EndsWith("/iterations")) result = new { value = new[] { iteration } };
+            else if (uri.AbsolutePath.EndsWith("/refs"))
+            {
+                var name = "refs/" + Uri.UnescapeDataString(uri.Query.TrimStart('?').Split('&').Single(p => p.StartsWith("filter="))["filter=".Length..]);
+                result = new { value = new[] { new { name, objectId = name == "refs/heads/retry" ? SourceHead ?? source : TargetHead ?? TargetPreview ?? Target } } };
+            }
             else if (uri.AbsolutePath.EndsWith("/iterations/4")) result = iteration;
             else if (uri.AbsolutePath.EndsWith("/changes"))
             {

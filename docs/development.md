@@ -42,6 +42,18 @@ starting Copilot or authenticating. To check a published folder, set
 `ADOPRVIEW_TEST_PUBLISH_DIRECTORY` to its absolute path and run the native suite
 with `ADOPRVIEW_TEST_FILTER` set to `Explain runtime`.
 
+PR investigation tests use fake models and synthetic ADO responses, including
+follow-up identity, cancellation, stale revisions, lens preview validation,
+explicit selection/confirmation, idempotency and partial/uncertain posting.
+Run `dotnet run --project tests\AdoPrView.Tests` with
+`ADOPRVIEW_TEST_FILTER=Investigation|Explain` for these targeted checks.
+Set `ADOPRVIEW_TEST_WSL_INVESTIGATION=1` to also exercise the production worktree
+scripts against a disposable local Git upstream in WSL; it does not authenticate
+or contact ADO/Copilot. The fixture checks pinned before/after reads, symlink/LFS/
+size omissions, no executed checkout filters and an unchanged primary checkout.
+`node --test tests\investigation.browser.test.cjs` exercises the real popup in a
+temporary headless Edge profile with synthetic host replies, never live comments.
+
 ## Offline checks
 
 PR video uses Windows media APIs through the Windows SDK target framework,
@@ -130,6 +142,25 @@ $env:ADOPRVIEW_TEST_WSL_PREFLIGHT = '1'
 dotnet run --project tests\AdoPrView.Tests
 Remove-Item Env:\ADOPRVIEW_TEST_FILTER, Env:\ADOPRVIEW_TEST_WSL_PREFLIGHT
 ```
+
+Worktree preparation and native browser failure checks have separate opt-ins:
+
+```powershell
+$env:ADOPRVIEW_TEST_FILTER = 'Copilot preparation|Native action'
+$env:ADOPRVIEW_TEST_WSL_PREPARE = '1'
+$env:ADOPRVIEW_TEST_NATIVE_ACTION = '1'
+dotnet run --project tests\AdoPrView.Tests -c Release
+Remove-Item Env:\ADOPRVIEW_TEST_FILTER, Env:\ADOPRVIEW_TEST_WSL_PREPARE, Env:\ADOPRVIEW_TEST_NATIVE_ACTION
+```
+
+Preparation uses only disposable `/tmp` Git repositories, a synthetic Git
+failure shim and the production setup script: no live remote, model, supervisor
+job or installed app state. It covers quoted/linked checkouts, preserved dirty
+source files, exact commits and safe stage/reason/exit errors. The native action
+probe uses a disposable WPF WebView2 profile, intercepts popup launch with a
+synthetic Windows failure and verifies the dashboard stays visible/responding.
+Browser row checks cover lost/uncertain process activity and failed action
+feedback with both normal and reduced motion.
 
 Direct reviewer approval has a focused offline native suite:
 

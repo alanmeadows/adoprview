@@ -63,7 +63,7 @@ internal sealed class ExplainService(Func<string, CancellationToken, Task<Explai
 
     async Task RunAsync(Operation op)
     {
-        using var timeout = new CancellationTokenSource(TimeSpan.FromMinutes(4));
+        using var timeout = new CancellationTokenSource(TimeSpan.FromMinutes(10));
         using var linked = CancellationTokenSource.CreateLinkedTokenSource(timeout.Token, op.Cancel.Token);
         ExplainContext? context = null;
         try
@@ -79,7 +79,7 @@ internal sealed class ExplainService(Func<string, CancellationToken, Task<Explai
             linked.Token.ThrowIfCancellationRequested();
             await context.VerifyAsync(linked.Token);
             if (result.Length > 64_000) throw new InvalidOperationException("Copilot output exceeded the explanation limit.");
-            Update(op, s => s with { Status = "completed", Message = "Summary ready.",
+            Update(op, s => s with { Status = "completed", Message = "Investigation ready. See inspected evidence and unread areas below.",
                 Output = result, Coverage = context.Coverage(), Evidence = context.Evidence() });
         }
         catch (OperationCanceledException)

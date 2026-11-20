@@ -62,6 +62,15 @@ optional and needs WSL with an authenticated Copilot CLI; it runs with broad
 permissions and the worktree is not a sandbox. Read
 [Inline Copilot Fix](docs/usage.md#inline-copilot-fix) before using it.
 
+### Explain, ask questions and review with a lens
+
+Expanded PRs offer a plain-spoken, code-grounded deep explanation of what
+genuinely improves, architecture, API changes and meaningful risks.
+[PR questions and lens reviews](docs/usage.md#pr-questions-and-lens-reviews)
+open a follow-up conversation backed by a pinned isolated WSL Git worktree.
+Lens findings are private previews: only findings you select and confirm are
+posted to ADO, with exact outcomes and confirmed comment links.
+
 ### TikTok This PR
 
 Expanded PRs also offer [TikTok This PR](docs/usage.md#tiktok-this-pr): an

@@ -298,7 +298,8 @@ static class CopilotRunTests
                 var run = await service.StartAsync(Request());
                 await fake.Started.Task.WaitAsync(TimeSpan.FromSeconds(5));
                 var done = await service.CancelAsync(run.Key, run.RunId);
-                Check(done!.Status == "needs-attention" && done.Message.Contains("Could not confirm") && done.WorktreeRetained, "Uncertain cancellation reported stopped");
+                Check(done!.Status == "needs-attention" && done.Message.Contains("Could not confirm") && done.WorktreeRetained &&
+                    done.MayBeRunning && done.FinishedAt is null, "Uncertain cancellation reported stopped or idle");
                 await ExpectError(async () => await service.StartAsync(Request()), "already active");
                 await ExpectError(async () => await service.StopAllAsync(), "Keep the app open");
                 fake.FailOperation = null;
@@ -344,6 +345,46 @@ static class CopilotRunTests
                 "Stage diagnostics were not installed before environment initialization");
         });
 
+        await test("Copilot failed preparation never claims a created worktree and rejects missing success receipts", async () =>
+        {
+            foreach (var fail in new[] { true, false })
+            {
+                var fake = new FakeTransport { FailOperation = fail ? "prepare" : null, MissingReceipt = !fail };
+                await using var service = new CopilotRunService(fake);
+                var run = await service.StartAsync(Request());
+                var done = await Wait(service, run.RunId, s => !s.IsActive);
+                Check(done.Status == "failed" && done.WorktreePath is null && done.WorktreeStatus == "not-created" &&
+                    !done.WorktreeRetained && !fake.Calls.Any(c => c.Operation is "launch" or "stage-prompt"),
+                    "Uncreated/unverified worktree was reported retained or launched");
+            }
+        });
+
+        await test("Copilot unavailable native WSL command names safe Windows error without raw process details", async () =>
+        {
+            var fake = new FakeTransport { ThrowWin32Operation = "preflight" };
+            await using var service = new CopilotRunService(fake);
+            var run = await service.StartAsync(Request());
+            var done = await Wait(service, run.RunId, s => !s.IsActive);
+            Check(done.Message.Contains("Windows error 2") && done.Message.Contains("No Copilot task was launched") &&
+                !done.Message.Contains("offline-secret") && !done.MayBeRunning, "Native WSL failure was hidden or claimed process activity");
+        });
+
+        foreach (var transportFailure in new[] { false, true })
+        await test($"Copilot lost output following keeps actual owned task active until its real exit (transport={transportFailure})", async () =>
+        {
+            var fake = new FakeTransport { FailOperation = transportFailure ? null : "follow", ThrowIoOperation = transportFailure ? "follow" : null };
+            await using var service = new CopilotRunService(fake);
+            var run = await service.StartAsync(Request());
+            var monitoring = await Wait(service, run.RunId, s => s.Status == "running" && s.Message.Contains("output", StringComparison.OrdinalIgnoreCase));
+            Check(monitoring.IsActive && monitoring.FinishedAt is null &&
+                fake.Calls.Any(c => c.Operation == "status"), "Output failure became false terminal state");
+            await ExpectError(async () => await service.StartAsync(Request()), "already active");
+            fake.Finish(7);
+            var done = await Wait(service, run.RunId, s => !s.IsActive);
+            Check(done.Status == "failed" && done.ExitCode == 7 && done.WorktreeRetained &&
+                !fake.Calls.Any(c => c.Operation == "stop"), "Lost follow killed the task or hid its actual exit");
+        });
+
         if (Environment.GetEnvironmentVariable("ADOPRVIEW_TEST_WSL") == "1")
             await test("Copilot disposable WSL repos verify final --yolo argv, generated review/description prompt/CWD, isolation and dirty/unpushed retention with fake CLI", RunWslWorktrees);
     }
@@ -355,7 +396,8 @@ static class CopilotRunTests
         public string? PushUrls;
         public const string PushHash = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
         public string CliHelp = Help;
-        public string? FailOperation, ThrowOperation;
+        public string? FailOperation, ThrowOperation, ThrowIoOperation, ThrowWin32Operation;
+        public bool MissingReceipt;
         public string FailureError = "offline-secret";
         public TaskCompletionSource Started = NewSignal();
         TaskCompletionSource<int> completion = NewCompletion();
@@ -373,6 +415,8 @@ static class CopilotRunTests
             Calls.Enqueue(request);
             token.ThrowIfCancellationRequested();
             if (ThrowOperation == request.Operation) throw new InvalidOperationException("offline-secret");
+            if (ThrowIoOperation == request.Operation) throw new IOException("offline-secret");
+            if (ThrowWin32Operation == request.Operation) throw new System.ComponentModel.Win32Exception(2, "offline-secret");
             if (FailOperation == request.Operation) return new(1, "", FailureError);
             string Protocol(params string[] values) => "ADOPRVIEW1\0" + string.Join('\0', values) + "\0";
             switch (request.Operation)
@@ -381,7 +425,8 @@ static class CopilotRunTests
                     return new(0, Protocol("Offline-Ubuntu", "offline", "/home/offline", "/home/offline/source",
                         "/home/offline/source/.git", "/home/offline/bin/copilot", "/home/offline/bin/bgtask", CliHelp, "/home/offline/.copilot", "origin", Remote, PushUrls ?? Remote, PushHash), "");
                 case "prepare":
-                    var run = "/home/offline/app-runs/" + request.Arguments[6];
+                    if (MissingReceipt) return new(0, "", "");
+                    var run = "/home/offline/.local/state/ado-prview/runs/" + request.Arguments[6];
                     return new(0, Protocol("WORKTREE", run, run + "/worktree"), "");
                 case "follow":
                     stdout = output; stderr = error; Started.TrySetResult();
@@ -390,7 +435,8 @@ static class CopilotRunTests
                 case "status":
                     return new(0, System.Text.Json.JsonSerializer.Serialize(new
                     {
-                        status = new { state = "exited", exited = new { code = completion.Task.IsCompletedSuccessfully ? completion.Task.Result : 143 } }
+                        status = new { state = completion.Task.IsCompletedSuccessfully || token.IsCancellationRequested || Calls.Any(c => c.Operation == "stop") ? "exited" : "running",
+                            exited = new { code = completion.Task.IsCompletedSuccessfully ? completion.Task.Result : 143 } }
                     }), "");
                 case "cleanup":
                     return new(0, Protocol("REMOVED"), "");

@@ -15,6 +15,7 @@ calls used see [DESIGN.md](DESIGN.md); for building and tests see
 - [Inline Proof of Presence](#inline-proof-of-presence-compatibility-prototype)
 - [Auto-complete](#auto-complete)
 - [Explain this PR](#explain-this-pr)
+- [PR questions and lens reviews](#pr-questions-and-lens-reviews)
 - [TikTok This PR](#tiktok-this-pr)
 - [Inline Copilot Fix](#inline-copilot-fix)
 - [Restart recovery and worktree cleanup](#restart-recovery-and-worktree-cleanup)
@@ -306,9 +307,12 @@ PR selection do not reset the authoritative state or move neighboring rows.
 ## Explain this PR
 
 Expand a PR and choose **Explain this PR** in **What does this PR do?** Copilot
-reads the actual changes and relevant repository context, then streams a brief
-summary: 1-3 short sentences identifying the component's role, the change and its
-consequence. For example, a dependency update should identify whether its module
+reads the actual changes and surrounding code, then streams a plain-spoken,
+technically deep explanation: what genuinely improves, concrete before/after
+behavior, architectural/data-flow changes, externally meaningful API or schema
+changes, compatibility risks, and relevant tests and gaps. Small text diagrams
+are used only when inspected code establishes the connections. The answer scales
+to the change rather than filling a fixed template. A dependency update should identify whether its module
 belongs to the product, a developer utility, test infrastructure or a pipeline.
 The model inspects relevant README files, consumers and build context rather than
 inferring benefits from version numbers. **Evidence and coverage** keeps inspected
@@ -324,7 +328,8 @@ Partial or failed responses are labeled and must not be treated as completed.
 Results stay in memory until the app exits; **Explain again** starts a fresh session.
 After a failure or cancellation, choose **Retry Explain** to start over.
 
-The displayed source and merge-base commits identify the code being explained.
+The displayed source, common-base and target commits identify the code being explained;
+the target is the PR's actual captured target, not an assumed `main`.
 If the PR changes during the request, the result is marked failed. Copilot sees
 only app-provided read-only tools for that repository and those commits, not a
 shell, arbitrary URLs, local files, installed skills or MCP tools. Repository
@@ -337,12 +342,86 @@ text files to 80,000 characters, diffs to 24,000 characters and context windows 
 120 lines/16,000 characters. Directory listings include at most 200 names.
 If the model initially skips required diff or repository-content inspection, it
 gets one bounded follow-up to gather that evidence, otherwise an explicit error.
-Final summaries are limited to 80 words; an overlong answer gets one bounded
-compression attempt using the SDK's constrained JSON response, then an explicit
-error if it still fails the format.
-It times out after four minutes. Cross-repository
+Output is bounded to 64,000 characters, not an 80-word summary.
+It times out after ten minutes. Cross-repository
 forks and repository paths containing traversal, backslashes, control characters,
 `?` or `#` are rejected explicitly.
+
+## PR questions and lens reviews
+
+The expanded Explain card also offers **Ask Copilot about this PR...** and
+**Review with a lens...**. Both open a conversation popup. Ask follow-ups in
+ordinary English, or choose a concrete review goal such as "Do these ARM changes
+work with ACI?" A lens review is read-only and scoped to meaningful bugs or
+compatibility failures supported by inspected code. It does not request stylistic
+polish, unrelated best practices, speculative problems or a general security audit.
+An empty result explicitly says no findings were established in the inspected
+scope; it does not certify the PR as bug-free.
+
+Questions and lens reviews require WSL, Git, Python 3 and the existing per-repo
+WSL checkout mapping in Settings (otherwise `~/clones/<repo>`). The configured
+checkout must have a remote matching the PR's exact organization/project/repository
+and existing Git authentication. No extra tokens or keys are requested.
+The same validated user environment is loaded for each source operation, without
+Fix's WSL Copilot/NVM initialization; questions do not require a WSL Copilot CLI.
+The app fetches the source and target refs into unique private refs and creates
+a detached **no-checkout Git worktree under the Git common metadata directory**.
+It never switches or edits your primary working files. The popup identifies this
+worktree honestly: source tools read its pinned Git objects, not a populated
+filesystem checkout. This avoids executing checkout filters, hooks, submodules,
+skills, build steps or other PR-supplied commands. Symlinks are not followed.
+Local Git replacement objects are disabled so inspected content comes from the
+captured commit, not an unrelated local substitute. The Python reader uses
+isolated mode without site initialization, so working-directory modules,
+`PYTHONPATH`, user packages and site hooks cannot run before its pinned reads.
+Missing directories (including directories absent before a change) are reported
+as explicit omissions, not verified name listings or errors that block follow-ups.
+Copilot gets only bounded host-controlled source readers, not a shell or arbitrary
+filesystem access. Inference still uses the native Windows Copilot SDK/default
+model and native Copilot sign-in, separately from WSL Git authentication; it does
+not reuse Fix's broad-permission WSL model session.
+
+Follow-ups retain completed turns and the same PR/source identity. Source and
+target refs are rechecked before and after generation and before posting.
+Active PRs pin and verify actual branch heads, not a possibly stale merge preview.
+Changes block further answers or posting until **New conversation** captures fresh
+revisions. Setup, cancellation and source failures are explicit, with no silent
+remote-only fallback. **PR investigation activity...** reopens an active job even
+after its row is filtered or removed, so its exact cancellation control stays
+reachable. Closing the popup does not cancel the job. The popup survives dashboard
+refreshes and keeps drafts/conversations separate for each PR.
+
+Lens findings show the affected path, line and exact inspected source quote.
+Finding bodies and the supplied lens are shown as literal text; comment publication
+escapes Markdown/HTML so image URLs, hidden link targets or markup cannot be posted
+without being visible in the confirmed preview.
+**Nothing is selected or posted automatically.** Select the findings you want,
+choose **Post selected findings...**, and confirm the exact count and PR.
+The host rechecks PR identity and revisions, posts only that selection through
+ADO's thread API, and shows individual confirmed links and posted/failed/uncertain
+counts. Comments include the lens and captured commit IDs. A stable marker
+reconciles retries of a preview; POST requests are never automatically retried.
+An uncertain result stays uncertain until checked on ADO, not a fabricated success.
+ADO offers no atomic revision precondition on thread creation, so a change racing
+the final revision check can still make a posted comment refer to older pinned code.
+
+Conversations/results stay in memory until exit. A conversation allows 12 completed
+turns, up to 100,000 serialized prior conversation characters (including findings
+and posting outcomes), 4,000 characters per question,
+120 local source reads and eight preview findings per lens turn. Local text reads
+are limited to regular tracked files of 80,000 bytes and 120-line/16,000-character
+windows; binary/LFS content is omitted. Shared PR diff limits above still apply.
+Oversized text windows are reported as omitted without invalidating later source
+reads; select another starting line or file for context.
+Inspected source and unread areas are shown separately. No tests are run by source
+inspection. Binary, LFS or oversized diff omissions do not by themselves block an
+answer if diff inspection was attempted and relevant worktree text was read;
+the unread diff areas remain disclosed, not treated as inspected evidence.
+An empty captured change inventory can still support questions after worktree text
+is read; it cannot supply changed-path evidence for postable findings.
+**New conversation** or normal app exit removes only the owned empty
+worktree; cleanup refuses if files or index entries were added or HEAD was changed.
+An interrupted app or refused cleanup can leave its worktree registered for inspection.
 
 ## TikTok This PR
 
@@ -483,6 +562,17 @@ source repository; duplicate active runs of the same PR are blocked. A fork whos
 source is not the mapped repository is rejected rather than fixed in the wrong
 checkout. Fetch/worktree metadata are necessarily shared.
 
+Preparation failures identify the failed stage and exit code, distinguishing
+recognized authentication, network, path, conflict, dependency and unsupported
+Git/checkout errors. A changed source commit requires a fresh PR refresh, not a
+retry against an older commit. No existing worktree, branch or lock is removed to
+make setup succeed. A worktree is reported created only after Git creates it.
+When the app-owned run directory exists, its `prepare.stderr` retains the
+original command error with user-only permissions; its path appears in the run
+panel. **This private file may contain remote URLs or authentication details:
+review and redact it before sharing.** Raw Git errors never go into the dashboard
+or lifecycle log. Failed prelaunch records are not resumed.
+
 The inline output is noninteractive, safely rendered and bounded. Each deliberate
 Fix PR run uses **`--yolo`**, the documented equivalent of `--allow-all-tools
 --allow-all-paths --allow-all-urls`. These permissions apply to that process only;
@@ -505,11 +595,25 @@ A run's panel lives in **its own PR's expanded details**. Collapsing the row hid
 the panel; reopening shows it again. Lane, search, repository and scope filters
 hide the panel together with its row, and never move it to another view. The Fix
 icon keeps spinning for that PR's active run, including while its details are
-collapsed or another PR is open; completion, failure or cancellation clears it
-even when collapsed. If the PR leaves the active list entirely (completed,
+collapsed or another PR is open. If output following disconnects, the app keeps
+monitoring the owned task rather than treating the lost output as process exit.
+Completion, failure or cancellation clears the indicator only after the actual
+task ends. For tracked runs, an exited supervisor alone is not enough: the app
+also verifies workspace ownership and a free execution lock before recording
+stopped proof or releasing the same-PR reservation. Unconfirmed liveness stays
+busy with a needs-attention message and exact-run cancellation controls.
+Reduced-motion mode keeps the same busy state
+and accessible labels without animation. If the PR leaves the active list entirely (completed,
 abandoned or no longer returned), its runs appear, collapsed, below the table in
 the unfiltered view only. **Cancel run** targets only that app-owned task.
 Changing views never cancels a run.
+
+**Open in Azure DevOps** and external links use the same validated HTTPS
+launcher. If Windows cannot open its default browser, the action reports an
+error instead of closing the dashboard; check Windows' default HTTPS app or
+copy the PR URL manually. Native event or dashboard-delivery failures are
+recorded as `native-action-failed` diagnostics with safe exception structure,
+and report a native error when the dashboard cannot display one.
 
 ## Restart recovery and worktree cleanup
 

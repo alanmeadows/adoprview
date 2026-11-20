@@ -147,8 +147,10 @@ Fixes AB#1234`;
     approvalProvider: { name: 'Sample approval', linkUrl: null, linkLabel: null }, approvalProviderError: null };
   const runs = new Map();
   const explanations = new Map();
+  const investigations = new Map();
   const videos = new Map();
   let explanationSequence = 0;
+  let investigationSequence = 0;
   let videoSequence = 0;
 
   window.MockHost = {
@@ -156,7 +158,40 @@ Fixes AB#1234`;
     async rpc(method, p) {
       await new Promise((r) => setTimeout(r, 150));
       switch (method) {
-        case 'init': return { settings, snapshot, runs: [...runs.values()], explanations: [...explanations.values()], videos: [...videos.values()], version: 'mock' };
+        case 'init': return { settings, snapshot, runs: [...runs.values()], explanations: [...explanations.values()], investigations: [...investigations.values()], videos: [...videos.values()], version: 'mock' };
+        case 'askPr': {
+          if (!prs.some(x => x.key === p.key)) throw new Error('Mock PR not found.');
+          const previous = investigations.get(p.key);
+          const state = { key: p.key, conversationId: previous?.conversationId || 'mock-conversation-' + p.key,
+            requestId: 'mock-turn-' + (++investigationSequence), sequence: investigationSequence, status: 'running',
+            message: 'Synthetic interaction only. No worktree, Copilot session or ADO request was started.',
+            revision: null, worktree: null, turns: previous?.turns || [], evidence: [], coverage: ['No real source inspected.'] };
+          investigations.set(p.key, state);
+          setTimeout(() => {
+            if (investigations.get(p.key)?.requestId !== state.requestId || investigations.get(p.key)?.status !== 'running') return;
+            const done = { ...state, sequence: ++investigationSequence, status: 'completed',
+              message: p.kind === 'lens' ? 'Synthetic preview: no findings or comments created.' : 'Synthetic answer only; no source was inspected.',
+              turns: [...state.turns, { id: state.requestId, kind: p.kind, question: p.question,
+                answer: 'UI preview only. In the native app, Copilot reads pinned source in an isolated Git worktree and retains this conversation for follow-ups. No code was inspected here.',
+                findings: [], outcomes: [] }] };
+            investigations.set(p.key, done); this.onEvent?.({ event: 'investigation', data: done });
+          }, 1000);
+          return state;
+        }
+        case 'cancelInvestigation': {
+          const state = investigations.get(p.key);
+          if (!state || state.conversationId !== p.conversationId || state.requestId !== p.requestId) throw new Error('This mock conversation is no longer current.');
+          const cancelled = { ...state, sequence: ++investigationSequence, status: 'cancelled', message: 'Synthetic inspection cancelled. No comments posted.' };
+          investigations.set(p.key, cancelled); this.onEvent?.({ event: 'investigation', data: cancelled });
+          return cancelled;
+        }
+        case 'resetInvestigation': {
+          const state = { key: p.key, conversationId: 'mock-new-' + (++investigationSequence), requestId: '',
+            sequence: investigationSequence, status: 'completed', message: 'Fresh synthetic conversation. No source was captured.',
+            revision: null, worktree: null, turns: [], evidence: [], coverage: [] };
+          investigations.set(p.key, state); return state;
+        }
+        case 'postLensFindings': throw new Error('Mock mode never posts ADO comments.');
         case 'listSpeechSubscriptions': return [{ id: '00000000-0000-4000-8000-000000000001', name: 'Synthetic subscription (no Azure calls)' }];
         case 'findSpeechResources': return [{ resourceId: '/subscriptions/00000000-0000-4000-8000-000000000001/resourceGroups/offline/providers/Microsoft.CognitiveServices/accounts/offline',
           name: 'Synthetic Speech resource', region: 'offline', endpoint: 'https://offline.cognitiveservices.azure.com/',
@@ -199,7 +234,7 @@ Fixes AB#1234`;
             if (explanations.get(p.key)?.requestId !== state.requestId || explanations.get(p.key)?.status !== 'running') return;
             const done = { ...state, sequence: ++explanationSequence, status: 'completed',
               message: 'Mock explanation: interaction preview only, not a live model result.',
-              output: 'UI preview only. A real summary identifies the affected component, its role in the repository and the meaningful change.',
+              output: '## UI preview only\nA real investigation explains what genuinely improves and shows before/after source evidence.\n\n## Architecture and risks\nThe native app traces affected implementations, callers, contracts and tests. No real code was inspected in this mock.',
               coverage: ['No real PR content was inspected in this mock preview.'] };
             explanations.set(p.key, done); this.onEvent?.({ event: 'explanation', data: done });
           }, 1200);

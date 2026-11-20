@@ -1,0 +1,131 @@
+using System.IO;
+using System.Net.Http;
+using System.Security.Cryptography;
+using System.Text;
+using System.Text.Json;
+using System.Text.Json.Nodes;
+using System.Text.RegularExpressions;
+
+namespace AdoPrView;
+
+public sealed partial class PrService
+{
+    void CheckInvestigationAvailable(string key)
+    {
+        var pr = Find(key);
+        if (!Monitored(pr) || pr.Error is not null ||
+            !_store.Current.Repos.Any(r => r.Key == $"{pr.Org}/{pr.Project}/{pr.Repo}".ToLowerInvariant()))
+            throw new InvalidOperationException("This PR is no longer active and monitored. Refresh before investigating or posting findings.");
+    }
+
+    internal async Task<IInvestigationSource> GetInvestigationSourceAsync(string key, CancellationToken ct)
+    {
+        CheckInvestigationAvailable(key);
+        var context = await ExplainContext.CaptureAsync(_ado, Find(key), ct, requireActive: true, ignoreDrafts: () => _store.Current.IgnoreDrafts);
+        try { return await InvestigationSource.CreateAsync(context, Find(key), _store.Current, ct, checkAvailable: () => CheckInvestigationAvailable(key)); }
+        catch { context.Dispose(); throw; }
+    }
+
+    internal async Task<CommentOutcome[]> PostLensFindingsAsync(string key, ExplainRevision revision, string conversationId,
+        string turnId, string lens, LensFinding[] findings, CommentOutcome[] previous, CancellationToken ct)
+    {
+        var pr = Find(key);
+        var prApi = $"https://dev.azure.com/{Esc(pr.Org)}/{Esc(pr.ProjectId)}/_apis/git/repositories/{Esc(pr.RepoId)}/pullrequests/{pr.Id}";
+        var api = prApi + "/threads";
+        async Task Verify()
+        {
+            CheckInvestigationAvailable(key);
+            await ExplainContext.VerifyRevisionAsync(_ado, Find(key), revision, ct, requireActive: true, ignoreDrafts: () => _store.Current.IgnoreDrafts);
+            CheckInvestigationAvailable(key);
+        }
+        await Verify();
+        var outcomes = new List<CommentOutcome>();
+        foreach (var finding in findings)
+        {
+            var prior = previous.SingleOrDefault(p => p.FindingId == finding.Id);
+            if (prior?.Status == "posted") { outcomes.Add(prior); continue; }
+            var token = Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(
+                string.Join("\0", conversationId, turnId, finding.Id, revision.SourceCommit)))).ToLowerInvariant();
+            var marker = $"<!-- ado-prview-lens:{token} -->";
+            async Task<JsonNode?> Locate()
+            {
+                var response = await _ado.GetBoundedJsonAsync(api + "?api-version=7.1", 2_000_000, ct);
+                var threads = response["value"] as JsonArray ?? throw new InvalidDataException("ADO returned no complete thread inventory. Posting is blocked to avoid duplicate comments.");
+                var matches = threads.Where(t => Arr(t?["comments"]).Any(c => S(c["content"]).Contains(marker, StringComparison.Ordinal))).ToArray();
+                if (matches.Length > 1) throw new InvalidDataException("ADO has multiple copies of this finding marker. No retry was posted.");
+                return matches.SingleOrDefault();
+            }
+            CommentOutcome Confirm(JsonNode? thread, string detail)
+            {
+                if (thread is not JsonObject) throw new InvalidDataException("ADO returned no posted thread object.");
+                var id = I(thread["id"]);
+                if (id is null or <= 0 || !Arr(thread["comments"]).Any(c => I(c["id"]) > 0 && S(c["content"]).Contains(marker, StringComparison.Ordinal)))
+                    throw new InvalidDataException("ADO did not confirm the posted thread/comment identity.");
+                var url = $"https://dev.azure.com/{Esc(pr.Org)}/{Esc(pr.Project)}/_git/{Esc(pr.Repo)}/pullrequest/{pr.Id}?discussionId={id}";
+                return new(finding.Id, "posted", detail, url);
+            }
+            try
+            {
+                await Verify();
+                var existing = await Locate();
+                if (existing is not null) { outcomes.Add(Confirm(existing, "Existing comment confirmed; not posted twice.")); continue; }
+                if (prior?.Status == "uncertain")
+                {
+                    outcomes.Add(new(finding.Id, "uncertain", "An earlier POST had an uncertain result. No matching thread is visible yet; no automatic retry was issued. Check ADO before creating a new preview.", null));
+                    continue;
+                }
+                var content = $"**{CommentText(finding.Title)}**\n\nReview lens:\n> {CommentText(lens).Replace("\n", "\n> ")}\n\n{CommentText(finding.Body)}\n\n" +
+                    $"Evidence: {CommentText(finding.Path)}:{finding.Line} at source `{revision.SourceCommit}` " +
+                    $"(iteration {revision.Iteration}, common base `{revision.BaseCommit}`, target `{revision.TargetCommit}`).\n\n" +
+                    "Generated by Copilot for a human-selected review lens; previewed and explicitly selected for posting. " +
+                    "Source was inspected; tests were not run by this review.\n\n" + marker;
+                var body = new JsonObject
+                {
+                    ["comments"] = new JsonArray(new JsonObject { ["parentCommentId"] = 0, ["content"] = content, ["commentType"] = 1 }),
+                    ["status"] = 1,
+                    ["threadContext"] = new JsonObject
+                    {
+                        ["filePath"] = finding.Path,
+                        ["rightFileStart"] = new JsonObject { ["line"] = finding.Line, ["offset"] = 1 },
+                        ["rightFileEnd"] = new JsonObject { ["line"] = finding.Line, ["offset"] = 1 },
+                    },
+                };
+                await Verify();
+                try
+                {
+                    var created = await _ado.PostOnceAsync(api + "?api-version=7.1", body, ct);
+                    outcomes.Add(Confirm(created, "ADO confirmed this comment was created."));
+                }
+                catch (AdoException ex) when (ex.Status is { } status && (int)status is >= 400 and < 500 && (int)status != 408)
+                {
+                    outcomes.Add(new(finding.Id, "failed", "ADO rejected this comment; it was not confirmed posted: " + ex.Message, null));
+                }
+                catch (Exception ex) when (ex is HttpRequestException or OperationCanceledException or AdoException or InvalidDataException or JsonException or InvalidOperationException or IOException)
+                {
+                    // POST is never retried. Reconcile a possibly committed response by its stable marker.
+                    try
+                    {
+                        var found = await Locate();
+                        outcomes.Add(found is null
+                            ? new(finding.Id, "uncertain", "ADO did not confirm whether the comment was created. No automatic POST retry was issued. Check ADO before retrying.", null)
+                            : Confirm(found, "Comment creation confirmed by read-back after the POST response failed."));
+                    }
+                    catch (Exception readError) when (readError is HttpRequestException or OperationCanceledException or AdoException or InvalidDataException or JsonException or InvalidOperationException or IOException)
+                    {
+                        outcomes.Add(new(finding.Id, "uncertain", "The POST result and follow-up read-back could not be confirmed. No automatic retry was issued; check ADO.", null));
+                    }
+                }
+            }
+            catch (Exception ex) when (ex is InvalidOperationException or HttpRequestException or AdoException or InvalidDataException or OperationCanceledException or JsonException or IOException)
+            {
+                outcomes.Add(prior?.Status == "uncertain"
+                    ? new(finding.Id, "uncertain", "The earlier POST may have committed, but freshness or read-back could not be verified. No retry was issued; check ADO.", null)
+                    : new(finding.Id, "failed", "Not posted: " + ex.Message, null));
+            }
+        }
+        return outcomes.ToArray();
+    }
+
+    internal static string CommentText(string text) => Regex.Replace(
+        text.Replace("&", "&amp;").Replace("<", "&lt;").Replace(">", "&gt;"), @"[\\`*_{}\[\]()#+.!|~-]", @"\$0");
+}

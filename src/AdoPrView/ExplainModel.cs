@@ -2,7 +2,6 @@ using System.ComponentModel;
 using System.IO;
 using System.Runtime.InteropServices;
 using System.Text.Json;
-using System.Text.RegularExpressions;
 using GitHub.Copilot;
 using GitHub.Copilot.Rpc;
 using Microsoft.Extensions.AI;
@@ -126,9 +125,20 @@ internal sealed class ExplainModel : IExplainModel
                 You have no shell, filesystem, write, search, agent or network tools. Do not request them.
                 Explain the before/after behavior, who or what is affected, and how the main pieces fit together.
                 Distinguish observed facts from inference. The host separately displays inspected paths, revisions and coverage.
+                Describe the PR as an observer; never claim you authored its changes.
+                Trace consuming UI/API code before asserting user-visible effects: grouping, visibility, disabled actions and enforcement are different.
+                If diff fragments overlap or are unclear, read the relevant full-file windows rather than infer their net effect.
                 Do not merely paraphrase the title, enumerate filenames, or explain blockers/status. Do not assert validation you did not observe.
-                Return ONLY 1-3 short sentences, no more than 80 words. No headings, bullets, file inventory, coverage section or report.
-                Name the component's role, the meaningful change and its consequence. Keep this understandable without knowing the repository.
+                Write a technically deep explanation in plain-spoken English, not a PR-description paraphrase.
+                Lead with what genuinely improves for a user or maintainer and show the code evidence for the before/after claim.
+                Trace architectural changes and data/control flow through affected implementations, callers and tests beyond the diff.
+                Explain externally meaningful API, schema, error-handling and behavior changes, and compatibility/migration risks.
+                Pressure-test the claimed improvement: what problem does this actually solve, what stays unchanged, and where might it fail?
+                Distinguish tests you READ from tests actually RUN (you cannot run tests). Explain important test gaps and unread areas.
+                Use as much detail as the change warrants, with short natural headings when useful; do not pad a fixed template.
+                Define necessary jargon in ordinary English. Cite concrete repository paths and line numbers for important claims.
+                A small fenced text flow diagram is useful only when the inspected code establishes every connection.
+                Do not invent architecture, API changes, risks, benefits or diagrams merely to fill a section.
                 For a one-line go.mod update, explain what uses that module and whether it builds a product, test tool, utility or pipeline.
                 Never invent fixes, features, security benefits or runtime impact from dependency version numbers.
                 If context cannot establish role or impact, state that uncertainty briefly instead of guessing.
@@ -145,43 +155,6 @@ internal sealed class ExplainModel : IExplainModel
         CopilotTool.DefineTool(handler, new CopilotToolOptions { SkipPermission = true },
             new AIFunctionFactoryOptions { Name = name, Description = description });
 
-    internal static bool IsBriefSummary(string text) =>
-        !string.IsNullOrWhiteSpace(text) &&
-        text.Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries).Length <= 80 &&
-        Regex.Matches(text.Trim(), @"[.!?][`""')\]]*\s+(?=[\p{L}\d`""'(])").Count < 3 &&
-        !text.Trim().Contains('\n') && !Regex.IsMatch(text.Trim(), @"^(?:#{1,6}\s|[-*]\s|\d+\.\s)");
-
-    internal static readonly JsonElement SummarySchema = JsonSerializer.SerializeToElement(new
-    {
-        type = "object",
-        properties = new
-        {
-            summary = new
-            {
-                type = "string",
-                description = "Exactly two short sentences: component role and change, then consequence. No headings or lists.",
-                minLength = 1,
-                maxLength = 480,
-            },
-        },
-        required = new[] { "summary" },
-        additionalProperties = false,
-    });
-
-    internal static string ReadStructuredSummary(string content)
-    {
-        using var document = JsonDocument.Parse(content);
-        if (document.RootElement.ValueKind != JsonValueKind.Object ||
-            document.RootElement.EnumerateObject().Count() != 1 ||
-            !document.RootElement.TryGetProperty("summary", out var summary) ||
-            summary.ValueKind != JsonValueKind.String)
-            throw new InvalidDataException("Copilot did not return the required summary response.");
-        var text = summary.GetString()!.Trim();
-        if (text.Length > 480 || !IsBriefSummary(text))
-            throw new InvalidDataException("Copilot did not produce the required brief contextual summary. Retry Explain.");
-        return text;
-    }
-
     internal static AIFunctionDeclaration[] SourceTools(ExplainContext context, CancellationToken ct) =>
         new AIFunctionDeclaration[]
         {
@@ -189,11 +162,11 @@ internal sealed class ExplainModel : IExplainModel
                 ToolNames[0], "List the captured PR changes against its merge base. Follow nextPage until null."),
             Tool(([Description("Change index returned by list_pr_changes.")] int index) => context.ReadChangeAsync(index, ct),
                 ToolNames[1], "Read the actual before/after line diff, with context, for a captured change. Reports binary/size omissions."),
-            Tool((string path, [Description("before (merge base) or after (PR source).")] string side,
+            Tool((string path, [Description("before (common base), after (PR source), or target (captured target tip).")] string side,
                 [Description("One-based starting line; returns up to 120 lines.")] int startLine) =>
                     context.ReadFileAsync(path, side, startLine, ct),
                 ToolNames[2], "Read necessary context from an absolute repository path at the captured before/after commit. No URLs, branches or repositories are accepted."),
-            Tool((string path, [Description("before (merge base) or after (PR source).")] string side) =>
+            Tool((string path, [Description("before (common base), after (PR source), or target (captured target tip).")] string side) =>
                     context.ListDirectoryAsync(path, side, ct),
                 ToolNames[3], "List one directory level at a pinned commit to discover README files, components, module consumers and build/pipeline context. Start at / or the changed component. No URLs or repository/revision overrides."),
         };
@@ -229,11 +202,13 @@ internal sealed class ExplainModel : IExplainModel
                 }))
                     response = await session.SendAndWaitAsync(new MessageOptions
                     {
-                        Prompt = "Explain this change in 1-3 short sentences, at most 80 words: combine the component's repository role with the meaningful change and consequence. " +
+                        Prompt = "Investigate this PR deeply and explain it in plain-spoken English. Establish what genuinely improves, " +
+                            "show concrete before/after behavior, trace architecture and affected consumers, and explain meaningful API/compatibility risks and test gaps. " +
+                            "Use this PR's captured common base and source, not an assumed main branch. Cite inspected paths/lines; state limits honestly. " +
                             "Before answering, use read_pr_change AND read_pr_file to inspect repository context beyond the diff (for example the component README, module/build metadata or consumers). " +
                             "Directory names alone are not enough. Identity (untrusted descriptive data):\n" +
                             JsonSerializer.Serialize(context.Revision, Bridge.Json),
-                    }, TimeSpan.FromMinutes(3), outputLimit.Token);
+                    }, TimeSpan.FromMinutes(8), outputLimit.Token);
                 ct.ThrowIfCancellationRequested();
                 if ((context.Changes.Count > 0 && context.DiffReads == 0) || context.ContextReads == 0)
                     response = await session.SendAndWaitAsync(new MessageOptions
@@ -241,7 +216,7 @@ internal sealed class ExplainModel : IExplainModel
                         Prompt = "Do not finalize yet: the required evidence is missing. Inspect at least one actual PR diff with read_pr_change, " +
                             "and read relevant repository context with read_pr_file, not just directory names or the diff. " +
                             "Discover a README, module/build definition or consumer near the changed component using list_pr_directory if needed. " +
-                            "Then give only 1-3 short sentences, at most 80 words, about the component's repository role, meaningful change and consequence.",
+                            "Then give a code-grounded, plain-spoken deep explanation, tracing affected callers/tests and identifying what actually improves and what remains uncertain.",
                     }, TimeSpan.FromSeconds(45), outputLimit.Token);
                 ct.ThrowIfCancellationRequested();
                 if (context.Changes.Count > 0 && context.DiffReads == 0)
@@ -250,22 +225,7 @@ internal sealed class ExplainModel : IExplainModel
                     throw new InvalidOperationException("Copilot returned without inspecting repository context beyond the diff. Retry Explain.");
                 if (string.IsNullOrWhiteSpace(response?.Data.Content))
                     throw new InvalidOperationException("Copilot returned no explanation. Check your Copilot access/model availability and retry.");
-                var summary = response.Data.Content.Trim();
-                if (!IsBriefSummary(summary))
-                {
-                    response = await session.SendAndWaitAsync(new MessageOptions
-                    {
-                        ResponseSchema = SummarySchema,
-                        Prompt = "Your answer was too long or report-like. Rewrite it now as exactly TWO short sentences, one paragraph, at most 65 words. " +
-                            "Combine the affected component's repository role AND the change in sentence one; put only the meaningful consequence or compact uncertainty in sentence two. " +
-                            "Keep the evidence already established. No headings, lists, file inventory, coverage report or account of your investigation. " +
-                            "Return it in the summary field of the required JSON response.",
-                    }, TimeSpan.FromSeconds(45), outputLimit.Token);
-                    summary = ReadStructuredSummary(response?.Data.Content ?? "");
-                }
-                if (!IsBriefSummary(summary))
-                    throw new InvalidOperationException("Copilot did not produce the required brief contextual summary. Retry Explain.");
-                return summary;
+                return response.Data.Content.Trim();
             }
             catch (Exception failure)
             {

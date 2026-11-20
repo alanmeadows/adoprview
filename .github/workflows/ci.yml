@@ -41,7 +41,7 @@ jobs:
         run: dotnet run --project tests/AdoPrView.Tests -c Release --no-build
 
       - name: Frontend tests
-        run: node --test tests/approval-ui.test.cjs tests/row-actions.browser.test.cjs
+        run: node --test tests/approval-ui.test.cjs tests/row-actions.browser.test.cjs tests/investigation.browser.test.cjs
 
       - name: Install guide tests
         run: ./tests/install-guide.tests.ps1

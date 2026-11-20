@@ -31,6 +31,8 @@ function onHostMessage(m) {
     try { updateCopilotRun(m.data); } catch (e) { toast(e.message || String(e), 'error'); }
   } else if (m.event === 'explanation') {
     try { updateExplanation(m.data); } catch (e) { toast(e.message || String(e), 'error'); }
+  } else if (m.event === 'investigation') {
+    try { updateInvestigation(m.data); } catch (e) { toast(e.message || String(e), 'error'); }
   } else if (m.event === 'prVideo') {
     try { updateVideo(m.data); } catch (e) { toast(e.message || String(e), 'error'); }
   } else if (m.event === 'speechSetupProgress' && S.speechSetup?.busy && m.data?.epoch === S.speechEpoch) {
@@ -68,6 +70,7 @@ const S = {
   approvalSettingsBusy: false,
   runs: new Map(),
   explanations: new Map(),
+  investigations: new Map(),
   videos: new Map(),
   speechSetup: null,
   speechEpoch: 0,
@@ -347,11 +350,11 @@ function renderRowsContent(whenIdle = false) {
   });
 }
 
-const runActive = r => !!r && ['preparing', 'recovering', 'running', 'cancelling'].includes(r.status);
+const runActive = r => !!r && (r.mayBeRunning === true || ['preparing', 'recovering', 'running', 'cancelling'].includes(r.status));
 const runCancelable = r => runActive(r) || (r?.status === 'needs-attention' && r.id > 0);
 const runsForPr = key => [...S.runs.values()].reverse().filter(r => r.key === key)
   .sort((a, b) => (Date.parse(b.startedAt) || 0) - (Date.parse(a.startedAt) || 0));
-const runForPr = key => runsForPr(key).at(0);
+const runForPr = key => runsForPr(key).find(runActive) || runsForPr(key).at(0);
 
 const explanationActive = r => !!r && ['preparing', 'running', 'cancelling'].includes(r.status);
 const explanationLabel = r => r?.status === 'failed' || r?.status === 'cancelled' ? 'Retry Explain' : r ? 'Explain again' : 'Explain this PR';
@@ -362,7 +365,7 @@ function canExplain(key) {
 
 function explanationRevision(r) {
   const v = r?.revision;
-  return v ? `Iteration ${v.iteration} · source ${v.sourceCommit.slice(0, 12)} · merge base ${v.baseCommit.slice(0, 12)}` : '';
+  return v ? `Iteration ${v.iteration} · source ${v.sourceCommit.slice(0, 12)} · merge base ${v.baseCommit.slice(0, 12)}${v.targetCommit ? ` · target ${v.targetCommit.slice(0, 12)}` : ''}` : '';
 }
 
 function explanationBody(r) {
@@ -384,7 +387,9 @@ function renderExplanation(key) {
       <button class="mini" data-act="explainPr" ${active || isBusy(key, 'explainPr') || !canExplain(key) ? 'disabled' : ''}>${svg('spark')} ${explanationLabel(r)}</button>
       <button class="mini" data-act="cancelExplanation" data-request-id="${esc(r?.requestId || '')}" ${active ? '' : 'hidden'} ${r?.status === 'cancelling' ? 'disabled' : ''}>${svg('x')} Cancel</button></h3>
     <div class="body">
-      <p class="explain-status small${r?.status === 'failed' ? ' error' : ''}" role="status" aria-live="polite">${esc(r?.message || 'A brief summary of what changes and where it fits in this repository.')}</p>
+      <p class="explain-status small${r?.status === 'failed' ? ' error' : ''}" role="status" aria-live="polite">${esc(r?.message || 'A plain-spoken, code-grounded investigation of what improves, architecture, API changes and meaningful risks.')}</p>
+      <p><button class="mini" data-act="askPr" ${canExplain(key) ? '' : 'disabled'}>Ask Copilot about this PR...</button>
+        <button class="mini" data-act="lensPr" ${canExplain(key) ? '' : 'disabled'}>Review with a lens...</button></p>
       <div class="explain-output md" tabindex="0" aria-label="PR explanation" ${r?.output ? '' : 'hidden'}>${explanationBody(r)}</div>
       <details class="explain-details">
         <summary>Evidence and coverage<span class="explain-notices">${r?.coverage?.length ? ` · ${r.coverage.length} notices` : ''}</span></summary>
@@ -527,7 +532,7 @@ function runWorktreeText(r) {
   if (!r) return '';
   const label = r.worktreeStatus === 'removed-clean' ? 'Clean worktree removed' : r.worktreeRetained && !runActive(r) ? 'Preserved worktree' : 'Worktree';
   return [r.worktreePath && `${label}: ${r.worktreePath}`, r.sessionId && `Copilot session: ${r.sessionId}`,
-    r.logPath && `Supervised log: ${r.logPath}`].filter(Boolean).join('\n');
+    r.logPath && `Supervised log: ${r.logPath}`, r.preparationLogPath && `Private preparation log (if created): ${r.preparationLogPath}`].filter(Boolean).join('\n');
 }
 
 function renderRunCard(key, r = runForPr(key), earlier = false) {
@@ -543,7 +548,8 @@ function renderRunCard(key, r = runForPr(key), earlier = false) {
 }
 
 function earlierRunCards(key) {
-  const [, ...earlier] = runsForPr(key);
+  const latest = runForPr(key);
+  const earlier = runsForPr(key).filter(r => r.runId !== latest?.runId);
   return earlier.map(r => renderRunCard(key, r, true)).join('');
 }
 
@@ -576,7 +582,7 @@ function updateCopilotRun(r) {
     throw new Error('Copilot returned an invalid run state.');
   const old = S.runs.get(r.runId);
   if (old?.runId === r.runId && ((old.status !== 'preparing' && r.status === 'preparing') ||
-    (['completed', 'failed', 'cancelled'].includes(old.status) && runActive(r)))) return;
+    (['completed', 'failed', 'cancelled'].includes(old.status) && !old.mayBeRunning && runActive(r)))) return;
   if (old?.runId === r.runId && old.updatedAt && r.updatedAt && Date.parse(r.updatedAt) < Date.parse(old.updatedAt)) return;
   S.runs.set(r.runId, r);
   syncCopilotButton(r.key);
@@ -606,11 +612,14 @@ function syncCopilotButton(key) {
   for (const button of document.querySelectorAll('[data-act="triage"]')) {
     if (button.closest('.pr')?.dataset.key !== key) continue;
     const active = runActive(runForPr(key)), busy = isBusy(key, 'triage');
+    const expanded = button.classList.contains('mini');
     button.classList.toggle('running', active);
     button.classList.toggle('busy', busy);
     button.disabled = busy;
-    button.innerHTML = svg(active || busy ? 'refresh' : 'spark');
-    button.title = active ? 'Show the inline Copilot run for this PR' : 'Fix PR with Copilot in an isolated WSL worktree; output stays inline';
+    button.innerHTML = svg(active || busy ? 'refresh' : 'spark') + (expanded ? ` ${active ? 'Show run' : 'Fix PR'}` : '');
+    button.title = active ? runForPr(key)?.status === 'needs-attention'
+      ? 'Copilot task may still be active; show status and cancellation controls'
+      : 'Show the active inline Copilot run for this PR' : 'Fix PR with Copilot in an isolated WSL worktree; output stays inline';
     button.setAttribute('aria-label', button.title);
     if (active || busy) button.setAttribute('aria-busy', 'true');
     else button.removeAttribute('aria-busy');
@@ -875,8 +884,9 @@ function renderDetail(p) {
     ...(p.humanActions || []).map((a) => ['human', { reviews: 'Human reviewer approval needed (+1)', pop: 'Proof of Presence — tap your security key', autocomplete: 'Auto-complete not set', publish: 'Draft — publish when ready' }[a] || a]),
     ...(p.waiting || []).map((x) => ['pending', x]),
   ];
+  const fixActive = runActive(runForPr(p.key)), fixBusy = isBusy(p.key, 'triage');
   right.push(`<div class="card"><h3>Status <span class="grow"></span>
-      <button class="mini" data-act="triage">${svg('spark')} ${runCancelable(runForPr(p.key)) ? 'Show run' : 'Fix PR'}</button>
+      <button class="mini ${fixActive ? 'running' : ''} ${fixBusy ? 'busy' : ''}" data-act="triage" ${fixBusy ? 'disabled' : ''} ${fixActive || fixBusy ? 'aria-busy="true"' : ''}>${svg(fixActive || fixBusy ? 'refresh' : 'spark')} ${runCancelable(runForPr(p.key)) ? 'Show run' : 'Fix PR'}</button>
       <button class="mini" data-act="copyPrompt">${svg('copy')} Copy prompt</button></h3>
     <div class="body"><ul class="list blockers">${items.length ? items.map(([c, t]) => `<li><span class="dot ${c}"></span><span class="k">${esc(t)}</span></li>`).join('') : '<li><span class="dot ok"></span><span class="k">All gates satisfied</span></li>'}</ul></div></div>`);
 
@@ -1160,6 +1170,10 @@ async function onAction(act, el, key) {
         const r = await rpc('startCopilot', { key });
         updateCopilotRun(r);
       });
+      break;
+    case 'askPr':
+    case 'lensPr':
+      openInvestigation(key, act === 'lensPr' ? 'lens' : 'question');
       break;
     case 'explainPr':
       if (!canExplain(key) || isBusy(key, act) || explanationActive(S.explanations.get(key))) return;
@@ -1548,6 +1562,7 @@ async function onDrawerAction(act, el) {
 
 // ------------------------------------------------------------------ wiring
 function wire() {
+  wireInvestigation();
   const rows = $('#rows');
   $('#speechDialog').addEventListener('cancel', e => { e.preventDefault(); void closeSpeechSetup(); });
   $('#speechDialog').addEventListener('click', e => {
@@ -1675,6 +1690,7 @@ async function boot() {
     toast('The saved theme is not supported by this version. Showing Light Mode without changing your preference.', 'info');
   for (const run of init.runs || []) updateCopilotRun(run);
   for (const explanation of init.explanations || []) updateExplanation(explanation);
+  for (const investigation of init.investigations || []) updateInvestigation(investigation);
   for (const video of init.videos || []) updateVideo(video);
   setSnapshot(init.snapshot);
   render();

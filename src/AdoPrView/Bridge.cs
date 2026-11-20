@@ -1,4 +1,3 @@
-using System.Diagnostics;
 using System.Runtime.InteropServices;
 using System.Text.Json;
 using System.Text.Json.Nodes;
@@ -11,7 +10,8 @@ namespace AdoPrView;
 public sealed class Bridge(PrService prs, SettingsStore store, Func<string, Task> post, Action<bool> kickRefresh,
     IApprovalProvider? approval = null, IApprovalUi? approvalUi = null, Func<string, JsonObject, Task<object>>? copilotAction = null,
     Func<string, Task<object>>? popAction = null, Func<string, JsonObject, Task<object>>? explainAction = null,
-    Action<string>? themeChanged = null, Func<string, JsonObject, Task<object>>? videoAction = null)
+    Action<string>? themeChanged = null, Func<string, JsonObject, Task<object>>? videoAction = null,
+    Func<string, JsonObject, Task<object>>? investigationAction = null, Action<string>? openBrowser = null)
 {
     public static readonly JsonSerializerOptions Json = new(JsonSerializerDefaults.Web)
     {
@@ -24,25 +24,32 @@ public sealed class Bridge(PrService prs, SettingsStore store, Func<string, Task
     public Task PushToastAsync(string kind, string text) => post(JsonSerializer.Serialize(new { @event = "toast", data = new { kind, text } }, Json));
     public Task PushCopilotRunAsync(object run) => post(JsonSerializer.Serialize(new { @event = "copilotRun", data = run }, Json));
     public Task PushExplanationAsync(object state) => post(JsonSerializer.Serialize(new { @event = "explanation", data = state }, Json));
+    public Task PushInvestigationAsync(object state) => post(JsonSerializer.Serialize(new { @event = "investigation", data = state }, Json));
     public Task PushVideoAsync(object state) => post(JsonSerializer.Serialize(new { @event = "prVideo", data = state }, Json));
     public Task PushSpeechSetupAsync(int epoch, string message) => post(JsonSerializer.Serialize(new
         { @event = "speechSetupProgress", data = new { epoch, message } }, Json));
 
     public async Task HandleAsync(string message)
     {
-        JsonNode? req = null;
+        int? id = null;
+        string response;
         try
         {
-            req = JsonNode.Parse(message);
+            var req = JsonNode.Parse(message) as JsonObject ?? throw new ArgumentException("Expected a JSON request object.");
+            if (req["id"] is not JsonValue idValue || !idValue.TryGetValue<int>(out var requestId))
+                throw new ArgumentException("Expected an integer request ID.");
+            id = requestId;
             var method = req?["method"]?.GetValue<string>() ?? "";
             var p = req?["params"] as JsonObject ?? new JsonObject();
             var result = await DispatchAsync(method, p);
-            await post(JsonSerializer.Serialize(new { id = req?["id"]?.GetValue<int>(), result }, Json));
+            response = JsonSerializer.Serialize(new { id, result }, Json);
         }
         catch (Exception ex)
         {
-            await post(JsonSerializer.Serialize(new { id = req?["id"]?.GetValue<int>(), error = ex.Message }, Json));
+            response = JsonSerializer.Serialize(new { id, error = ex.Message }, Json);
         }
+        // A delivery failure is not a second RPC failure; the native owner reports it out of band.
+        await post(response);
     }
 
     IApprovalProvider Provider() => approval ?? throw new InvalidOperationException("No approval provider is enabled.");
@@ -58,6 +65,7 @@ public sealed class Bridge(PrService prs, SettingsStore store, Func<string, Task
                 return new { settings = store.Current, snapshot = prs.Current,
                     runs = copilotAction is null ? Array.Empty<object>() : await copilotAction("listCopilot", p),
                     explanations = explainAction is null ? Array.Empty<object>() : await explainAction("listExplanations", p),
+                    investigations = investigationAction is null ? Array.Empty<object>() : await investigationAction("listInvestigations", p),
                     videos = videoAction is null ? Array.Empty<object>() : await videoAction("listVideos", p),
                     version = typeof(Bridge).Assembly.GetName().Version?.ToString(3) };
             case "refresh":
@@ -101,8 +109,8 @@ public sealed class Bridge(PrService prs, SettingsStore store, Func<string, Task
                 return await prs.GetLogTailAsync(Str(p, "key"), p["buildId"]!.GetValue<int>(), p["logId"]!.GetValue<int>(), p["lines"]?.GetValue<int>() ?? 200);
             case "openUrl":
                 var url = Str(p, "url");
-                if (!url.StartsWith("https://", StringComparison.OrdinalIgnoreCase)) throw new ArgumentException("Only https URLs can be opened");
-                Process.Start(new ProcessStartInfo(url) { UseShellExecute = true });
+                if (openBrowser is not null) openBrowser(url);
+                else NativeActions.OpenBrowser(url);
                 return null;
             case "copy":
                 await SetClipboardAsync(Str(p, "text"));
@@ -120,6 +128,12 @@ public sealed class Bridge(PrService prs, SettingsStore store, Func<string, Task
             case "cancelExplanation":
                 if (explainAction is null) throw new InvalidOperationException("The native PR explanation service is unavailable.");
                 return await explainAction(method, p);
+            case "askPr":
+            case "cancelInvestigation":
+            case "resetInvestigation":
+            case "postLensFindings":
+                if (investigationAction is null) throw new InvalidOperationException("The native PR investigation service is unavailable.");
+                return await investigationAction(method, p);
             case "tiktokPr":
             case "cancelVideo":
             case "listSpeechSubscriptions":

@@ -869,17 +869,41 @@ test('real row hit testing and action identity across refreshes', { timeout: 900
           assert.equal(await evaluate("document.querySelector('#refreshBtn').classList.contains('spin')"), false);
           await evaluate(`updateCopilotRun({...S.snap.prs.find(p=>p.key==='${b}'),runId:'independent',status:'running',output:''});`);
           for (const status of ['completed', 'failed', 'cancelled']) {
-            await evaluate(`updateCopilotRun({...runForPr('${a}'),runId:'test-${status}',status:'running',output:''});`);
             assert.deepEqual(await running(a), active);
-            await evaluate(`updateCopilotRun({...runForPr('${a}'),status:'${status}'});`);
+            await evaluate(`updateCopilotRun({...runForPr('${a}'),status:'needs-attention',mayBeRunning:true,message:'Task status temporarily unavailable'});`);
+            assert.deepEqual(await running(a), active, 'Uncertain process liveness must not appear idle');
+            await evaluate(`updateCopilotRun({...runForPr('${a}'),status:'${status}',mayBeRunning:false});`);
             assert.deepEqual(await running(a), idle, 'Collapsed terminal event must clear only its own busy state');
             assert.deepEqual(await running(b), active);
+            await evaluate(`updateCopilotRun({...runForPr('${a}'),runId:'test-after-${status}',status:'running',output:''});`);
           }
         } finally {
           await send('Emulation.setEmulatedMedia', { features: [{ name: 'prefers-reduced-motion', value: 'no-preference' }] });
         }
       });
     }
+
+    await t.test('failed browser-open and Fix setup actions remain visible errors without hiding dashboard or sticking busy', async () => {
+      await reset(true);
+      const key = 'sample-service-id:101';
+      await evaluate(`
+        window.actionRpc=MockHost.rpc;
+        MockHost.rpc=async(method,p)=>{
+          if(method==='openUrl')throw Error('Windows could not open the default browser (Windows error 1155). Check the default HTTPS app.');
+          if(method==='startCopilot')throw Error('Could not set up the isolated worktree at PR source fetch (exit 128). Git authentication was refused. No Copilot task was launched.');
+          return window.actionRpc(method,p);
+        };`);
+      try {
+        await click(await point(key, '.row [data-act="open"]')); await frame();
+        assert.match(await evaluate("document.querySelector('#toasts').textContent"), /default HTTPS app/);
+        await click(await point(key, '.row [data-act="triage"]')); await frame();
+        assert.match(await evaluate("document.querySelector('#toasts').textContent"), /PR source fetch.*exit 128/);
+        assert.equal(await evaluate(`(()=>{const e=document.querySelector('[data-key="${key}"] .row [data-act="triage"]');return e.disabled||e.hasAttribute('aria-busy');})()`), false);
+        assert.equal(await evaluate(`document.querySelector('[data-key="${key}"] .row').getBoundingClientRect().height>0`), true);
+        await click(await point(key, '.row .title')); await frame();
+        assert.equal(await evaluate(`!!document.querySelector('[data-key="${key}"]')`), true);
+      } finally { await evaluate('MockHost.rpc=window.actionRpc;'); }
+    });
 
     await t.test('running Copilot panel stays inside its owning row across lane/search/repo views and collapse/reopen', async () => {
       await send('Emulation.setDeviceMetricsOverride', { width: 1600, height: 1000, deviceScaleFactor: 1, mobile: false });
@@ -903,6 +927,52 @@ test('real row hit testing and action identity across refreshes', { timeout: 900
       await click(await point(key, '.row .title')); await frame();
       assert.deepEqual(await where(), { shelf: 0, cards: 1, owners: [key], rowShown: true }, 'Reopening shows the same run');
       assert.deepEqual((await calls()).filter(c => c.method === 'cancelCopilot'), [], 'Switching views must never cancel a run');
+    });
+
+    await t.test('Fix metadata remains separately readable without clipping at wide and narrow panel widths', async () => {
+      const key = 'sample-service-id:101';
+      try {
+        for (const width of [1600, 900]) {
+          await send('Emulation.setDeviceMetricsOverride', { width, height: 1000, deviceScaleFactor: 1, mobile: false });
+          await reset(true);
+          await click(await point(key, '.row [data-act="triage"]')); await frame();
+          await evaluate(`window.metadataRow=document.querySelector('[data-key="${key}"]');
+            window.metadataOutput=window.metadataRow.querySelector('.run-output');
+            updateCopilotRun({...runForPr('${key}'),
+              worktreePath:'/tmp/synthetic/'+'long-worktree-segment-'.repeat(12),
+              sessionId:'synthetic-session-'+'0123456789'.repeat(4),
+              logPath:'/tmp/synthetic/'+'long-supervised-log-segment-'.repeat(12)+'/output.jsonl',
+              preparationLogPath:'/tmp/synthetic/'+'long-preparation-log-segment-'.repeat(12)+'/prepare.stderr',
+              output:'Updated synthetic stdout\\n'});`);
+          await frame();
+          const layout = await evaluate(`(()=>{
+            const row=document.querySelector('[data-key="${key}"]'),card=row.querySelector('.copilot-run');
+            const metadata=card.querySelector('.run-worktree'),text=metadata.textContent,node=metadata.firstChild;
+            let offset=0;
+            const lines=text.split('\\n').map(line=>{
+              const range=document.createRange();range.setStart(node,offset);range.setEnd(node,offset+line.length);
+              offset+=line.length+1;
+              const rects=[...range.getClientRects()];
+              return {text:line,top:Math.min(...rects.map(r=>r.top)),bottom:Math.max(...rects.map(r=>r.bottom))};
+            });
+            return {lines,height:metadata.clientHeight,scrollHeight:metadata.scrollHeight,
+              fits:metadata.scrollWidth<=metadata.clientWidth+1 && card.scrollWidth<=card.clientWidth+1,
+              rowPreserved:row===window.metadataRow,outputPreserved:card.querySelector('.run-output')===window.metadataOutput,
+              outputHeight:window.metadataOutput.clientHeight,output:window.metadataOutput.textContent};
+          })()`);
+          assert.deepEqual(layout.lines.map(line => line.text.split(': ')[0]),
+            ['Worktree', 'Copilot session', 'Supervised log', 'Private preparation log (if created)']);
+          assert.ok(layout.lines.every((line, i) => i === 0 || line.top >= layout.lines[i - 1].bottom - 1),
+            `Metadata fields must start on separate lines at ${width}px`);
+          assert.ok(layout.scrollHeight <= layout.height + 1 && layout.fits,
+            `All metadata must fit without internal scrolling or clipping at ${width}px`);
+          assert.equal(layout.rowPreserved && layout.outputPreserved, true, 'Metadata updates must not replace the owning row or stream');
+          assert.equal(layout.outputHeight, 280, 'The streaming output area keeps its fixed height');
+          assert.equal(layout.output, 'Updated synthetic stdout\n');
+        }
+      } finally {
+        await send('Emulation.setDeviceMetricsOverride', { width: 1600, height: 1000, deviceScaleFactor: 1, mobile: false });
+      }
     });
 
     await t.test('inline output streams without replacing rows, remains on captured PR through refresh/removal, and cancels that run', async () => {

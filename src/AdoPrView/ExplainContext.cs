@@ -7,7 +7,8 @@ using DiffPlex;
 
 namespace AdoPrView;
 
-internal sealed record ExplainRevision(string Key, int Id, string Title, string Repo, string SourceCommit, string BaseCommit, int Iteration);
+internal sealed record ExplainRevision(string Key, int Id, string Title, string Repo, string SourceCommit, string BaseCommit, int Iteration,
+    string TargetCommit = "", string SourceRef = "", string TargetRef = "");
 internal sealed record ExplainChange(int Index, string Path, string? OriginalPath, string Kind, bool Folder);
 
 internal sealed class ExplainContext : IDisposable
@@ -18,8 +19,6 @@ internal sealed class ExplainContext : IDisposable
     readonly PrView _pr;
     readonly string _repoApi;
     readonly string _prApi;
-    readonly string _sourceRef;
-    readonly string _targetRef;
     readonly bool _requireActive;
     readonly Func<bool>? _ignoreDrafts;
     readonly List<ExplainChange> _changes;
@@ -36,15 +35,13 @@ internal sealed class ExplainContext : IDisposable
     public int DiffReads { get; private set; }
     public int ContextReads { get; private set; }
 
-    ExplainContext(AdoClient ado, PrView pr, string repoApi, string sourceRef, string targetRef,
+    ExplainContext(AdoClient ado, PrView pr, string repoApi,
         ExplainRevision revision, List<ExplainChange> changes, bool capped, bool requireActive, Func<bool>? ignoreDrafts)
     {
         _ado = ado;
         _pr = pr;
         _repoApi = repoApi;
         _prApi = repoApi + "/pullrequests/" + pr.Id;
-        _sourceRef = sourceRef;
-        _targetRef = targetRef;
         _requireActive = requireActive;
         _ignoreDrafts = ignoreDrafts;
         Revision = revision;
@@ -53,12 +50,21 @@ internal sealed class ExplainContext : IDisposable
     }
 
     static string S(JsonNode? n) => n?.GetValue<string>() ?? "";
-    static string Commit(JsonNode? n)
+    static string Commit(JsonNode? n, string field = "commitId")
     {
-        var value = S(n?["commitId"]);
+        var value = S(n?[field]);
         if (!Regex.IsMatch(value, @"\A[a-fA-F0-9]{40}\z"))
             throw new InvalidDataException("ADO did not return a valid pinned commit.");
         return value;
+    }
+
+    static async Task<string> BranchHeadAsync(AdoClient ado, string repoApi, string name, CancellationToken ct)
+    {
+        if (!name.StartsWith("refs/heads/", StringComparison.Ordinal))
+            throw new InvalidDataException("ADO did not return a branch ref.");
+        var refs = await ado.GetAsync($"{repoApi}/refs?filter={Uri.EscapeDataString(name["refs/".Length..])}&api-version=7.1", ct);
+        var head = (refs["value"] as JsonArray)?.SingleOrDefault(r => S(r?["name"]) == name);
+        return Commit(head, "objectId");
     }
 
     static void CheckIdentity(JsonNode fresh, PrView pr)
@@ -75,9 +81,9 @@ internal sealed class ExplainContext : IDisposable
     static void CheckVideoEligibility(JsonNode fresh, bool requireActive, bool ignoreDrafts)
     {
         if (requireActive && S(fresh["status"]) != "active")
-            throw new InvalidOperationException("This PR is no longer active. Refresh before generating a video.");
+            throw new InvalidOperationException("This PR is no longer active. Refresh before continuing.");
         if (ignoreDrafts && (fresh["isDraft"] is null || fresh["isDraft"]!.GetValue<bool>()))
-            throw new InvalidOperationException("This PR is a draft or its draft state is unknown. Refresh before generating a video.");
+            throw new InvalidOperationException("This PR is a draft or its draft state is unknown. Refresh before continuing.");
     }
 
     public static async Task<ExplainContext> CaptureAsync(AdoClient ado, PrView pr, CancellationToken ct,
@@ -104,6 +110,17 @@ internal sealed class ExplainContext : IDisposable
         var common = Commit(latest["commonRefCommit"]);
         if (fresh["lastMergeSourceCommit"] is { } preview && Commit(preview) != source)
             throw new InvalidOperationException("The PR changed while ADO was updating its preview. Refresh and retry.");
+        string target;
+        if (S(fresh["status"]) == "active")
+        {
+            var sourceHead = BranchHeadAsync(ado, repoApi, sourceRef, ct);
+            var targetHead = BranchHeadAsync(ado, repoApi, targetRef, ct);
+            await Task.WhenAll(sourceHead, targetHead);
+            if (await sourceHead != source)
+                throw new InvalidOperationException("The PR source branch changed during capture. Refresh and retry.");
+            target = await targetHead;
+        }
+        else target = Commit(fresh["lastMergeTargetCommit"] ?? latest["targetRefCommit"]);
         var changes = new List<ExplainChange>();
         var skip = 0;
         bool more;
@@ -128,8 +145,10 @@ internal sealed class ExplainContext : IDisposable
             more = next > 0 || entries.Count > remaining;
             skip = next;
         } while (more && changes.Count < MaxChanges);
-        var context = new ExplainContext(ado, pr, repoApi, sourceRef, targetRef,
-            new(pr.Key, pr.Id, S(fresh["title"]), pr.Repo, source, common, id), changes, more, requireActive, ignoreDrafts);
+        var context = new ExplainContext(ado, pr, repoApi,
+            new(pr.Key, pr.Id, S(fresh["title"]), pr.Repo, source, common, id,
+                target, sourceRef, targetRef),
+            changes, more, requireActive, ignoreDrafts);
         try { await context.VerifyAsync(ct); return context; }
         catch { context.Dispose(); throw; }
     }
@@ -138,17 +157,36 @@ internal sealed class ExplainContext : IDisposable
     {
         if (_toolFailure is { } failure)
             throw new InvalidOperationException("PR context could not be verified: " + failure.Message, failure);
-        var fresh = await _ado.GetAsync(_prApi + "?api-version=7.1", ct);
-        CheckIdentity(fresh, _pr);
-        CheckVideoEligibility(fresh, _requireActive, _ignoreDrafts?.Invoke() == true);
-        var iterations = await _ado.GetAsync(_prApi + "/iterations?api-version=7.1", ct);
+        await VerifyRevisionAsync(_ado, _pr, Revision, ct, _requireActive, _ignoreDrafts);
+    }
+
+    internal static async Task VerifyRevisionAsync(AdoClient ado, PrView pr, ExplainRevision revision, CancellationToken ct,
+        bool requireActive = false, Func<bool>? ignoreDrafts = null)
+    {
+        if (pr.Key != revision.Key || pr.Id != revision.Id || pr.Repo != revision.Repo)
+            throw new InvalidOperationException("The selected PR identity changed. Refresh and retry.");
+        var repoApi = $"https://dev.azure.com/{pr.Org}/{pr.ProjectId}/_apis/git/repositories/{pr.RepoId}";
+        var prApi = repoApi + "/pullrequests/" + pr.Id;
+        var fresh = await ado.GetAsync(prApi + "?api-version=7.1", ct);
+        CheckIdentity(fresh, pr);
+        CheckVideoEligibility(fresh, requireActive, ignoreDrafts?.Invoke() == true);
+        var iterations = await ado.GetAsync(prApi + "/iterations?api-version=7.1", ct);
         var iteration = (iterations["value"] as JsonArray)?.OrderByDescending(n => n?["id"]?.GetValue<int>()).FirstOrDefault()
             ?? throw new InvalidDataException("ADO returned no PR iterations during verification.");
-        if (iteration["id"]?.GetValue<int>() != Revision.Iteration ||
-            S(fresh["sourceRefName"]) != _sourceRef || S(fresh["targetRefName"]) != _targetRef ||
-            (fresh["lastMergeSourceCommit"] is { } source && Commit(source) != Revision.SourceCommit) ||
-            Commit(iteration["sourceRefCommit"]) != Revision.SourceCommit || Commit(iteration["commonRefCommit"]) != Revision.BaseCommit)
+        if (iteration["id"]?.GetValue<int>() != revision.Iteration ||
+            S(fresh["sourceRefName"]) != revision.SourceRef || S(fresh["targetRefName"]) != revision.TargetRef ||
+            (fresh["lastMergeSourceCommit"] is { } source && Commit(source) != revision.SourceCommit) ||
+            Commit(iteration["sourceRefCommit"]) != revision.SourceCommit || Commit(iteration["commonRefCommit"]) != revision.BaseCommit ||
+            S(fresh["status"]) != "active" && Commit(fresh["lastMergeTargetCommit"] ?? iteration["targetRefCommit"]) != revision.TargetCommit)
             throw new InvalidOperationException("The PR revisions changed during source inspection. The partial result is for the displayed pinned commits; refresh and retry.");
+        if (S(fresh["status"]) == "active")
+        {
+            var sourceHead = BranchHeadAsync(ado, repoApi, revision.SourceRef, ct);
+            var targetHead = BranchHeadAsync(ado, repoApi, revision.TargetRef, ct);
+            await Task.WhenAll(sourceHead, targetHead);
+            if (await sourceHead != revision.SourceCommit || await targetHead != revision.TargetCommit)
+                throw new InvalidOperationException("The PR branch revisions changed during source inspection. Refresh and retry.");
+        }
     }
 
     public string ListChanges(int page)
@@ -183,13 +221,14 @@ internal sealed class ExplainContext : IDisposable
                     output.AppendLine(" " + diff.PiecesNew[i]);
             }
             if (!diff.DiffBlocks.Any()) output.AppendLine("No textual change (possibly a rename or metadata-only change).");
+            NoteEvidence($"Diff: {change.OriginalPath ?? change.Path} -> {change.Path}." +
+                (output.Length > 24_000 ? " Partial inspection; diff truncated after 24,000 characters." : ""));
             if (output.Length > 24_000)
             {
                 Omit(change.Path, "diff truncated after 24,000 characters; use read_pr_file for targeted context");
                 return output.ToString(0, 24_000) + "\n[DIFF TRUNCATED]";
             }
             lock (_coverageGate) _inspected.Add(index);
-            NoteEvidence($"Diff: {change.OriginalPath ?? change.Path} -> {change.Path}.");
             return output.ToString();
         }
         catch (Exception ex) when (ex is not ArgumentException && !ct.IsCancellationRequested)
@@ -204,7 +243,7 @@ internal sealed class ExplainContext : IDisposable
     public async Task<string> ReadFileAsync(string path, string side, int startLine, CancellationToken ct)
     {
         ValidatePath(path);
-        if (side is not ("before" or "after") || startLine < 1) throw new ArgumentException("Use before/after and a positive starting line.");
+        if (side is not ("before" or "after" or "target") || startLine < 1) throw new ArgumentException("Use before/after/target and a positive starting line.");
         await _reads.WaitAsync(ct);
         try
         {
@@ -220,7 +259,7 @@ internal sealed class ExplainContext : IDisposable
                 Omit(path, "context window truncated at 16,000 characters");
                 output = output[..16_000] + "\n[WINDOW TRUNCATED]";
             }
-            return $"{path} @ {(side == "before" ? Revision.BaseCommit : Revision.SourceCommit)}; {lines.Length} total lines; window starts at {startLine}\n{output}";
+            return $"{path} @ {SideCommit(side)}; {lines.Length} total lines; window starts at {startLine}\n{output}";
         }
         catch (Exception ex) when (ex is not ArgumentException && !ct.IsCancellationRequested)
         {
@@ -234,12 +273,12 @@ internal sealed class ExplainContext : IDisposable
     public async Task<string> ListDirectoryAsync(string path, string side, CancellationToken ct)
     {
         ValidatePath(path);
-        if (side is not ("before" or "after")) throw new ArgumentException("Use before or after.");
+        if (side is not ("before" or "after" or "target")) throw new ArgumentException("Use before, after or target.");
         await _reads.WaitAsync(ct);
         try
         {
             if (++_fileReads > 60) return Omit(path, "60 file/directory-read budget exhausted");
-            var commit = side == "before" ? Revision.BaseCommit : Revision.SourceCommit;
+            var commit = SideCommit(side);
             var url = $"{_repoApi}/items?scopePath={Uri.EscapeDataString(path)}&recursionLevel=OneLevel&versionDescriptor.versionType=commit&versionDescriptor.version={commit}&api-version=7.1";
             var response = await _ado.GetBoundedJsonAsync(url, 1_000_000, ct);
             var items = response["value"] as JsonArray ?? throw new InvalidDataException("ADO returned no directory inventory.");
@@ -269,11 +308,12 @@ internal sealed class ExplainContext : IDisposable
 
     void NoteEvidence(string note) { lock (_coverageGate) _evidence.Add(note); }
     public string[] Evidence() { lock (_coverageGate) return _evidence.ToArray(); }
+    string SideCommit(string side) => side == "before" ? Revision.BaseCommit : side == "target" ? Revision.TargetCommit : Revision.SourceCommit;
 
     async Task<string?> ReadTextAsync(string path, string side, CancellationToken ct)
     {
         if (++_fileReads > 60) { Omit(path, "60 file/directory-read budget exhausted"); return null; }
-        var commit = side == "before" ? Revision.BaseCommit : Revision.SourceCommit;
+        var commit = SideCommit(side);
         var url = $"{_repoApi}/items?path={Uri.EscapeDataString(ValidatePath(path))}&versionDescriptor.versionType=commit&versionDescriptor.version={commit}&includeContentMetadata=true&api-version=7.1";
         try
         {
