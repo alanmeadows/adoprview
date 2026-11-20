@@ -91,15 +91,18 @@ test('PR conversation follow-ups, lens selection, posting outcomes, cancellation
     `);
     assert.equal(await evaluate(`document.activeElement.id`), 'investigationQuestion');
     await evaluate(`
-      $('#investigationQuestion').value='What genuinely improves?';
+      $('#investigationQuestion').value='  What genuinely improves?  ';
       $('#investigationQuestion').dispatchEvent(new Event('input',{bubbles:true}));
       $('#investigationSend').click();
       new Promise(resolve=>setTimeout(resolve,30));
     `);
     assert.equal(await evaluate(`calls.at(-1).method`), 'askPr');
+    assert.equal(await evaluate(`calls.at(-1).question`), 'What genuinely improves?');
     assert.equal(await evaluate(`$('#investigationSend').disabled`), true);
     assert.match(await evaluate(`$('#investigationSource').textContent`), /pinned object reads/);
     await evaluate(`finishInv(prA.key,'question','What genuinely improves?')`);
+    assert.equal(await evaluate(`$('#investigationQuestion').value`), '');
+    assert.equal(await evaluate(`investigationDrafts.get(prA.key).question`), '');
     assert.equal(await evaluate(`$('#investigationTranscript img')===null && !window.hostile`), true);
     await evaluate(`
       $('#investigationQuestion').value='Which caller depends on that?';

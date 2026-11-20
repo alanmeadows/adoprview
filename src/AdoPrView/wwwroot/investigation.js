@@ -19,7 +19,7 @@ function updateInvestigation(r) {
   $('#openInvestigationActivity').dataset.key = activity?.key || '';
   const draft = investigationDrafts.get(r.key);
   if (draft?.sentRequest === r.requestId && r.status === 'completed') {
-    if (draft.question === draft.sentQuestion) {
+    if (draft.question.trim() === draft.sentQuestion) {
       draft.question = '';
       if (investigationKey === r.key) $('#investigationQuestion').value = '';
     }
