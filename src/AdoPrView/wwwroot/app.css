@@ -450,7 +450,7 @@ pre.log .t { color: var(--muted); }
 .run-output { height: 280px; overflow: auto; margin: 12px 0 0; padding: 14px; white-space: pre-wrap; overflow-wrap: anywhere; background: var(--log-bg); color: var(--log-text); font: 12px/1.5 var(--mono); user-select: text; }
 .run-status, .run-worktree { overflow-wrap: anywhere; }
 .run-status { height: 4.5em; overflow: auto; }
-.run-worktree { height: 2.9em; overflow: auto; }
+.run-worktree { white-space: pre-wrap; }
 .run-only { margin-top: 16px; }
 .run-heading { padding: 12px 14px; display: flex; gap: 8px; align-items: flex-start; cursor: pointer; }
 .run-heading:hover { background: var(--hover); }
