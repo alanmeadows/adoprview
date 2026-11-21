@@ -1625,6 +1625,7 @@ function wire() {
   document.addEventListener('pointerup', endPointer, true);
   document.addEventListener('pointercancel', endPointer, true);
   rows.addEventListener('focusout', () => requestAnimationFrame(flushRowUpdates));
+  $('#runShelf').addEventListener('focusout', () => requestAnimationFrame(flushRowUpdates));
   window.addEventListener('blur', () => {
     closeRowMenu();
     S.pointerInRows = false;

@@ -685,6 +685,13 @@ test('real row hit testing and action identity across refreshes', { timeout: 900
       assert.equal(await evaluate(`document.querySelector('#runShelf .run-output').textContent`), 'Streamed output');
       await keyboard('Escape', 27);
       assert.equal(await evaluate(`document.activeElement.getAttribute('aria-expanded')`), 'false');
+      await evaluate(`setSnapshot({...S.snap,prs:S.snap.prs.map(p=>({...p,title:'Updated after shelf focus'}))})`);
+      assert.equal(await evaluate('!!S.pendingSnapshot'), true);
+      await keyboard('Tab', 9);
+      if (!await evaluate(`!!document.activeElement.closest('header')`)) await keyboard('Tab', 9);
+      assert.equal(await evaluate(`!!document.activeElement.closest('header')`), true);
+      assert.equal(await evaluate('S.pendingSnapshot'), null);
+      assert.equal(await evaluate(`document.querySelector('#rows .title').textContent`), 'Updated after shelf focus');
       await evaluate(`S.q='no matching inspection target';render()`);
       assert.equal(await evaluate(`document.querySelector('[data-key="${key}"]')`), null);
       assert.equal(await evaluate(`document.activeElement.closest('.pr')`), null);
