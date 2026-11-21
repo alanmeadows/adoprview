@@ -898,6 +898,10 @@ test('real row hit testing and action identity across refreshes', { timeout: 900
         window.settingsRpc=window.MockHost.rpc;
         window.MockHost.rpc=async(method,p)=>{
           if(method==='approvalSettings')return {message:'Synthetic provider settings',actions:[]};
+          if(method==='discoverRepos'){
+            window.calls.push({method,...p});
+            return [];
+          }
           if(method==='setTheme'){
             window.calls.push({method,...p});
             await new Promise(resolve=>window.completeTheme=resolve);
@@ -919,7 +923,7 @@ test('real row hit testing and action identity across refreshes', { timeout: 900
         assert.equal(await evaluate(`document.activeElement.dataset.wslRepo===document.querySelector('[data-wsl-repo]').dataset.wslRepo`), true);
         await evaluate(`document.querySelector('[data-dact="discover"]').focus();renderDrawer()`);
         assert.equal(await evaluate(`document.activeElement.id`), 'closeDrawer', 'Removed button focus falls back inside the drawer');
-        for (const outcome of ['saved', 'failed', 'moved', 'closed']) {
+        for (const outcome of ['saved', 'failed', 'moved', 'discover', 'closed']) {
           await evaluate(`document.querySelector('#theme').focus();
             window.previousTheme=S.settings.theme;window.failTheme=${outcome === 'failed'};
             window.selectedTheme=S.settings.theme==='dark'?'light':'dark';`);
@@ -929,10 +933,15 @@ test('real row hit testing and action identity across refreshes', { timeout: 900
           assert.equal(await evaluate(`document.documentElement.dataset.theme===window.selectedTheme`), true, 'Theme applies immediately');
           await evaluate(`renderDrawer()`);
           if (outcome === 'moved') await evaluate(`document.querySelector('#repoUrl').focus()`);
+          if (outcome === 'discover') {
+            await evaluate(`document.querySelector('[data-dact="discover"]').focus()`);
+            await keyboard('Enter', 13);
+            assert.equal(await evaluate(`document.activeElement.id`), 'closeDrawer', 'Removed Discover button falls back inside Settings during a pending theme save');
+          }
           if (outcome === 'closed') await keyboard('Escape', 27);
           await evaluate(`window.completeTheme()`);
           await settleTheme();
-          assert.equal(await evaluate(`document.activeElement.id`), outcome === 'moved' ? 'repoUrl' : outcome === 'closed' ? 'settingsBtn' : 'theme');
+          assert.equal(await evaluate(`document.activeElement.id`), outcome === 'moved' ? 'repoUrl' : outcome === 'closed' ? 'settingsBtn' : outcome === 'discover' ? 'closeDrawer' : 'theme');
           assert.equal(await evaluate(`S.settings.theme===(window.failTheme?window.previousTheme:window.selectedTheme)
             && document.documentElement.dataset.theme===S.settings.theme && !document.querySelector('#theme').disabled`), true);
           if (outcome === 'failed') assert.match(await evaluate(`document.querySelector('#toasts').textContent`), /Theme was not saved.*Synthetic theme save denied/);
@@ -940,7 +949,7 @@ test('real row hit testing and action identity across refreshes', { timeout: 900
         assert.equal(await evaluate(`[...S.drawerInert].length===0 && !document.querySelector('main').inert`), true);
         await keyboard('Tab', 9);
         assert.equal(await evaluate(`!!document.activeElement.closest('main')`), true);
-        assert.equal((await calls()).filter(c => c.method === 'setTheme').length, 4);
+        assert.equal((await calls()).filter(c => c.method === 'setTheme').length, 5);
         assert.equal((await calls()).some(c => c.method === 'saveSettings'), false, 'Theme saves remain separate from all other Settings');
       } finally {
         await evaluate(`if(S.themeBusy)window.completeTheme()`);
@@ -966,6 +975,23 @@ test('real row hit testing and action identity across refreshes', { timeout: 900
         assert.equal(await evaluate(`document.activeElement.id`), 'settingsBtn', 'Unfocused opening returns to the visible Settings button');
         assert.equal(await evaluate(`document.querySelector('#statusline').inert`), true, 'Existing inertness is restored, not cleared');
         assert.equal(await evaluate(`document.querySelector('main').inert`), false);
+        await evaluate(`toast('Synthetic preexisting inert action','info',{label:'Already inert',run:()=>{}});
+          window.preInertToast=document.querySelector('#toasts .toast:last-child button');window.preInertToast.inert=true;
+          await hidePr('sample-service-id:101');
+          window.existingUndo=document.querySelector('#toasts .toast:last-child button');window.existingUndo.id='existingUndoFixture';`);
+        await keyboard('Enter', 13);
+        await evaluate(`toast('Synthetic late Undo','info',{label:'Undo',run:()=>undoHide()});
+          window.lateUndo=document.querySelector('#toasts .toast:last-child button');window.lateUndo.id='lateUndoFixture';`);
+        assert.equal(await evaluate(`window.existingUndo.inert && window.lateUndo.inert && !document.querySelector('#toasts').inert`), true, 'Existing and new actions are inert while passive live announcements remain available');
+        await click(await elementPoint('#existingUndoFixture'));
+        await click(await elementPoint('#lateUndoFixture'));
+        assert.equal((await calls()).some(c => c.method === 'unhide'), false, 'Undo toast mouse actions cannot bypass Settings modal isolation');
+        await keyboard('Tab', 9);
+        assert.equal(await evaluate(`!!document.activeElement.closest('#drawer')`), true);
+        await keyboard('Escape', 27);
+        assert.equal(await evaluate(`!window.existingUndo.inert && !window.lateUndo.inert && window.preInertToast.inert`), true, 'Dismissal restores each toast action state');
+        await click(await elementPoint('#lateUndoFixture')); await frame();
+        assert.equal((await calls()).filter(c => c.method === 'unhide').length, 1, 'Undo is usable again after dismissal');
       } finally {
         await evaluate(`if(S.drawer)closeDrawer();document.querySelector('#statusline').inert=false;S.settings=${JSON.stringify(savedSettings)};render()`);
       }

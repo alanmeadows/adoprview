@@ -155,6 +155,7 @@ function toast(text, kind = 'ok', action) {
     const b = document.createElement('button');
     b.textContent = action.label;
     b.onclick = () => { action.run(); el.remove(); };
+    if (S.drawer) { S.drawerInert.set(b, b.inert); b.inert = true; }
     el.appendChild(b);
   }
   $('#toasts').appendChild(el);
@@ -1357,6 +1358,9 @@ async function openDrawer() {
     if (['drawer', 'scrim', 'toasts'].includes(el.id)) continue;
     S.drawerInert.set(el, el.inert); el.inert = true;
   }
+  for (const el of $('#toasts').querySelectorAll('button')) {
+    S.drawerInert.set(el, el.inert); el.inert = true;
+  }
   S.drawer = true; $('#drawer').hidden = false; $('#scrim').hidden = false; renderDrawer();
   $('#closeDrawer').focus?.({ preventScroll: true });
   await loadApprovalSettings();
@@ -1388,9 +1392,10 @@ function renderDrawer() {
   const st = S.settings;
   if (!st) return;
   const focusBody = $('#drawerBody');
+  const active = document.activeElement;
   const focusKey = el => el.id || `wsl:${el.dataset.wslRepo}`;
   const focusFields = [...focusBody.querySelectorAll('input[id], select[id], textarea[id], input[data-wsl-repo]')];
-  const focused = focusFields.find(el => el === document.activeElement);
+  const focused = focusFields.find(el => el === active);
   const focusSelection = focused && { start: focused.selectionStart, end: focused.selectionEnd, direction: focused.selectionDirection };
   const focusTop = focusBody.scrollTop;
   const titles = new Map(S.snap.prs.map((p) => [p.key.toLowerCase(), p]));
@@ -1473,7 +1478,8 @@ function renderDrawer() {
   if (S.drawer && next && !next.disabled) {
     next.focus({ preventScroll: true });
     if (typeof focusSelection.start === 'number') next.setSelectionRange(focusSelection.start, focusSelection.end, focusSelection.direction);
-  } else if (S.drawer && !S.themeBusy && !document.activeElement?.closest('#drawer')) $('#closeDrawer').focus?.({ preventScroll: true });
+  } else if (S.drawer && !(S.themeBusy && (active === document.body || active?.id === 'theme')) &&
+      !document.activeElement?.closest('#drawer')) $('#closeDrawer').focus?.({ preventScroll: true });
 }
 
 async function saveSettings(patch) {
