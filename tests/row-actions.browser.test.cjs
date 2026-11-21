@@ -9,6 +9,10 @@ const { pathToFileURL } = require('node:url');
 
 // No browser packages required: Node 22+ and a local Chromium browser.
 test('real row hit testing and action identity across refreshes', { timeout: 90000 }, async t => {
+  if (process.env.ROW_TEST_FILTER) {
+    const run = t.test.bind(t), names = process.env.ROW_TEST_FILTER.split('|');
+    t.test = (name, ...args) => names.some(part => name.includes(part)) ? run(name, ...args) : Promise.resolve();
+  }
   const profile = await mkdtemp(path.join(os.tmpdir(), 'ado-row-tests-'));
   const browser = process.env.ROW_TEST_BROWSER || 'C:\\Program Files (x86)\\Microsoft\\Edge\\Application\\msedge.exe';
   const child = spawn(browser, [
@@ -1112,6 +1116,184 @@ test('real row hit testing and action identity across refreshes', { timeout: 900
         for (const l of r.links) assert.ok(l.href === null || /^https:\/\/example\.com\//.test(l.href), `${where}: unexpected link ${l.href}`);
       }
       await evaluate(`DOMPurify.sanitize=window.realSanitize;delete window.chrome.webview;`);
+    });
+
+    const withSettingsDraftFixture = async run => {
+      await reset();
+      await evaluate(`window.draftRpc=MockHost.rpc;window.originalDraftSettings=structuredClone(S.settings);
+        S.settings.futureProvider={preserve:'synthetic unknown field'};
+        S.settings.autoComplete.futureOption='synthetic nested option';
+        window.committedDraftSettings=structuredClone(S.settings);
+        window.draftWrites=[];window.denyDraftMethod='';
+        MockHost.rpc=async(method,p)=>{
+          if(['saveSettings','setTheme','addRepo','removeRepo'].includes(method)){
+            window.draftWrites.push({method,params:structuredClone(p)});
+            if(window.denyDraftMethod===method)throw Error('Synthetic '+method+' write failed');
+            const next=structuredClone(window.committedDraftSettings);
+            if(method==='saveSettings')Object.assign(next,p.settings,{theme:next.theme});
+            if(method==='setTheme')next.theme=p.theme;
+            if(method==='addRepo'){
+              if(p.url!=='https://dev.azure.com/contoso/Sample/_git/synthetic-draft-repo')
+                throw Error('Synthetic invalid repository URL');
+              next.repos.push({org:'contoso',project:'Sample',repo:'synthetic-draft-repo'});
+            }
+            if(method==='removeRepo')next.repos=next.repos.filter(r=>repoKey(r)!==p.key);
+            window.committedDraftSettings=next;
+            return structuredClone(next);
+          }
+          return window.draftRpc(method,p);
+        };`);
+      try {
+        await click(await elementPoint('#settingsBtn')); await frame();
+        await evaluate(`window.readDraftFields=()=>({
+          ...Object.fromEntries(['triageInstructions','refreshSeconds','mergeCheckMinutes','mergeStrategy','wslDistro',
+            ...(document.querySelector('#additionalTriageInstructions')?['additionalTriageInstructions']:[])].map(id=>[id,document.getElementById(id).value])),
+          ...Object.fromEntries(['notifications','sound','ignoreDrafts','deleteSourceBranch','transitionWorkItems'].map(id=>[id,document.getElementById(id).checked])),
+          wslRepoDirectories:Object.fromEntries([...document.querySelectorAll('[data-wsl-repo]')].map(e=>[e.dataset.wslRepo,e.value]))
+        });
+        document.querySelector('#triageInstructions').value='Unsaved Custom Ask\\n';
+        if(document.querySelector('#additionalTriageInstructions'))document.querySelector('#additionalTriageInstructions').value='Unsaved additive instructions\\n';
+        document.querySelector('#refreshSeconds').value='333';
+        document.querySelector('#mergeCheckMinutes').value='23';
+        document.querySelector('#mergeStrategy').value='rebase';
+        document.querySelector('#wslDistro').value='Synthetic Ubuntu';
+        for(const id of ['notifications','sound','deleteSourceBranch','transitionWorkItems'])document.getElementById(id).checked=false;
+        document.querySelector('#ignoreDrafts').checked=true;
+        [...document.querySelectorAll('[data-wsl-repo]')].forEach((e,i)=>e.value='/home/synthetic/checkout-'+i);
+        window.expectedDraftFields=window.readDraftFields();`);
+        const saved = await evaluate('structuredClone(window.committedDraftSettings)');
+        const assertDraft = async () => assert.deepEqual(await evaluate('window.readDraftFields()'), await evaluate('window.expectedDraftFields'));
+        const assertCommitted = async expected => {
+          assert.deepEqual(await evaluate('S.settings'), expected, 'UI committed state matches only confirmed writes');
+          assert.deepEqual(await evaluate('window.committedDraftSettings'), expected, 'Synthetic host state does not contain unfinished edits');
+        };
+        await run({ saved, assertDraft, assertCommitted });
+      } finally {
+        await evaluate(`MockHost.rpc=window.draftRpc;if(S.drawer)closeDrawer();S.settings=window.originalDraftSettings;render()`);
+      }
+    };
+
+    await t.test('GUI settings failed Save preserves every available draft and only successful explicit Save survives reload', async () => {
+      await withSettingsDraftFixture(async ({ saved, assertDraft, assertCommitted }) => {
+        await evaluate(`window.denyDraftMethod='saveSettings';document.querySelector('#repoUrl').value='invalid draft URL';
+          document.querySelector('#wlInput').value='Unsubmitted author';`);
+        await click(await elementPoint('[data-dact="save"]')); await frame();
+        await assertDraft(); await assertCommitted(saved);
+        assert.equal(await evaluate(`document.querySelector('#repoUrl').value`), 'invalid draft URL');
+        assert.equal(await evaluate(`document.querySelector('#wlInput').value`), 'Unsubmitted author');
+        assert.equal(await evaluate(`document.querySelectorAll('#toasts .toast.error').length`), 1);
+        assert.match(await evaluate(`document.querySelector('#toasts').textContent`), /Synthetic saveSettings write failed/);
+        assert.doesNotMatch(await evaluate(`document.querySelector('#toasts').textContent`), /Settings saved/);
+        await evaluate(`document.querySelector('#refreshSeconds').value='334';window.expectedDraftFields=window.readDraftFields();
+          window.denyDraftMethod='';document.querySelector('#toasts').replaceChildren();`);
+        await click(await elementPoint('[data-dact="save"]')); await frame();
+        const expected = await evaluate('window.expectedDraftFields');
+        const committed = { ...saved, ...expected, refreshSeconds: 334, mergeCheckMinutes: 23,
+          autoComplete: { ...saved.autoComplete, mergeStrategy: expected.mergeStrategy,
+            deleteSourceBranch: expected.deleteSourceBranch, transitionWorkItems: expected.transitionWorkItems } };
+        for (const name of ['mergeStrategy','deleteSourceBranch','transitionWorkItems']) delete committed[name];
+        await assertDraft(); await assertCommitted(committed);
+        assert.match(await evaluate(`document.querySelector('#toasts').textContent`), /Settings saved/);
+        assert.equal(await evaluate(`window.draftWrites[1].params.settings.refreshSeconds`), 334, 'Retry uses corrected preserved input');
+
+        const injection = await send('Page.addScriptToEvaluateOnNewDocument', { source: `
+          Object.defineProperty(window,'MockHost',{configurable:true,set(host){
+            Object.defineProperty(window,'MockHost',{configurable:true,writable:true,value:host});
+            const original=host.rpc.bind(host);
+            host.rpc=async(method,p)=>{
+              const result=await original(method,p);
+              return method==='init'?{...result,settings:${JSON.stringify(committed)}}:result;
+            };
+          }});` });
+        try {
+          await evaluate('delete window.__ready');
+          await send('Page.reload');
+          await evaluate(`new Promise((resolve,reject)=>{
+            const deadline=Date.now()+10000;
+            const check=()=>window.__ready?resolve():Date.now()>deadline?reject(Error('Reload did not boot')):setTimeout(check,20);check();
+          })`);
+          await evaluate('openDrawer()'); await frame();
+          assert.deepEqual(await evaluate('S.settings'), committed, 'Fresh boot reads only confirmed synthetic host settings');
+          assert.equal(await evaluate(`document.querySelector('#triageInstructions').value`), 'Unsaved Custom Ask\n');
+          assert.equal(await evaluate(`document.querySelector('#refreshSeconds').value`), '334');
+          assert.equal(await evaluate(`document.querySelector('#wslDistro').value`), 'Synthetic Ubuntu');
+          assert.equal(await evaluate(`document.querySelector('#repoUrl').value`), '');
+          assert.equal(await evaluate(`document.querySelector('#wlInput').value`), '');
+        } finally {
+          await send('Page.removeScriptToEvaluateOnNewDocument', { identifier: injection.identifier });
+          await evaluate(`window.draftRpc=MockHost.rpc;window.originalDraftSettings=${JSON.stringify(saved)};
+            window.baseline=structuredClone(S.snap);`);
+        }
+      });
+    });
+
+    await t.test('GUI settings unrelated repository and author failures preserve input for correction and success commits only their own state', async () => {
+      await withSettingsDraftFixture(async ({ saved, assertDraft, assertCommitted }) => {
+        await evaluate(`document.querySelector('#repoUrl').value='invalid draft URL';`);
+        await click(await elementPoint('[data-dact="addRepo"]')); await frame();
+        await assertDraft(); await assertCommitted(saved);
+        assert.equal(await evaluate(`document.querySelector('#repoUrl').value`), 'invalid draft URL');
+        assert.match(await evaluate(`document.querySelector('#toasts').textContent`), /Synthetic invalid repository URL/);
+        await evaluate(`document.querySelector('#repoUrl').value='https://dev.azure.com/contoso/Sample/_git/synthetic-draft-repo';
+          window.denyDraftMethod='addRepo';document.querySelector('#toasts').replaceChildren();`);
+        await click(await elementPoint('[data-dact="addRepo"]')); await frame();
+        await assertDraft(); await assertCommitted(saved);
+        assert.match(await evaluate(`document.querySelector('#toasts').textContent`), /Synthetic addRepo write failed/);
+        assert.equal(await evaluate(`document.querySelector('#repoUrl').value`), 'https://dev.azure.com/contoso/Sample/_git/synthetic-draft-repo');
+        await evaluate(`window.denyDraftMethod='';`);
+        await click(await elementPoint('[data-dact="addRepo"]')); await frame();
+        const withRepo = { ...saved, repos: [...saved.repos, { org:'contoso', project:'Sample', repo:'synthetic-draft-repo' }] };
+        await assertCommitted(withRepo);
+        const fields = await evaluate('window.readDraftFields()'), expected = await evaluate('window.expectedDraftFields');
+        assert.deepEqual(fields, { ...expected, wslRepoDirectories: { ...expected.wslRepoDirectories, 'contoso/sample/synthetic-draft-repo': '' } });
+        assert.equal(await evaluate(`document.querySelector('#repoUrl').value`), '');
+        await evaluate(`window.expectedDraftFields=window.readDraftFields();window.denyDraftMethod='saveSettings';
+          document.querySelector('#wlInput').value='Unfinished author';document.querySelector('#toasts').replaceChildren();`);
+        await click(await elementPoint('[data-dact="addWl"]')); await frame();
+        await assertDraft(); await assertCommitted(withRepo);
+        assert.equal(await evaluate(`document.querySelector('#wlInput').value`), 'Unfinished author');
+        assert.match(await evaluate(`document.querySelector('#toasts').textContent`), /Synthetic saveSettings write failed/);
+        assert.doesNotMatch(await evaluate(`document.querySelector('#toasts').textContent`), /Watching PRs by/);
+        await evaluate(`window.denyDraftMethod='';document.querySelector('#wlInput').value='Corrected author';`);
+        await click(await elementPoint('[data-dact="addWl"]')); await frame();
+        const withAuthor = { ...withRepo, whitelist: [...saved.whitelist, 'Corrected author'] };
+        await assertDraft(); await assertCommitted(withAuthor);
+        assert.equal(await evaluate(`document.querySelector('#wlInput').value`), '');
+        assert.equal(await evaluate(`window.draftWrites.at(-1).params.settings.whitelist.at(-1)`), 'Corrected author');
+        await click(await elementPoint(`[data-dact="removeWl"][data-i="${withAuthor.whitelist.length - 1}"]`)); await frame();
+        await assertDraft(); await assertCommitted(withRepo);
+        await click(await elementPoint('[data-dact="removeRepo"][data-key="contoso/sample/synthetic-draft-repo"]')); await frame();
+        await assertCommitted(saved);
+        assert.deepEqual(await evaluate('window.readDraftFields()'), expected);
+        await evaluate('closeDrawer();openDrawer()'); await frame();
+        assert.equal(await evaluate(`document.querySelector('#triageInstructions').value`), saved.triageInstructions || '');
+        assert.equal(await evaluate(`document.querySelector('#refreshSeconds').value`), '120', 'Unrelated successes never committed polling drafts');
+      });
+    });
+
+    await t.test('GUI settings immediate theme saves and rollback preserve drafts and unknown integration fields', async () => {
+      await withSettingsDraftFixture(async ({ saved, assertDraft, assertCommitted }) => {
+        await evaluate(`document.querySelector('#theme').value='dark';
+          document.querySelector('#theme').dispatchEvent(new Event('change',{bubbles:true}));`);
+        await frame();
+        await assertDraft(); await assertCommitted({ ...saved, theme:'dark' });
+        assert.equal(await evaluate('document.documentElement.dataset.theme'), 'dark');
+        assert.deepEqual(await evaluate('window.draftWrites'), [{method:'setTheme',params:{theme:'dark'}}]);
+        await evaluate(`window.denyDraftMethod='setTheme';document.querySelector('#theme').value='light';
+          document.querySelector('#theme').dispatchEvent(new Event('change',{bubbles:true}));`);
+        await frame();
+        await assertDraft(); await assertCommitted({ ...saved, theme:'dark' });
+        assert.equal(await evaluate('document.documentElement.dataset.theme'), 'dark');
+        assert.equal(await evaluate(`document.querySelector('#theme').value`), 'dark');
+        assert.match(await evaluate(`document.querySelector('#toasts').textContent`), /Theme was not saved: Synthetic setTheme write failed/);
+        await evaluate('renderDrawer()'); await frame();
+        await assertDraft(); await assertCommitted({ ...saved, theme:'dark' });
+        await evaluate(`window.denyDraftMethod='';document.querySelector('#theme').value='light';
+          document.querySelector('#theme').dispatchEvent(new Event('change',{bubbles:true}));`);
+        await frame();
+        await assertDraft(); await assertCommitted({ ...saved, theme:'light' });
+        assert.equal(await evaluate('document.documentElement.dataset.theme'), 'light');
+      });
     });
 
     await t.test('both themes apply to real components, states, contrast and saved reloads', async () => {

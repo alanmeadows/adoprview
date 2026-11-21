@@ -76,6 +76,8 @@ const S = {
   speechEpoch: 0,
   rowMenu: null,
   drawer: false,
+  drawerDraft: new Map(),
+  drawerDraftReset: false,
   themeBusy: false,
   discovered: null,
 };
@@ -1349,6 +1351,7 @@ async function onSpeechAction(action) {
 }
 
 async function openDrawer() {
+  S.drawerDraft.clear(); S.drawerDraftReset = true;
   S.drawer = true; $('#drawer').hidden = false; $('#scrim').hidden = false; renderDrawer();
   await loadApprovalSettings();
 }
@@ -1372,6 +1375,17 @@ function renderDrawer() {
   if (!st) return;
   const titles = new Map(S.snap.prs.map((p) => [p.key.toLowerCase(), p]));
   const disc = S.discovered;
+  const body = $('#drawerBody');
+  const key = el => el.id || `wsl:${el.dataset.wslRepo}`;
+  const fields = [...body.querySelectorAll('input[id], select[id], textarea[id], input[data-wsl-repo]')];
+  if (S.drawerDraftReset) { S.drawerDraft.clear(); S.drawerDraftReset = false; }
+  else for (const el of fields) {
+    if (el.id === 'theme') continue;
+    const initial = el.tagName === 'SELECT' ? [...el.options].find(o => o.defaultSelected)?.value ?? el.options[0]?.value : el.defaultValue;
+    const dirty = el.type === 'checkbox' ? el.checked !== el.defaultChecked : el.value !== initial;
+    if (dirty) S.drawerDraft.set(key(el), { value: el.value, checked: el.checked });
+    else S.drawerDraft.delete(key(el));
+  }
   $('#drawerBody').innerHTML = `
     <div class="section">
       <h4>Appearance</h4>
@@ -1443,11 +1457,18 @@ function renderDrawer() {
       <div class="field"><textarea id="triageInstructions" placeholder="Default instructions">${esc(st.triageInstructions || '')}</textarea></div>
     </div>
     <div class="section"><button class="btn primary" data-dact="save">${svg('check')} Save settings</button></div>`;
+
+  const current = [...body.querySelectorAll('input[id], select[id], textarea[id], input[data-wsl-repo]')];
+  for (const el of current) {
+    const draft = S.drawerDraft.get(key(el));
+    if (draft) { el.value = draft.value; if (el.type === 'checkbox') el.checked = draft.checked; }
+  }
 }
 
-async function saveSettings(patch) {
+async function saveSettings(patch, clearDraft = false) {
   const st = { ...S.settings, ...patch };
   S.settings = await rpc('saveSettings', { settings: st });
+  if (clearDraft) S.drawerDraftReset = true;
   render();
 }
 
@@ -1505,6 +1526,7 @@ async function onDrawerAction(act, el) {
         const url = $('#repoUrl').value.trim();
         if (!url) return;
         S.settings = await rpc('addRepo', { url });
+        $('#repoUrl').value = '';
         toast('Repository added — refreshing');
         break;
       }
@@ -1528,6 +1550,7 @@ async function onDrawerAction(act, el) {
         const v = $('#wlInput').value.trim();
         if (!v) return;
         await saveSettings({ whitelist: [...S.settings.whitelist, v] });
+        $('#wlInput').value = '';
         toast(`Watching PRs by ${v}`);
         break;
       }
@@ -1545,11 +1568,11 @@ async function onDrawerAction(act, el) {
           notifications: $('#notifications').checked,
           sound: $('#sound').checked,
           ignoreDrafts: $('#ignoreDrafts').checked,
-          autoComplete: { mergeStrategy: $('#mergeStrategy').value, deleteSourceBranch: $('#deleteSourceBranch').checked, transitionWorkItems: $('#transitionWorkItems').checked },
+          autoComplete: { ...S.settings.autoComplete, mergeStrategy: $('#mergeStrategy').value, deleteSourceBranch: $('#deleteSourceBranch').checked, transitionWorkItems: $('#transitionWorkItems').checked },
           triageInstructions: $('#triageInstructions').value,
           wslDistro: $('#wslDistro').value.trim(),
           wslRepoDirectories: Object.fromEntries([...document.querySelectorAll('[data-wsl-repo]')].map(e => [e.dataset.wslRepo, e.value.trim()]).filter(([, value]) => value)),
-        });
+        }, true);
         toast('Settings saved');
         break;
     }
