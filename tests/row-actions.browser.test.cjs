@@ -49,11 +49,13 @@ test('Additional Fix fields are independently editable and restored in the real 
     };
     const click = async selector => {
       const point = await evaluate(`(()=>{
+        document.querySelector('#toasts').replaceChildren();
         const el=document.querySelector(${JSON.stringify(selector)});
         if(!el)throw Error('Missing control');
         el.scrollIntoView({block:'center'});
         const r=el.getBoundingClientRect(),x=r.x+r.width/2,y=r.y+r.height/2;
-        if(!el.contains(document.elementFromPoint(x,y)))throw Error('Control is not hit-testable');
+        const hit=document.elementFromPoint(x,y);
+        if(!el.contains(hit))throw Error('Control is not hit-testable: '+${JSON.stringify(selector)}+' covered by '+(hit?.className||hit?.tagName||'none'));
         return {x,y};
       })()`);
       for (const type of ['mousePressed', 'mouseReleased'])
