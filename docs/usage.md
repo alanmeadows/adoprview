@@ -577,7 +577,8 @@ The Fix output panel starts at the latest text and follows new output while you
 are at the bottom. Scroll or select text to read earlier output without being
 pulled back; reaching the bottom resumes following once any text selection is
 cleared. Hiding a selected panel or losing the selected text to truncation does
-not resume following. Each run keeps its own
+not resume following. A selection surviving retention at an unchanged,
+unclamped bottom still resumes when cleared. Each run keeps its own
 reading position across collapse, filtering and ordinary dashboard rerenders.
 If the bounded tail drops the text you were reading, its truncation notice and
 remaining beginning are shown instead of silently snapping to the latest text;

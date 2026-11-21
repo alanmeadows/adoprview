@@ -1302,6 +1302,39 @@ test('real row hit testing and action identity across refreshes', { timeout: 900
         'Losing the selected anchor and clamping to bottom must not count as a deliberate return to the tail');
     });
 
+    await t.test('Fix output preserves a surviving bottom selection resume intent unless retention clamps the viewport', async () => {
+      for (const clamped of [false, true]) {
+        await reset();
+        await evaluate(`{const key='sample-service-id:101',prefix='[Earlier output truncated]\\n';
+          const body=Array.from({length:160},(_,n)=>'Surviving selection synthetic line '+n+'\\n').join('')+'Final selected suffix';
+          const output=prefix+body;
+          S.runs.set('surviving-selection-run',{...S.snap.prs.find(p=>p.key===key),runId:'surviving-selection-run',
+            status:'running',output,outputOffset:output.length+50000});S.expanded.add(key);render();
+          window.survivingElement=document.querySelector('[data-key="'+key+'"] .run-output');
+          const node=window.survivingElement.firstChild;
+          window.getSelection().setBaseAndExtent(node,node.length-60,node,node.length-30);
+          window.survivingSelected=window.getSelection().toString();renderRows();}`);
+        await frame();
+        const before = await evaluate('window.survivingElement.scrollTop');
+        await evaluate(`{const run=runForPr('sample-service-id:101'),prefix='[Earlier output truncated]\\n';
+          const body=run.output.slice(prefix.length),cut=${clamped} ? body.indexOf('\\n')+1 : 1;
+          updateCopilotRun({...run,output:prefix+body.slice(cut)+'Z',outputOffset:run.outputOffset+1});}`);
+        await frame();
+        const retained = await evaluate('window.survivingElement.scrollTop');
+        assert.equal(await evaluate('window.getSelection().toString()'), await evaluate('window.survivingSelected'));
+        if (clamped) assert.ok(retained < before, 'Removing an earlier line forces the bottom viewport to clamp');
+        else assert.equal(retained, before, 'Removing and appending a character leaves line geometry and the bottom unchanged');
+        await evaluate(`window.getSelection().removeAllRanges();
+          {const run=runForPr('sample-service-id:101'),extra='After surviving selection cleared\\n'.repeat(160);
+            updateCopilotRun({...run,output:run.output+extra,outputOffset:run.outputOffset+extra.length});}`);
+        await frame();
+        if (clamped) assert.equal(await evaluate('window.survivingElement.scrollTop'), retained,
+          'Clamping is not a deliberate return even when the selected text and reading anchor survive');
+        else assert.ok(await evaluate('window.survivingElement.scrollHeight-window.survivingElement.clientHeight-window.survivingElement.scrollTop') <= 2,
+          'Clearing a still-retained selection at the unchanged bottom resumes the next append');
+      }
+    });
+
     await t.test('Fix output reconciles recovered run promotion and demotion before moving cached output', async () => {
       for (const interacting of [false, true]) {
         await reset();

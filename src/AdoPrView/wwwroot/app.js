@@ -649,6 +649,7 @@ function syncRunOutput(card) {
   const newPrefix = text.startsWith(notice) ? notice.length : 0;
   const removed = r.outputOffset - view.offset + before.length - oldPrefix - (text.length - newPrefix);
   const retentionMoved = newPrefix && Number.isSafeInteger(removed) && removed > 0;
+  const selectionPaused = view.selectionPaused, topBeforeMutation = output.scrollTop;
   if (retentionMoved && !view.following) view.selectionPaused = false;
   if (text !== before || retentionMoved) {
     const node = output.firstChild;
@@ -671,6 +672,7 @@ function syncRunOutput(card) {
             const range = document.createRange(), offset = anchor.offset - oldPrefix - removed + newPrefix;
             range.setStart(node, offset); range.setEnd(node, offset + 1);
             view.top = output.scrollTop + range.getBoundingClientRect().top - output.getBoundingClientRect().top - anchor.top;
+            view.selectionPaused = selectionPaused && !!selected && output.scrollTop === topBeforeMutation;
           } else view.top = 0;
         }
       } else {
@@ -686,6 +688,7 @@ function syncRunOutput(card) {
     // Programmatic restoration/clamping must not turn a paused reader into a follower.
     view.top = output.scrollTop;
     view.left = output.scrollLeft;
+    if (view.selectionPaused && !runOutputAtBottom(output)) view.selectionPaused = false;
     rememberRunOutputAnchor(view);
   }
 }
