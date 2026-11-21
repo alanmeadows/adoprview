@@ -1130,6 +1130,75 @@ test('real row hit testing and action identity across refreshes', { timeout: 900
         'The small bottom tolerance resumes tail following');
     });
 
+    const readingAnchorFixture = async (identical = false, nearBottom = false) => {
+      await reset();
+      await evaluate(`{const key='sample-service-id:101',prefix='[Earlier output truncated]\\n';
+        window.anchorBody=${identical} ? 'Repeated synthetic retained line\\n'.repeat(5000).slice(-(128*1024-prefix.length))
+          : Array.from({length:160},(_,n)=>'Anchor synthetic line '+n+'\\n').join('');
+        const output=${identical} ? prefix+window.anchorBody : window.anchorBody;
+        S.runs.set('anchor-edge-run',{...S.snap.prs.find(p=>p.key===key),runId:'anchor-edge-run',status:'running',
+          output,outputOffset:output.length+4096,logPath:'/tmp/synthetic-supervised.log'});
+        S.expanded.add(key);render();
+        window.anchorElement=document.querySelector('[data-key="'+key+'"] .run-output');
+        window.anchorElement.scrollTop=${nearBottom}
+          ? window.anchorElement.scrollHeight-window.anchorElement.clientHeight-180 : 600;
+        window.anchorSample=()=>{
+          const box=window.anchorElement.getBoundingClientRect(),style=getComputedStyle(window.anchorElement);
+          const range=document.caretRangeFromPoint(box.left+parseFloat(style.paddingLeft)+1,box.top+parseFloat(style.paddingTop)+1);
+          if(range?.startContainer!==window.anchorElement.firstChild)throw Error('Fixture anchor is not in output');
+          return {text:window.anchorElement.textContent.slice(range.startOffset,range.startOffset+30),
+            top:window.anchorElement.scrollTop,bottom:window.anchorElement.scrollHeight-window.anchorElement.clientHeight-window.anchorElement.scrollTop};
+        };}`);
+      await elementPoint('[data-key="sample-service-id:101"] .run-output'); await frame();
+      await evaluate('window.anchorBefore=window.anchorSample()');
+    };
+
+    await t.test('Fix output handles retention advancing with an identical 128 Ki-character displayed tail', async () => {
+      await readingAnchorFixture(true);
+      await evaluate(`{const run=runForPr('sample-service-id:101');
+        updateCopilotRun({...run,outputOffset:run.outputOffset+window.anchorBody.length});}`);
+      await frame();
+      assert.ok(await evaluate('window.anchorElement.scrollTop') <= 1,
+        'Identical text does not hide that the entire old retained body and reading anchor were replaced');
+      assert.equal(await evaluate('window.anchorElement.textContent.length'), 128 * 1024);
+      assert.match(await evaluate('document.querySelector(".run-worktree").textContent'), /Supervised log: \/tmp\/synthetic-supervised\.log/);
+    });
+
+    await t.test('Fix output preserves or honestly loses its logical reading anchor while the panel is offscreen', async () => {
+      for (const removed of [false, true]) {
+        await readingAnchorFixture();
+        await evaluate(`window.anchorSpacer=document.createElement('div');window.anchorSpacer.style.height='2000px';
+          document.querySelector('main').prepend(window.anchorSpacer);document.querySelector('main').scrollTop=0;`);
+        await frame();
+        assert.ok(await evaluate('window.anchorElement.getBoundingClientRect().top') > 1000, 'The update occurs outside the browser viewport');
+        await evaluate(`{const run=runForPr('sample-service-id:101'),cut=${removed}
+            ? run.output.indexOf('Anchor synthetic line 80\\n') : run.output.indexOf('Anchor synthetic line 2\\n');
+          const extra='Offscreen appended line\\n';
+          updateCopilotRun({...run,output:'[Earlier output truncated]\\n'+run.output.slice(cut)+extra,
+            outputOffset:run.outputOffset+extra.length});
+          window.anchorSpacer.remove();window.anchorElement.scrollIntoView({block:'center'});}`);
+        await frame();
+        if (removed) assert.ok(await evaluate('window.anchorElement.scrollTop') <= 1, 'A removed offscreen anchor shows the retained beginning');
+        else assert.equal(await evaluate('window.anchorSample().text'), await evaluate('window.anchorBefore.text'),
+          'A retained offscreen anchor still shows the same text on return');
+      }
+    });
+
+    await t.test('Fix output preserves a surviving anchor when retained-tail shortening clamps browser scrollTop', async () => {
+      await readingAnchorFixture(false, true);
+      await evaluate(`{const run=runForPr('sample-service-id:101'),cut=run.output.indexOf('Anchor synthetic line 80\\n'),extra='After clamp\\n';
+        updateCopilotRun({...run,output:'[Earlier output truncated]\\n'+run.output.slice(cut)+extra,
+          outputOffset:run.outputOffset+extra.length});}`);
+      await frame();
+      const after = await evaluate('window.anchorSample()'), before = await evaluate('window.anchorBefore');
+      assert.equal(after.text, before.text, 'Browser clamping must not be counted twice when restoring the retained anchor');
+      assert.ok(after.top < before.top && after.bottom > 100, 'The shorter tail keeps the paused reader away from the new bottom');
+      await evaluate(`{const run=runForPr('sample-service-id:101'),extra='More after clamp\\n'.repeat(12);
+        updateCopilotRun({...run,output:run.output+extra,outputOffset:run.outputOffset+extra.length});}`);
+      await frame();
+      assert.ok(Math.abs(await evaluate('window.anchorElement.scrollTop') - after.top) <= 1, 'Clamping does not resume following');
+    });
+
     await t.test('inline output streams without replacing rows, remains on captured PR through refresh/removal, and cancels that run', async () => {
       await send('Emulation.setDeviceMetricsOverride', { width: 1600, height: 1000, deviceScaleFactor: 1, mobile: false });
       await reset(true);

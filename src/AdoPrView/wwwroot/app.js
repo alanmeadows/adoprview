@@ -544,6 +544,24 @@ function runOutputSelected(el) {
   return selection?.isCollapsed === false && (el.contains(selection.anchorNode) || el.contains(selection.focusNode));
 }
 
+function rememberRunOutputAnchor(view) {
+  const el = view.element, node = el.firstChild;
+  view.anchor = null;
+  if (view.following || node?.nodeType !== 3 || !node.length) return;
+  const box = el.getBoundingClientRect(), y = box.top + parseFloat(getComputedStyle(el).paddingTop) + 1;
+  const range = document.createRange();
+  let low = 0, high = node.length - 1;
+  // Range geometry works even outside the dashboard viewport, unlike caret hit testing.
+  while (low < high) {
+    const middle = Math.floor((low + high) / 2);
+    range.setStart(node, middle); range.setEnd(node, middle + 1);
+    if (range.getBoundingClientRect().bottom <= y) low = middle + 1;
+    else high = middle;
+  }
+  range.setStart(node, low); range.setEnd(node, low + 1);
+  view.anchor = { offset: low, top: range.getBoundingClientRect().top - box.top };
+}
+
 function rememberRunOutput(view) {
   const el = view.element;
   if (!el.isConnected || !el.clientHeight) return;
@@ -551,6 +569,7 @@ function rememberRunOutput(view) {
   if (runOutputSelected(el)) view.following = false;
   view.top = el.scrollTop;
   view.left = el.scrollLeft;
+  rememberRunOutputAnchor(view);
 }
 
 function captureRunOutputs() {
@@ -601,29 +620,27 @@ function syncRunOutput(card) {
   }
   output.hidden = false;
   const before = output.textContent, text = r.output;
-  if (text !== before) {
+  const notice = '[Earlier output truncated]\n';
+  const oldPrefix = before.startsWith(notice) ? notice.length : 0;
+  const newPrefix = text.startsWith(notice) ? notice.length : 0;
+  const removed = r.outputOffset - view.offset + before.length - oldPrefix - (text.length - newPrefix);
+  const retentionMoved = newPrefix && Number.isSafeInteger(removed) && removed > 0;
+  if (text !== before || retentionMoved) {
     const node = output.firstChild;
-    if (node?.nodeType === 3 && text.startsWith(before)) node.appendData(text.slice(before.length));
+    if (node?.nodeType === 3 && !retentionMoved && text.startsWith(before)) node.appendData(text.slice(before.length));
     else if (node?.nodeType === 3) {
-      const notice = '[Earlier output truncated]\n';
-      const oldPrefix = before.startsWith(notice) ? notice.length : 0;
-      const newPrefix = text.startsWith(notice) ? notice.length : 0;
-      const removed = r.outputOffset - view.offset + before.length - oldPrefix - (text.length - newPrefix);
       const retained = before.slice(oldPrefix + removed);
       if (newPrefix && Number.isSafeInteger(removed) && removed >= 0 && removed < before.length - oldPrefix &&
         text.slice(newPrefix).startsWith(retained)) {
-        const box = output.getBoundingClientRect(), style = getComputedStyle(output);
-        const anchor = !view.following && document.caretRangeFromPoint?.(
-          box.left + parseFloat(style.paddingLeft) + 1, box.top + parseFloat(style.paddingTop) + 1);
-        const offset = anchor?.startContainer === node ? anchor.startOffset : null;
-        const oldTop = offset == null ? null : anchor.getBoundingClientRect().top;
+        const anchor = view.following ? null : view.anchor;
         node.deleteData(0, oldPrefix + removed);
         node.insertData(0, text.slice(0, newPrefix));
         node.appendData(text.slice(newPrefix + retained.length));
-        if (offset != null) {
-          if (offset >= oldPrefix + removed) {
-            anchor.setStart(node, offset - oldPrefix - removed + newPrefix); anchor.collapse(true);
-            view.top += anchor.getBoundingClientRect().top - oldTop;
+        if (!view.following) {
+          if (anchor && anchor.offset >= oldPrefix + removed) {
+            const range = document.createRange(), offset = anchor.offset - oldPrefix - removed + newPrefix;
+            range.setStart(node, offset); range.setEnd(node, offset + 1);
+            view.top = output.scrollTop + range.getBoundingClientRect().top - output.getBoundingClientRect().top - anchor.top;
           } else view.top = 0;
         }
       } else {
@@ -639,6 +656,7 @@ function syncRunOutput(card) {
     // Programmatic restoration/clamping must not turn a paused reader into a follower.
     view.top = output.scrollTop;
     view.left = output.scrollLeft;
+    rememberRunOutputAnchor(view);
   }
 }
 
