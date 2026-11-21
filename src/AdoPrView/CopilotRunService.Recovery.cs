@@ -11,7 +11,7 @@ public sealed partial class CopilotRunService
     internal sealed record SavedRun(int Version, CopilotRunState State, EnvironmentInfo? Environment,
         string? RunDirectory, string OwnershipToken, bool LaunchIntent, bool TaskConfirmedStopped, string? TaskIdentity);
 
-    SavedRun Save(Entry e) => new(1, e.State with
+    SavedRun Save(Entry e, CopilotRunState? state = null) => new(1, (state ?? e.State) with
     {
         Request = e.State.Request with { Prompt = "" }, Output = ""
     }, e.Environment is null ? null : e.Environment with { Help = "" },
@@ -19,7 +19,12 @@ public sealed partial class CopilotRunService
 
     void Persist(Entry e)
     {
-        if (store is not null && e.DriverLease is not null) store.Write(Save(e));
+        lock (e.PersistenceGate)
+        {
+            SavedRun saved;
+            lock (gate) saved = Save(e);
+            if (store is not null && e.DriverLease is not null) store.Write(saved);
+        }
     }
 
     string[] LaunchArguments(Entry e, bool resume) =>
@@ -76,7 +81,7 @@ public sealed partial class CopilotRunService
         await Task.WhenAll(ready).ConfigureAwait(false);
     }
 
-    static bool ReservesPr(SavedRun saved) => saved.State.IsActive || saved.State.Status == "needs-attention";
+    static bool ReservesPr(SavedRun saved) => saved.State.IsActive || saved.State.MayBeRunning || saved.State.Status == "needs-attention";
 
     async Task RecoverEntryAsync(Entry e, SavedRun saved)
     {

@@ -2,6 +2,11 @@ using System.Collections.Concurrent;
 using System.Diagnostics;
 using System.Text;
 using System.Text.Json;
+using System.Windows;
+using System.Windows.Controls;
+using System.Windows.Threading;
+using Microsoft.Web.WebView2.Core;
+using Microsoft.Web.WebView2.Wpf;
 using AdoPrView;
 
 static class CopilotRunTests
@@ -50,6 +55,117 @@ static class CopilotRunTests
 
     public static async Task Run(Func<string, Func<Task>, Task> test)
     {
+        await test("Copilot bounded output avoids snapshot allocation per chunk and hung follow cannot block exact cancel or detach", async () =>
+        {
+            foreach (var detach in new[] { false, true })
+            {
+                var fake = new FakeTransport { IgnoreFollowCancellation = true };
+                var service = new CopilotRunService(fake);
+                var run = await service.StartAsync(Request());
+                await fake.Started.Task.WaitAsync(TimeSpan.FromSeconds(5));
+                var chunk = new string('x', 4096);
+                var before = GC.GetAllocatedBytesForCurrentThread();
+                for (var i = 0; i < 64; i++) fake.Output(chunk);
+                var allocated = GC.GetAllocatedBytesForCurrentThread() - before;
+                Check(allocated < 2 * 1024 * 1024, $"Output allocated {allocated} bytes for a bounded 256 KiB fixture");
+                fake.Output("\nRETAINED-TAIL\n");
+                var tail = service.Get(run.RunId)!.Output;
+                Check(tail.Length <= CopilotRunService.MaxOutputCharacters && tail.EndsWith("RETAINED-TAIL\n"),
+                    "Bounded snapshots lost tail output");
+                if (detach)
+                {
+                    await service.DisposeAsync().AsTask().WaitAsync(TimeSpan.FromSeconds(3));
+                    Check(service.Get(run.RunId)!.Status == "running" && !fake.Calls.Any(c => c.Operation == "stop"),
+                        "Detachment stopped or completed a supervised job");
+                }
+                else
+                {
+                    var stopped = await service.CancelAsync(run.Key, run.RunId).WaitAsync(TimeSpan.FromSeconds(3));
+                    Check(stopped!.Status == "cancelled" && !stopped.MayBeRunning && stopped.WorktreeRetained &&
+                        stopped.Output.EndsWith("RETAINED-TAIL\n") && fake.Calls.Count(c => c.Operation == "stop") == 1,
+                        "Cancellation lost work/output or claimed an unconfirmed outcome");
+                    await service.DisposeAsync();
+                }
+                fake.Output("LATE OUTPUT");
+                Check(service.Get(run.RunId)!.Output == tail, "Abandoned transport mutated detached/terminal output");
+                fake.Finish(143);
+            }
+        });
+        await test("Copilot browser delivery coalesces output behind one acknowledgement and disposal releases hung delivery", async () =>
+        {
+            var posted = new ConcurrentQueue<(CopilotRunState State, long Id)>();
+            await using var delivery = new CopilotRunDelivery((state, id) =>
+            { posted.Enqueue((state, id)); return Task.CompletedTask; }, ex => throw new Exception("Delivery failed", ex), waitForReady: true);
+            var initial = new CopilotRunState("offline", Request(), "running", "initial", null, null,
+                null, null, "/offline/worktree", "in-use", DateTimeOffset.UtcNow, null);
+            delivery.Offer(initial);
+            await Task.Delay(50);
+            Check(posted.IsEmpty, "Output was sent before the dashboard registered its receiver");
+            delivery.Ready();
+            using var deadline = new CancellationTokenSource(TimeSpan.FromSeconds(3));
+            while (posted.IsEmpty) await Task.Delay(10, deadline.Token);
+            for (var i = 0; i < 64; i++) delivery.Offer(initial with { Output = i.ToString() });
+            delivery.Offer(initial with { Status = "cancelled", Output = "final", MayBeRunning = false });
+            await Task.Delay(150);
+            Check(posted.Count == 1, "Busy browser accumulated messages");
+            delivery.Acknowledge(posted.First().Id - 1);
+            Check(posted.Count == 1, "Stale acknowledgement released another delivery");
+            // The previous browser disappeared without acknowledging; fresh ready/init must recover the terminal state.
+            delivery.Ready();
+            while (posted.Count < 2) await Task.Delay(10, deadline.Token);
+            Check(posted.Last().State.Status == "cancelled" && posted.Last().State.Output == "final",
+                "Coalescing discarded the latest terminal output");
+            delivery.Offer(initial with { Status = "cancelled", Output = "final worktree status" });
+            delivery.Acknowledge(posted.First().Id);
+            await Task.Delay(100);
+            Check(posted.Count == 2, "A previous browser's stale acknowledgement released a newer snapshot");
+            delivery.Acknowledge(posted.Last().Id);
+            while (posted.Count < 3) await Task.Delay(10, deadline.Token);
+            Check(posted.Last().State.Output == "final worktree status", "Later terminal cleanup/status update was lost");
+            await delivery.DisposeAsync().AsTask().WaitAsync(TimeSpan.FromSeconds(2));
+        });
+        await test("Copilot coalesced delivery disposal does not wait for hung posting transport", async () =>
+        {
+            var entered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            var release = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            var delivery = new CopilotRunDelivery((_, _) => { entered.TrySetResult(); return release.Task; }, ex => throw ex);
+            delivery.Offer(new("offline", Request(), "running", "retained output", null, null,
+                null, null, "/offline/worktree", "in-use", DateTimeOffset.UtcNow, null));
+            await entered.Task.WaitAsync(TimeSpan.FromSeconds(2));
+            await delivery.DisposeAsync().AsTask().WaitAsync(TimeSpan.FromSeconds(2));
+            release.TrySetResult();
+        });
+        await test("Copilot cancellation and detach bypass a blocked transport cancellation callback", async () =>
+        {
+            foreach (var detach in new[] { false, true })
+            {
+                using var fake = new FakeTransport { BlockCancellation = true };
+                var service = new CopilotRunService(fake);
+                try
+                {
+                    var run = await service.StartAsync(Request());
+                    await fake.Started.Task.WaitAsync(TimeSpan.FromSeconds(5));
+                    fake.Output("KEEP THIS OUTPUT\n");
+                    var control = detach ? service.DisposeAsync().AsTask() : service.CancelAsync(run.Key, run.RunId);
+                    await fake.CancellationEntered.Task.WaitAsync(TimeSpan.FromSeconds(3));
+                    await control.WaitAsync(TimeSpan.FromSeconds(3));
+                    if (!detach)
+                    {
+                        var state = service.Get(run.RunId);
+                        Check(state is { Status: "cancelled", MayBeRunning: false } && state.Output.EndsWith("KEEP THIS OUTPUT\n"),
+                            "Callback contention lost output or bypassed owned stop verification");
+                    }
+                }
+                finally
+                {
+                    fake.ReleaseCancellation.Set();
+                    fake.Finish(143);
+                    if (fake.CancellationEntered.Task.IsCompleted)
+                        await fake.CancellationFinished.Task.WaitAsync(TimeSpan.FromSeconds(5));
+                    await service.DisposeAsync();
+                }
+            }
+        });
         await test("Copilot returns preparing immediately, captures immutable identity/prompt and streams both channels", async () =>
         {
             var fake = new FakeTransport();
@@ -387,9 +503,98 @@ static class CopilotRunTests
 
         if (Environment.GetEnvironmentVariable("ADOPRVIEW_TEST_WSL") == "1")
             await test("Copilot disposable WSL repos verify final --yolo argv, generated review/description prompt/CWD, isolation and dirty/unpushed retention with fake CLI", RunWslWorktrees);
+        if (Environment.GetEnvironmentVariable("ADOPRVIEW_TEST_WSL_CONTROL") == "1")
+            await test("Copilot kernel owned-group escalation preserves work and logs and refuses orphan lock and foreign receipt", CopilotControlProbe.RunAsync);
+        if (Environment.GetEnvironmentVariable("ADOPRVIEW_TEST_NATIVE_ACTION") == "1")
+            await test("Native Copilot WPF stop remains responsive with unacknowledged WebView output and hung follower", NativeControl);
     }
 
-    sealed class FakeTransport : ICopilotRunTransport
+    static Task NativeControl()
+    {
+        var done = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var thread = new Thread(() =>
+        {
+            var profile = Path.Combine(Path.GetTempPath(), "ado-control-browser-" + Guid.NewGuid().ToString("N"));
+            var browser = new WebView2();
+            var stop = new Button { Content = "Stop exact synthetic owned run" };
+            var panel = new DockPanel();
+            DockPanel.SetDock(stop, Dock.Top);
+            panel.Children.Add(stop); panel.Children.Add(browser);
+            var window = new Window { Width = 900, Height = 500, Content = panel, ShowInTaskbar = false };
+            window.Loaded += async (_, _) =>
+            {
+                Exception? failure = null;
+                CoreWebView2Environment? environment = null;
+                var exited = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+                var fake = new FakeTransport { IgnoreFollowCancellation = true };
+                var service = new CopilotRunService(fake);
+                CopilotRunDelivery? delivery = null;
+                try
+                {
+                    environment = await CoreWebView2Environment.CreateAsync(null, profile);
+                    environment.BrowserProcessExited += (_, _) => exited.TrySetResult();
+                    await browser.EnsureCoreWebView2Async(environment);
+                    var navigated = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+                    browser.CoreWebView2.NavigationCompleted += (_, _) => navigated.TrySetResult();
+                    browser.NavigateToString("<!doctype html><title>Bounded synthetic task control</title><p>No live model or ADO.</p>");
+                    await navigated.Task.WaitAsync(TimeSpan.FromSeconds(15));
+                    var posts = 0;
+                    delivery = new(async (state, id) => await window.Dispatcher.InvokeAsync(() =>
+                    {
+                        posts++;
+                        browser.CoreWebView2.PostWebMessageAsJson(JsonSerializer.Serialize(new { state.Output, id }));
+                    }), ex => failure ??= ex);
+                    service.Changed += delivery.Offer;
+                    var run = await service.StartAsync(Request());
+                    await fake.Started.Task.WaitAsync(TimeSpan.FromSeconds(5));
+                    for (var i = 0; i < 64; i++) fake.Output("bounded synthetic output\n");
+                    fake.Output("NATIVE-TAIL\n");
+                    await Task.Delay(300);
+                    Check(posts == 1, "Unacknowledged browser queued more than one output message");
+                    var stopped = new TaskCompletionSource<CopilotRunState?>(TaskCreationOptions.RunContinuationsAsynchronously);
+                    stop.Click += async (_, _) =>
+                    {
+                        try { stopped.TrySetResult(await service.CancelAsync(run.Key, run.RunId)); }
+                        catch (Exception ex) { stopped.TrySetException(ex); }
+                    };
+                    stop.RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
+                    var state = await stopped.Task.WaitAsync(TimeSpan.FromSeconds(3));
+                    Check(window.IsVisible && state is { Status: "cancelled", MayBeRunning: false, WorktreeRetained: true } &&
+                        state.Output.EndsWith("NATIVE-TAIL\n") && fake.Calls.Count(c => c.Operation == "stop") == 1,
+                        "Native stop waited for the browser or lost output/work");
+                    Check((await browser.CoreWebView2.ExecuteScriptAsync("document.title")).Contains("Bounded synthetic task control"),
+                        "Synthetic dashboard is not responsive");
+                    await delivery.DisposeAsync().AsTask().WaitAsync(TimeSpan.FromSeconds(2));
+                    await service.DisposeAsync().AsTask().WaitAsync(TimeSpan.FromSeconds(2));
+                    fake.Output("LATE");
+                    Check(service.Get(run.RunId)!.Output == state!.Output, "Hung follower delivered late output after disposal");
+                }
+                catch (Exception ex) { failure = ex; }
+                finally
+                {
+                    if (delivery is not null) await delivery.DisposeAsync();
+                    await service.DisposeAsync();
+                    fake.Finish(143);
+                    browser.Dispose(); window.Close();
+                    try
+                    {
+                        if (environment is not null) await exited.Task.WaitAsync(TimeSpan.FromSeconds(15));
+                        if (Directory.Exists(profile)) Directory.Delete(profile, recursive: true);
+                    }
+                    catch (Exception ex) { failure ??= ex; }
+                    if (failure is null) done.TrySetResult(); else done.TrySetException(failure);
+                    Dispatcher.CurrentDispatcher.BeginInvokeShutdown(DispatcherPriority.Background);
+                }
+            };
+            window.Show();
+            Dispatcher.Run();
+        });
+        thread.SetApartmentState(ApartmentState.STA);
+        thread.Start();
+        return done.Task.WaitAsync(TimeSpan.FromSeconds(60));
+    }
+
+    sealed class FakeTransport : ICopilotRunTransport, IDisposable
     {
         public readonly ConcurrentQueue<CopilotProcessRequest> Calls = new();
         public string Remote = "https://dev.azure.com/offline-org/offline-project/_git/offline-repo";
@@ -397,7 +602,10 @@ static class CopilotRunTests
         public const string PushHash = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
         public string CliHelp = Help;
         public string? FailOperation, ThrowOperation, ThrowIoOperation, ThrowWin32Operation;
-        public bool MissingReceipt;
+        public bool MissingReceipt, IgnoreFollowCancellation, BlockCancellation;
+        public readonly ManualResetEventSlim ReleaseCancellation = new();
+        public readonly TaskCompletionSource CancellationFinished = NewSignal();
+        public readonly TaskCompletionSource CancellationEntered = NewSignal();
         public string FailureError = "offline-secret";
         public TaskCompletionSource Started = NewSignal();
         TaskCompletionSource<int> completion = NewCompletion();
@@ -406,6 +614,7 @@ static class CopilotRunTests
         public void Error(string text) => stderr!(text);
         public void Finish(int code) => completion.TrySetResult(code);
         public void Reset() { Started = NewSignal(); completion = NewCompletion(); }
+        public void Dispose() => ReleaseCancellation.Dispose();
         static TaskCompletionSource NewSignal() => new(TaskCreationOptions.RunContinuationsAsynchronously);
         static TaskCompletionSource<int> NewCompletion() => new(TaskCreationOptions.RunContinuationsAsynchronously);
 
@@ -429,9 +638,21 @@ static class CopilotRunTests
                     var run = "/home/offline/.local/state/ado-prview/runs/" + request.Arguments[6];
                     return new(0, Protocol("WORKTREE", run, run + "/worktree"), "");
                 case "follow":
-                    stdout = output; stderr = error; Started.TrySetResult();
-                    await completion.Task.WaitAsync(token);
-                    return new(0, "", "");
+                    var following = IgnoreFollowCancellation ? completion.Task : completion.Task.WaitAsync(token);
+                    using (token.Register(() =>
+                    {
+                        try
+                        {
+                            CancellationEntered.TrySetResult();
+                            if (BlockCancellation) ReleaseCancellation.Wait(TimeSpan.FromSeconds(5));
+                        }
+                        finally { CancellationFinished.TrySetResult(); }
+                    }))
+                    {
+                        stdout = output; stderr = error; Started.TrySetResult();
+                        await following;
+                        return new(0, "", "");
+                    }
                 case "status":
                     return new(0, System.Text.Json.JsonSerializer.Serialize(new
                     {

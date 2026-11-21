@@ -608,6 +608,28 @@ abandoned or no longer returned), its runs appear, collapsed, below the table in
 the unfiltered view only. **Cancel run** targets only that app-owned task.
 Changing views never cancels a run.
 
+If the dashboard browser is busy, right-click the native tray icon and select
+**Stop Copilot run → !number repository**. This bypasses the browser and does
+not wait for unrelated startup recovery. Cancellation signals the owned
+transport before durable IO; short status/stop/ownership probes have bounded
+response limits. An explicit stop escalates TERM to KILL only for the new
+runner's own CLI group, after verifying its captured parent/group/session and
+Linux start time; a missing or reused leader is refused. No process-name searches or global WSL
+termination are used. Already-running runners retain their original scripts.
+If descendants or ownership cannot be proven stopped (including a held
+execution lock), the app keeps the reservation and reports uncertainty rather
+than claiming success. Worktrees and supervised logs remain available.
+
+Output uses a fixed-size tail buffer, and native delivery keeps at most one
+unacknowledged browser message plus the latest pending snapshot per run. A busy
+browser cannot accumulate an unlimited output/dispatcher queue. Updates
+retain the latest terminal/status update while acknowledgements are missing;
+dashboard ready/init resynchronizes after navigation or reload. The initial
+dashboard response also reads authoritative run states.
+These changes do not cap CPU/RAM or automatically kill tasks; whole-system resource exhaustion
+can still affect the app and Windows.
+
+
 **Open in Azure DevOps** and external links use the same validated HTTPS
 launcher. If Windows cannot open its default browser, the action reports an
 error instead of closing the dashboard; check Windows' default HTTPS app or

@@ -116,7 +116,7 @@ public sealed partial class CopilotRunService : IAsyncDisposable
     public event Action<CopilotRunState>? Changed;
     public IReadOnlyList<CopilotRunState> Runs => List();
 
-    public Task<CopilotRunState> StartAsync(CopilotRunRequest request) => Task.FromResult(Start(request));
+    public Task<CopilotRunState> StartAsync(CopilotRunRequest request) => Task.Run(() => Start(request));
 
     public CopilotRunState Start(CopilotRunRequest request)
     {
@@ -131,44 +131,73 @@ public sealed partial class CopilotRunService : IAsyncDisposable
             var id = Guid.NewGuid().ToString("N");
             entry = new(new(id, request, "preparing", Notice(request) + "\n", null, null,
                 null, null, null, "not-created", DateTimeOffset.UtcNow, null) { SessionId = Guid.NewGuid().ToString() });
-            if (store is not null)
-            {
-                entry.DriverLease = store.Reserve(Save(entry), PrIdentity);
-            }
             activePrs.Add(PrIdentity(request));
-            initial = entry.State;
-            runs.Add(id, entry);
-            // Schedule outside the caller's UI turn; even fake transports may complete synchronously.
-            entry.Completion = Task.Run(() => ExecuteAsync(entry));
+        }
+        try
+        {
+            if (store is not null) entry.DriverLease = store.Reserve(Save(entry), PrIdentity);
+            lock (gate)
+            {
+                ObjectDisposedException.ThrowIf(disposed || stopping, this);
+                initial = entry.State;
+                runs.Add(entry.State.RunId, entry);
+                // Schedule outside the caller's UI turn; even fake transports may complete synchronously.
+                entry.Completion = Task.Run(() => ExecuteAsync(entry));
+            }
+        }
+        catch
+        {
+            entry.DriverLease?.Dispose();
+            lock (gate) activePrs.Remove(PrIdentity(request));
+            throw;
         }
         return initial;
     }
 
     public CopilotRunState? Get(string runId)
     {
-        lock (gate) return runs.TryGetValue(runId, out var entry) ? entry.State : null;
+        lock (gate)
+        {
+            if (!runs.TryGetValue(runId, out var entry)) return null;
+            CaptureOutput(entry);
+            return entry.State;
+        }
     }
 
     public IReadOnlyList<CopilotRunState> List()
     {
-        lock (gate) return runs.Values.Select(e => e.State).OrderByDescending(s => s.StartedAt).ToArray();
+        lock (gate)
+        {
+            foreach (var e in runs.Values) CaptureOutput(e);
+            return runs.Values.Select(e => e.State).OrderByDescending(s => s.StartedAt).ToArray();
+        }
     }
 
-    public async Task<CopilotRunState?> CancelAsync(string runId)
+    public Task<CopilotRunState?> CancelAsync(string runId)
+    {
+        lock (gate)
+        {
+            if (!runs.TryGetValue(runId, out var entry)) return Task.FromResult<CopilotRunState?>(null);
+            if (entry.StopWork is null || entry.StopWork.IsCompleted)
+                entry.StopWork = Task.Run(() => CancelCoreAsync(runId));
+            return entry.StopWork;
+        }
+    }
+
+    async Task<CopilotRunState?> CancelCoreAsync(string runId)
     {
         Entry? entry;
         lock (gate)
         {
             if (!runs.TryGetValue(runId, out entry)) return null;
-            if (store is not null) store.RequestCancel(runId);
-            if (entry.State.IsActive)
-            {
-                Update(entry, s => s with { Status = "cancelling" });
-                entry.Cancellation.Cancel();
-            }
         }
+        // Signal first: neither durable IO nor output/notification locks may delay transport cancellation.
+        var wasActive = entry.State.IsActive;
+        if (wasActive) SignalCancellation(entry, entry.Cancellation);
+        Update(entry, s => s.IsActive ? s with { Status = "cancelling" } : s);
+        if (store is not null) store.RequestCancel(runId);
         await entry.Completion.ConfigureAwait(false);
-        if (store is not null && entry.State.Status == "needs-attention")
+        if (store is not null && !wasActive && (entry.State.Status == "needs-attention" || entry.State.MayBeRunning || entry.UncertainStop))
         {
             entry.DriverLease ??= store.TryLease(entry.State.RunId);
             if (entry.DriverLease is null)
@@ -180,9 +209,11 @@ public sealed partial class CopilotRunService : IAsyncDisposable
                 entry.Environment = latest.Environment;
                 entry.RunDirectory = latest.RunDirectory;
                 entry.LaunchIntent = latest.LaunchIntent;
+                entry.TaskConfirmedStopped = latest.TaskConfirmedStopped;
                 entry.TaskIdentity = latest.TaskIdentity;
-                Update(entry, s => latest.State with { Output = s.Output });
-                if (latest.State.Status is "completed" or "cancelled" or "failed")
+                Update(entry, s => latest.State with { Request = s.Request, Output = s.Output });
+                if ((latest.State.Status is "completed" or "cancelled" or "failed") && !latest.State.MayBeRunning &&
+                    (!latest.LaunchIntent || latest.TaskConfirmedStopped))
                 {
                     lock (gate) activePrs.Remove(PrIdentity(entry.State.Request));
                 }
@@ -199,6 +230,8 @@ public sealed partial class CopilotRunService : IAsyncDisposable
                         throw new RunSetupException("Run liveness is uncertain; cancellation cannot safely release its reservation.");
                     await FinishRecoveredAsync(entry, "cancelled", task.ExitCode).ConfigureAwait(false);
                 }
+                if (!entry.State.MayBeRunning && (!entry.LaunchIntent || entry.TaskConfirmedStopped))
+                    lock (gate) entry.UncertainStop = false;
             }
             catch (Exception ex)
             {
@@ -226,8 +259,8 @@ public sealed partial class CopilotRunService : IAsyncDisposable
         {
             if (disposed) return runs.Values.Select(e => e.State).ToArray();
             pending = runs.Values.Where(e => e.State.IsActive || e.UncertainStop || e.State.MayBeRunning).ToArray();
-            foreach (var e in pending.Where(e => e.State.IsActive)) e.Cancellation.Cancel();
         }
+        foreach (var e in pending.Where(e => e.State.IsActive)) SignalCancellation(e, e.Cancellation);
         await Task.WhenAll(pending.Select(e => e.Completion)).ConfigureAwait(false);
         foreach (var e in pending.Where(e => e.UncertainStop || e.State.MayBeRunning))
         {
@@ -274,7 +307,7 @@ public sealed partial class CopilotRunService : IAsyncDisposable
         {
             if (disposed) return ValueTask.CompletedTask;
             stopping = true;
-            if (disposal is null || disposal.IsFaulted) disposal = DisposeCoreAsync();
+            if (disposal is null || disposal.IsFaulted) disposal = Task.Run(DisposeCoreAsync);
             return new(disposal);
         }
     }
@@ -285,12 +318,9 @@ public sealed partial class CopilotRunService : IAsyncDisposable
         lock (gate)
         {
             pending = runs.Values.ToArray();
-            foreach (var e in pending)
-            {
-                e.Detaching = true;
-                e.DetachCancellation.Cancel();
-            }
+            foreach (var e in pending) e.Detaching = true;
         }
+        foreach (var e in pending) SignalCancellation(e, e.DetachCancellation);
         await Task.WhenAll(pending.Select(e => e.Completion)).ConfigureAwait(false);
         await notifications.DisposeAsync().ConfigureAwait(false);
         lock (gate)
@@ -496,11 +526,50 @@ public sealed partial class CopilotRunService : IAsyncDisposable
         }
     }
 
-    Task<CopilotProcessResult> Invoke(string operation, string? distribution, string script, IReadOnlyList<string> arguments,
-        string? input = null, Action<string>? stdout = null, Action<string>? stderr = null, CancellationToken token = default) =>
-        transport.ExecuteAsync(new(operation, string.IsNullOrWhiteSpace(distribution) ? null : distribution,
+    async Task<CopilotProcessResult> Invoke(string operation, string? distribution, string script, IReadOnlyList<string> arguments,
+        string? input = null, Action<string>? stdout = null, Action<string>? stderr = null, CancellationToken token = default)
+    {
+        var deadline = CancellationTokenSource.CreateLinkedTokenSource(token);
+        if (operation != "follow")
+            deadline.CancelAfter(TimeSpan.FromSeconds(operation is "stop" or "status" or "verify-run" ? 10 : 125));
+        var cancellation = deadline.Token;
+        var acceptingOutput = 1;
+        // A disconnected transport must not hold cancellation hostage or deliver late output into a detached run.
+        var work = Task.Run(() => transport.ExecuteAsync(new(operation, string.IsNullOrWhiteSpace(distribution) ? null : distribution,
             (operation == "preflight" ? PreflightDiagnosticsScript + "\n" : "") +
-            EnvironmentScript + "\n" + script, arguments, input), stdout, stderr, token);
+            (operation is "status" or "stop" ? "set -euo pipefail\nexport NO_COLOR=1 TERM=dumb" : EnvironmentScript) + "\n" + script, arguments, input),
+            stdout is null ? null : text => { if (Volatile.Read(ref acceptingOutput) != 0 && !token.IsCancellationRequested && !cancellation.IsCancellationRequested) stdout(text); },
+            stderr is null ? null : text => { if (Volatile.Read(ref acceptingOutput) != 0 && !token.IsCancellationRequested && !cancellation.IsCancellationRequested) stderr(text); }, cancellation));
+        try { return await work.WaitAsync(cancellation).WaitAsync(token).ConfigureAwait(false); }
+        catch (OperationCanceledException)
+        {
+            _ = work.ContinueWith(t => _ = t.Exception, CancellationToken.None,
+                TaskContinuationOptions.OnlyOnFaulted | TaskContinuationOptions.ExecuteSynchronously, TaskScheduler.Default);
+            if (token.IsCancellationRequested) throw;
+            throw new RunSetupException($"The {operation} transport exceeded its response limit. Task liveness is unconfirmed; work and its reservation are preserved.");
+        }
+        finally
+        {
+            Volatile.Write(ref acceptingOutput, 0);
+            if (token.IsCancellationRequested)
+            {
+                // The independent waiter may finish before linked callbacks run. Keep their source alive until they finish.
+                _ = deadline.CancelAsync().ContinueWith(t => { _ = t.Exception; deadline.Dispose(); },
+                    CancellationToken.None, TaskContinuationOptions.ExecuteSynchronously, TaskScheduler.Default);
+            }
+            else deadline.Dispose();
+        }
+    }
+
+    void SignalCancellation(Entry entry, CancellationTokenSource source)
+    {
+        _ = source.CancelAsync().ContinueWith(t =>
+        {
+            _ = t.Exception;
+            Update(entry, s => s with { Error = (s.Error is null ? "" : s.Error + "\n") +
+                "An output transport cancellation callback failed. Only verified owned-task status establishes whether the task stopped." });
+        }, CancellationToken.None, TaskContinuationOptions.OnlyOnFaulted, TaskScheduler.Default);
+    }
 
     internal static void RequirePreflightSuccess(CopilotProcessResult result)
     {
@@ -711,24 +780,48 @@ public sealed partial class CopilotRunService : IAsyncDisposable
 
     void Update(Entry e, Func<CopilotRunState, CopilotRunState> update)
     {
-        lock (gate) { e.State = update(e.State); e.Dirty = true; Persist(e); }
+        lock (e.PersistenceGate)
+        {
+            CopilotRunState next;
+            SavedRun saved;
+            lock (gate) { next = update(e.State); saved = Save(e, next); }
+            if (store is not null && e.DriverLease is not null) store.Write(saved);
+            lock (gate)
+            {
+                e.State = next with { Output = e.State.Output, OutputOffset = e.State.OutputOffset };
+                e.Dirty = true;
+            }
+        }
     }
 
     void Append(Entry e, string text, bool stderr)
     {
-        lock (gate)
+        lock (e.OutputGate)
         {
+            if (e.Detaching || e.Cancellation.IsCancellationRequested) return;
             var clean = (stderr ? e.StderrFilter : e.StdoutFilter).Filter(text);
             if (clean.Length == 0) return;
-            var output = e.State.Output + clean;
-            if (output.Length > MaxOutputCharacters)
+            e.Output.Append(clean);
+            e.OutputOffset += clean.Length;
+            e.OutputDirty = true;
+        }
+    }
+
+    static void CaptureOutput(Entry e)
+    {
+        lock (e.OutputGate)
+        {
+            if (!e.OutputDirty) return;
+            var output = e.Output.ToString();
+            if (e.Output.Truncated)
             {
                 const string prefix = "[Earlier output truncated]\n";
-                var start = output.Length - MaxOutputCharacters + prefix.Length;
-                if (start < output.Length && char.IsLowSurrogate(output[start])) start++;
+                var start = prefix.Length;
+                if (char.IsLowSurrogate(output[start])) start++;
                 output = prefix + output[start..];
             }
-            e.State = e.State with { Output = output, OutputOffset = e.State.OutputOffset + clean.Length };
+            e.State = e.State with { Output = output, OutputOffset = e.OutputOffset };
+            e.OutputDirty = false;
             e.Dirty = true;
         }
     }
@@ -740,6 +833,7 @@ public sealed partial class CopilotRunService : IAsyncDisposable
             CopilotRunState[] changed;
             lock (gate)
             {
+                foreach (var e in runs.Values) CaptureOutput(e);
                 changed = runs.Values.Where(e => e.Dirty).Select(e => { e.Dirty = false; return e.State; }).ToArray();
             }
             foreach (var state in changed)
@@ -755,7 +849,12 @@ public sealed partial class CopilotRunService : IAsyncDisposable
         public readonly CancellationTokenSource Cancellation = new();
         public readonly CancellationTokenSource DetachCancellation = new();
         public readonly TerminalFilter StdoutFilter = new(), StderrFilter = new();
+        public readonly object OutputGate = new(), PersistenceGate = new();
+        public readonly OutputTail Output = new(state.Output);
+        public long OutputOffset = state.OutputOffset;
+        public bool OutputDirty;
         public Task Completion = Task.CompletedTask;
+        public Task<CopilotRunState?>? StopWork;
         public string TaskName => "ado-prview-" + State.RunId;
         public string? RunDirectory;
         public EnvironmentInfo? Environment;
@@ -770,6 +869,37 @@ public sealed partial class CopilotRunService : IAsyncDisposable
     internal sealed record EnvironmentInfo(string Distribution, string Root, string CommonDirectory, string Copilot,
         string Bgtask, string Help, string Remote, string RemoteHash, string Home, string CopilotHome, string? PushHash = null);
     sealed class RunSetupException(string message) : Exception(message);
+
+    sealed class OutputTail
+    {
+        readonly char[] buffer = new char[MaxOutputCharacters];
+        int start, count;
+        public bool Truncated { get; private set; }
+        public OutputTail(string initial) => Append(initial);
+        public void Append(string text)
+        {
+            Truncated |= text.Length > buffer.Length - count;
+            if (text.Length >= buffer.Length)
+            {
+                text.AsSpan(text.Length - buffer.Length).CopyTo(buffer);
+                start = 0; count = buffer.Length;
+                return;
+            }
+            var end = (start + count) % buffer.Length;
+            var first = Math.Min(text.Length, buffer.Length - end);
+            text.AsSpan(0, first).CopyTo(buffer.AsSpan(end));
+            text.AsSpan(first).CopyTo(buffer);
+            var overflow = Math.Max(0, count + text.Length - buffer.Length);
+            start = (start + overflow) % buffer.Length;
+            count = Math.Min(buffer.Length, count + text.Length);
+        }
+        public override string ToString() => string.Create(count, this, (span, tail) =>
+        {
+            var first = Math.Min(tail.count, tail.buffer.Length - tail.start);
+            tail.buffer.AsSpan(tail.start, first).CopyTo(span);
+            tail.buffer.AsSpan(0, tail.count - first).CopyTo(span[first..]);
+        });
+    }
 
     sealed class TerminalFilter
     {
@@ -972,14 +1102,38 @@ public sealed partial class CopilotRunService : IAsyncDisposable
         unset COPILOT_ALLOW_ALL
         export COPILOT_ASSISTED_APPROVAL=false NO_COLOR=1 TERM=dumb
         set +e
-        child=""; interrupted=0
+        child=""; child_identity=""; interrupted=0
+        read_cli_identity() {
+          local stat fields
+          [[ -n "$child" && -r "/proc/$child/stat" ]] || return 1
+          IFS= read -r stat < "/proc/$child/stat" || return 1
+          read -ra fields <<< "${stat##*) }"
+          [[ "${fields[1]-}" == "$$" && "${fields[2]-}" == "$child" && "${fields[3]-}" == "$child" && -n "${fields[19]-}" ]] || return 1
+          printf '%s:%s:%s:%s' "${fields[1]}" "${fields[2]}" "${fields[3]}" "${fields[19]}"
+        }
+        owns_cli_group() {
+          [[ -n "$child_identity" && "$(read_cli_identity)" == "$child_identity" ]]
+        }
         stop_cli() {
           interrupted=143
-          if [[ -n "$child" ]]; then kill -TERM -- "-$child" 2>/dev/null || true; fi
+          trap '' TERM INT
+          # Refuse PID reuse or a missing leader; the execution lock must still prove every descendant stopped.
+          if owns_cli_group; then
+            kill -TERM -- "-$child" 2>/dev/null || true
+            for attempt in {1..10}; do
+              if ! owns_cli_group; then break; fi
+              sleep 0.1
+            done
+            if owns_cli_group; then kill -KILL -- "-$child" 2>/dev/null || true; fi
+          fi
         }
         trap stop_cli TERM INT
         setsid "$cli" --stream on --no-color --no-ask-user --yolo "${sessionargs[@]}" "${denies[@]}" <&3 &
         child=$!
+        for attempt in {1..10}; do
+          child_identity="$(read_cli_identity)" && break
+          sleep 0.01
+        done
         wait "$child"; code=$?
         if [[ "$interrupted" != 0 ]]; then wait "$child"; code="$interrupted"; fi
         trap - TERM INT
@@ -1062,11 +1216,18 @@ public sealed class WslCopilotRunTransport : ICopilotRunTransport
             "export ADO_PRVIEW_BASH_ENV=\"${BASH_ENV-}\"; unset BASH_ENV; exec \"$@\"", "ado-prview-env" })
             info.ArgumentList.Add(arg);
         if (request.Operation != "follow")
-            foreach (var arg in new[] { "timeout", "--signal=TERM", "--kill-after=5s", "120s" }) info.ArgumentList.Add(arg);
+            foreach (var arg in new[] { "timeout", "--signal=TERM", "--kill-after=5s",
+                request.Operation is "stop" or "status" or "verify-run" ? "10s" : "120s" }) info.ArgumentList.Add(arg);
         // Raw string literals inherit the Windows source file's line endings, unlike prompt stdin.
         foreach (var arg in new[] { "bash", "--noprofile", "--norc", "-c", request.Script.Replace("\r\n", "\n"), "ado-prview" })
             info.ArgumentList.Add(arg);
         foreach (var arg in request.Arguments) info.ArgumentList.Add(arg);
+        return await ExecuteProcessAsync(info, request.StandardInput, stdout, stderr, cancellationToken).ConfigureAwait(false);
+    }
+
+    internal static async Task<CopilotProcessResult> ExecuteProcessAsync(ProcessStartInfo info, string? input,
+        Action<string>? stdout, Action<string>? stderr, CancellationToken cancellationToken)
+    {
         using var process = new Process { StartInfo = info };
         cancellationToken.ThrowIfCancellationRequested();
         process.Start();
@@ -1097,18 +1258,29 @@ public sealed class WslCopilotRunTransport : ICopilotRunTransport
         var errTask = Drain(process.StandardError, errors, stderr);
         try
         {
-            if (request.StandardInput is not null)
-                await process.StandardInput.WriteAsync(request.StandardInput.AsMemory(), cancellationToken).ConfigureAwait(false);
+            if (input is not null)
+                await process.StandardInput.WriteAsync(input.AsMemory(), cancellationToken).ConfigureAwait(false);
             process.StandardInput.Close();
             await process.WaitForExitAsync(cancellationToken).ConfigureAwait(false);
-            await Task.WhenAll(outTask, errTask).ConfigureAwait(false);
+            await Task.WhenAll(outTask, errTask).WaitAsync(TimeSpan.FromSeconds(5), cancellationToken).ConfigureAwait(false);
             return new(process.ExitCode, output.ToString(), errors.ToString());
         }
         catch
         {
             try { if (!process.HasExited) process.Kill(entireProcessTree: true); } catch (InvalidOperationException) { }
-            await process.WaitForExitAsync(CancellationToken.None).ConfigureAwait(false);
-            await Task.WhenAll(outTask, errTask).ConfigureAwait(false);
+            try
+            {
+                await process.WaitForExitAsync(CancellationToken.None).WaitAsync(TimeSpan.FromSeconds(5)).ConfigureAwait(false);
+                await Task.WhenAll(outTask, errTask).WaitAsync(TimeSpan.FromSeconds(5)).ConfigureAwait(false);
+            }
+            catch (TimeoutException)
+            {
+                process.StandardOutput.Dispose();
+                process.StandardError.Dispose();
+                _ = Task.WhenAll(outTask, errTask).ContinueWith(t => _ = t.Exception, CancellationToken.None,
+                    TaskContinuationOptions.OnlyOnFaulted | TaskContinuationOptions.ExecuteSynchronously, TaskScheduler.Default);
+                throw new IOException("The owned WSL transport did not close within its cleanup limit. The supervised task stop remains unconfirmed.");
+            }
             throw;
         }
     }

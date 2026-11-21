@@ -49,6 +49,27 @@ function setup(search = '?mock=1') {
   return { hooks, pr, window, elements, dialogs, document, context, element };
 }
 
+test('native Fix delivery is acknowledged even when rendering rejects data; only native sequenced events get acknowledgements', () => {
+  const { hooks, sent } = setup('', true);
+  hooks.onHostMessage({ event: 'copilotRun', data: null, deliveryId: 41 });
+  assert.equal(sent.at(-1).method, 'copilotRunAck');
+  assert.equal(sent.at(-1).params.deliveryId, 41);
+  const count = sent.length;
+  hooks.onHostMessage({ event: 'copilotRun', data: null });
+  assert.equal(sent.length, count);
+});
+
+test('a delayed pre-navigation Fix snapshot cannot overwrite newer initial output or terminal state', () => {
+  const { hooks, pr } = setup();
+  const current = { key: pr.key, runId: 'same-run', status: 'running', output: 'new output', outputOffset: 200 };
+  hooks.updateCopilotRun(current);
+  hooks.updateCopilotRun({ ...current, output: 'old output', outputOffset: 100 });
+  assert.equal(hooks.S.runs.get(current.runId).output, 'new output');
+  hooks.updateCopilotRun({ ...current, status: 'cancelled', mayBeRunning: false });
+  hooks.updateCopilotRun(current);
+  assert.equal(hooks.S.runs.get(current.runId).status, 'cancelled');
+});
+
 test('first video requires explicit Azure setup and missing az stays an actionable setup error without starting generation', async () => {
   const { hooks, pr, window, elements } = setup();
   hooks.S.settings.videoSpeech = null;

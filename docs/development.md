@@ -162,6 +162,45 @@ synthetic Windows failure and verifies the dashboard stays visible/responding.
 Browser row checks cover lost/uncertain process activity and failed action
 feedback with both normal and reduced motion.
 
+Focused Fix output/control checks use only fake transports, small synthetic
+output and disposable settings/history, without a model or live ADO requests:
+
+```powershell
+$env:ADOPRVIEW_TEST_FILTER = 'Copilot'
+dotnet run --project tests\AdoPrView.Tests -c Release
+node --test --test-name-pattern='native Fix delivery|pre-navigation Fix|Copilot' tests\approval-ui.test.cjs
+Remove-Item Env:\ADOPRVIEW_TEST_FILTER
+```
+
+They cover bounded per-chunk allocations, a follower that ignores
+cancellation, stop/detach with retained output, uncertain owned liveness and
+browser acknowledgement/coalescing/disposal. The existing
+`ADOPRVIEW_TEST_NATIVE_ACTION=1` opt-in also enables `Native Copilot`: a real
+disposable WPF/WebView2 window with withheld output acknowledgements and a fake
+hung follower, stopped through a native button. This bounded synthetic check is
+not an installed-app or live WSL/model end-to-end test. Do not run browser or WSL
+opt-ins during unresolved shared-machine overload.
+
+The smaller kernel-control opt-in executes the exact production runner in an
+explicitly selected, already-responsive WSL distribution:
+
+```powershell
+$env:ADOPRVIEW_TEST_FILTER = 'Copilot kernel'
+$env:ADOPRVIEW_TEST_WSL_CONTROL = '1'
+$env:ADOPRVIEW_TEST_WSL_DISTRO = 'Ubuntu'
+dotnet run --project tests\AdoPrView.Tests -c Release
+Remove-Item Env:\ADOPRVIEW_TEST_FILTER, Env:\ADOPRVIEW_TEST_WSL_CONTROL, Env:\ADOPRVIEW_TEST_WSL_DISTRO
+```
+
+It requires Bash, Python 3, `flock`, `setsid` and `timeout`. A disposable sleeping
+CLI and its descendant ignore TERM so the runner must escalate only its owned
+group to KILL. The fixture checks the real exit receipt, free execution lock,
+preserved synthetic work/logs, a held orphan-descendant lock and refusal of a
+foreign ownership receipt. It has a 20-second Linux deadline, a 25-second host
+cancellation deadline and identity-checked cleanup of only its recorded helpers.
+It never invokes Copilot, bgtask, ADO, installed app state or existing user jobs;
+it does not establish live supervisor integration or installed-app E2E.
+
 Direct reviewer approval has a focused offline native suite:
 
 ```powershell

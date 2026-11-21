@@ -23,6 +23,28 @@ static class CopilotRecoveryTests
 
     public static async Task Run(Func<string, Func<Task>, Task> test)
     {
+        await test("Copilot failed uncertain cancellation retains its cross-dashboard reservation and exact-run retry proves stop", async () =>
+        {
+            using var f = new Fixture();
+            await using var service = f.Service();
+            var run = await service.StartAsync(Request());
+            await Wait(service, run.RunId, s => s.Output.Contains("FAKE-READY"));
+            f.Transport.Failure = "stop";
+            try { await service.CancelAsync(run.Key, run.RunId); } catch (InvalidOperationException) { }
+            Check(service.Get(run.RunId)!.MayBeRunning && f.Store.Load().Single().Saved!.State.MayBeRunning &&
+                !f.Store.Load().Single().Saved!.TaskConfirmedStopped, "Failed stop manufactured terminal proof");
+            await using (var other = f.Service())
+            {
+                try { await other.StartAsync(Request()); throw new Exception("Failed-but-live record lost its durable reservation"); }
+                catch (InvalidOperationException) { }
+            }
+            f.Transport.Failure = null;
+            var stopped = await service.CancelAsync(run.Key, run.RunId);
+            Check(stopped is { Status: "cancelled", MayBeRunning: false, WorktreeRetained: true } &&
+                f.Store.Load().Single().Saved!.TaskConfirmedStopped &&
+                stopped.Request.Prompt == run.Request.Prompt,
+                "Exact-run retry did not prove stop or mutated the captured prompt/suffix");
+        });
         await test("Copilot durable restart reattaches output without a second launch and cancel remains identity-bound", async () =>
         {
             using var f = new Fixture();

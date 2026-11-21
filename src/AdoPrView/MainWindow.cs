@@ -35,6 +35,7 @@ public sealed class MainWindow : Window, IApprovalUi
     readonly Dictionary<string, Lane> _pendingNotices = new(StringComparer.OrdinalIgnoreCase);
     readonly HashSet<string> _failedNativeActions = new(StringComparer.Ordinal);
     Bridge? _bridge;
+    CopilotRunDelivery? _copilotDelivery;
     CancellationTokenSource _wake = new();
     bool _uiReady;
     bool _quitting;
@@ -106,6 +107,20 @@ public sealed class MainWindow : Window, IApprovalUi
         var menu = new System.Windows.Forms.ContextMenuStrip();
         menu.Items.Add("Open", null, (_, _) => ShowFromTray());
         menu.Items.Add("Refresh now", null, (_, _) => Kick(reorder: true));
+        var stopMenu = new System.Windows.Forms.ToolStripMenuItem("Stop Copilot run");
+        stopMenu.DropDownOpening += (_, _) =>
+        {
+            stopMenu.DropDownItems.Clear();
+            foreach (var run in _copilot.Runs.Where(r => r.IsActive || r.MayBeRunning || r.Status == "needs-attention"))
+            {
+                var selected = run;
+                stopMenu.DropDownItems.Add($"!{run.Id} {run.Repo} ({run.Status})", null,
+                    (_, _) => _ = StopCopilotFromNativeAsync(selected));
+            }
+            if (stopMenu.DropDownItems.Count == 0)
+                stopMenu.DropDownItems.Add(new System.Windows.Forms.ToolStripMenuItem("No owned runs to stop") { Enabled = false });
+        };
+        menu.Items.Add(stopMenu);
         menu.Items.Add("Exit", null, (_, _) => { _shutdownReason = "tray-exit"; _quitting = true; Close(); });
         _tray.ContextMenuStrip = menu;
 
@@ -134,6 +149,9 @@ public sealed class MainWindow : Window, IApprovalUi
             _diagnostics.Record("shutdown-started", _shutdownReason);
             try
             {
+                if (_copilotDelivery is not null) await _copilotDelivery.DisposeAsync();
+                // Detach Fix output first; other service teardown must not delay releasing its transport.
+                await _copilot.DisposeAsync();
                 _speechSetup?.Cancel();
                 if (_speechSetupWork is not null)
                     try { await _speechSetupWork; } catch (Exception ex) { _diagnostics.Record("speech-setup-stopped", ex.Message); }
@@ -143,7 +161,6 @@ public sealed class MainWindow : Window, IApprovalUi
                 _speech.Dispose();
                 await _explain.DisposeAsync();
                 await _investigation.DisposeAsync();
-                await _copilot.DisposeAsync();
                 _pop.Dispose();
                 _shutdownComplete = true;
                 _tray.Visible = false;
@@ -197,8 +214,11 @@ public sealed class MainWindow : Window, IApprovalUi
         core.NewWindowRequested += (_, e) => _ = NativeActions.OpenNewWindowAsync(e, ex => ReportNativeActionFailure("open-browser", ex));
 
         _bridge = new Bridge(_prs, _store, PostAsync, Kick, _approval, this, HandleCopilotAsync, HandlePopAsync,
-            HandleExplainAsync, themeChanged: ApplyTheme, videoAction: HandleVideoAsync, investigationAction: HandleInvestigationAsync);
-        _copilot.Changed += run => _ = RunNativeActionAsync("copilot-state-delivery", () => _bridge.PushCopilotRunAsync(RunForUi(run)));
+            HandleExplainAsync, themeChanged: ApplyTheme, videoAction: HandleVideoAsync, investigationAction: HandleInvestigationAsync,
+            copilotAcknowledged: id => _copilotDelivery?.Acknowledge(id));
+        _copilotDelivery = new((run, id) => _bridge.PushCopilotRunAsync(RunForUi(run), id),
+            ex => ReportNativeActionFailure("copilot-state-delivery", ex), waitForReady: true);
+        _copilot.Changed += _copilotDelivery.Offer;
         _explain.Changed += state => _ = RunNativeActionAsync("explanation-state-delivery", () => _bridge.PushExplanationAsync(state));
         _investigation.Changed += state => _ = RunNativeActionAsync("investigation-state-delivery", () => _bridge.PushInvestigationAsync(state));
         _video.Changed += state => _ = RunNativeActionAsync("video-state-delivery", () => _bridge.PushVideoAsync(state));
@@ -208,7 +228,7 @@ public sealed class MainWindow : Window, IApprovalUi
             _ = RunNativeActionAsync("dashboard-action", async () =>
             {
                 var msg = e.TryGetWebMessageAsString();
-                if (msg == "ready") { _uiReady = true; return; }
+                if (msg == "ready") { _uiReady = true; _copilotDelivery.Ready(); return; }
                 await _bridge.HandleAsync(msg);
             });
         };
@@ -324,7 +344,6 @@ public sealed class MainWindow : Window, IApprovalUi
 
     async Task<object> HandleCopilotAsync(string action, JsonObject parameters)
     {
-        if (!_opts.Mock) await _copilot.RecoverAsync();
         if (action == "listCopilot") return _copilot.Runs.Select(RunForUi).ToArray();
         var key = parameters["key"]?.GetValue<string>() ?? throw new ArgumentException("Missing PR key.");
         if (action == "cancelCopilot")
@@ -334,6 +353,7 @@ public sealed class MainWindow : Window, IApprovalUi
             return RunForUi(state);
         }
         if (action != "startCopilot") throw new ArgumentException("Unknown Copilot action.");
+        if (!_opts.Mock) await _copilot.RecoverAsync();
         if (!_copilotStarting.TryAdd(key, 0))
             throw new InvalidOperationException("A Copilot run is already being prepared for this PR.");
         try
@@ -354,6 +374,21 @@ public sealed class MainWindow : Window, IApprovalUi
 
     public Task<T> OnUiThreadAsync<T>(Func<Window?, T> action) => Dispatcher.InvokeAsync(() => action(this)).Task;
 
+    async Task StopCopilotFromNativeAsync(CopilotRunState run)
+    {
+        try
+        {
+            var state = await _copilot.CancelAsync(run.Key, run.RunId);
+            var confirmed = state is { MayBeRunning: false, Status: "completed" or "cancelled" or "failed" };
+            MessageBox.Show(this, confirmed ? "The owned run is confirmed inactive. " +
+                (state!.WorktreeRetained ? "Its worktree is retained. " : "See its recorded worktree disposition. ") +
+                "Its supervised logs are preserved." :
+                "Stop could not be confirmed. The run may still be active; its work and PR reservation are preserved.",
+                "Copilot stop", MessageBoxButton.OK, confirmed ? MessageBoxImage.Information : MessageBoxImage.Warning);
+        }
+        catch (Exception ex) { ReportNativeActionFailure("copilot-native-stop", ex); }
+    }
+
     async Task PostAsync(string json)
     {
         await Dispatcher.InvokeAsync(() =>
@@ -361,7 +396,7 @@ public sealed class MainWindow : Window, IApprovalUi
             if (_shutdownComplete || Dispatcher.HasShutdownStarted) return;
             if (_web.CoreWebView2 is not { } core) throw new InvalidOperationException("The dashboard browser is not available. Reopen the dashboard before retrying the action.");
             core.PostWebMessageAsJson(json);
-        });
+        }, System.Windows.Threading.DispatcherPriority.Background);
     }
 
     Task RunNativeActionAsync(string action, Func<Task> work) => NativeActions.RunAsync(async () =>
@@ -377,10 +412,10 @@ public sealed class MainWindow : Window, IApprovalUi
                 if (!_failedNativeActions.Add(action)) return;
         _diagnostics.Record("native-action-failed", action, ex);
         if (_shutdownComplete || Dispatcher.HasShutdownStarted) return;
-        Dispatcher.Invoke(() => MessageBox.Show(this,
+        _ = Dispatcher.BeginInvoke(new Action(() => MessageBox.Show(this,
             $"The {action.Replace('-', ' ')} action could not complete: {ex.Message}\n\n" +
             "The dashboard has not been closed. Check the action's status before retrying; any owned Copilot task may still be running.",
-            "ADO PR View action failed", MessageBoxButton.OK, MessageBoxImage.Error));
+            "ADO PR View action failed", MessageBoxButton.OK, MessageBoxImage.Error)));
     }
 
     void OnSnapshot(Snapshot s)
