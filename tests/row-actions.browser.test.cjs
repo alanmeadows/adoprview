@@ -118,6 +118,24 @@ test('Additional Fix fields are independently editable and restored in the real 
     await click('[data-dact="save"]');
     assert.equal(await evaluate('window.fixSaved[2].additionalTriageInstructions'), '');
     assert.equal(await evaluate('window.fixSaved[2].triageInstructions'), ask);
+    for (const original of ['\n  CRLF guidance\r\nverbatim\n', '\r  CR guidance\rverbatim\r']) {
+      const normalized = original.replace(/\r\n?/g, '\n');
+      await evaluate(`S.settings.additionalTriageInstructions=${JSON.stringify(original)};renderDrawer();`);
+      assert.equal(await evaluate("document.querySelector('#additionalTriageInstructions').value"), normalized);
+      await click('[data-dact="save"]');
+      assert.equal(await evaluate('window.fixSaved.at(-1).additionalTriageInstructions'), original);
+      await evaluate('closeDrawer();S.settings=structuredClone(window.fixSaved.at(-1));');
+      await click('#settingsBtn');
+      assert.equal(await evaluate("document.querySelector('#additionalTriageInstructions').value"), normalized);
+      await click('#additionalTriageInstructions');
+      await send('Input.dispatchKeyEvent', { type: 'keyDown', key: 'a', code: 'KeyA', windowsVirtualKeyCode: 65, modifiers: 2 });
+      await send('Input.dispatchKeyEvent', { type: 'keyUp', key: 'a', code: 'KeyA', windowsVirtualKeyCode: 65, modifiers: 2 });
+      const edited = normalized + 'EDITED';
+      await send('Input.insertText', { text: edited });
+      await click('[data-dact="save"]');
+      assert.equal(await evaluate('window.fixSaved.at(-1).additionalTriageInstructions'), edited);
+      assert.equal(await evaluate('window.fixSaved.at(-1).triageInstructions'), ask);
+    }
     assert.equal(await evaluate('window.fixExisting.every(run=>S.runs.get(run.runId)===run)'), true);
     await send('Browser.close', {}, false);
   } finally {

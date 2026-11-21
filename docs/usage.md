@@ -511,6 +511,7 @@ The generated Fix/Copy prompt is configurable in settings:
   includes it once after the captured source and verified publish target.
   Ask, additional guidance, skill and reviewer choices are captured together
   before asynchronous source/log reads; later settings saves apply to future prompts.
+  Saving an unchanged drawer preserves the stored guidance's original line endings.
   Copy prompt and Fix reject NUL or effective prompts over 1,048,576 characters.
   Launch also checks the complete prompt after adding verified publication context;
   instructions are never silently truncated.

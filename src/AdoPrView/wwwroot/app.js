@@ -1541,7 +1541,9 @@ async function onDrawerAction(act, el) {
         S.settings = await rpc('unhide', { key: el.dataset.key });
         S.hideUndo = S.hideUndo.filter((h) => h.key.toLowerCase() !== el.dataset.key.toLowerCase());
         break;
-      case 'save':
+      case 'save': {
+        const additionalInstructions = $('#additionalTriageInstructions').value;
+        const storedAdditionalInstructions = S.settings.additionalTriageInstructions;
         await saveSettings({
           refreshSeconds: +$('#refreshSeconds').value || 120,
           mergeCheckMinutes: +$('#mergeCheckMinutes').value || 10,
@@ -1550,12 +1552,15 @@ async function onDrawerAction(act, el) {
           ignoreDrafts: $('#ignoreDrafts').checked,
           autoComplete: { mergeStrategy: $('#mergeStrategy').value, deleteSourceBranch: $('#deleteSourceBranch').checked, transitionWorkItems: $('#transitionWorkItems').checked },
           triageInstructions: $('#triageInstructions').value,
-          additionalTriageInstructions: $('#additionalTriageInstructions').value,
+          additionalTriageInstructions: typeof storedAdditionalInstructions === 'string' &&
+            additionalInstructions === storedAdditionalInstructions.replace(/\r\n?/g, '\n')
+            ? storedAdditionalInstructions : additionalInstructions,
           wslDistro: $('#wslDistro').value.trim(),
           wslRepoDirectories: Object.fromEntries([...document.querySelectorAll('[data-wsl-repo]')].map(e => [e.dataset.wslRepo, e.value.trim()]).filter(([, value]) => value)),
         });
         toast('Settings saved');
         break;
+      }
     }
   } catch (e) {
     if (S.discovered === 'loading') S.discovered = null;
