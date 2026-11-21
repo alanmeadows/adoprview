@@ -565,8 +565,18 @@ function rememberRunOutputAnchor(view) {
 function rememberRunOutput(view) {
   const el = view.element;
   if (!el.isConnected || !el.clientHeight) return;
-  if (el.scrollTop !== view.top) view.following = runOutputAtBottom(el);
-  if (runOutputSelected(el)) view.following = false;
+  const selected = runOutputSelected(el);
+  if (el.scrollTop !== view.top) {
+    view.following = runOutputAtBottom(el);
+    view.selectionPaused = selected && view.following;
+  }
+  if (selected) {
+    if (view.following) view.selectionPaused = true;
+    view.following = false;
+  } else {
+    if (view.selectionPaused && runOutputAtBottom(el)) view.following = true;
+    view.selectionPaused = false;
+  }
   view.top = el.scrollTop;
   view.left = el.scrollLeft;
   rememberRunOutputAnchor(view);
@@ -585,7 +595,15 @@ function captureRunOutputs() {
 
 function restoreRunOutputs(selection) {
   for (const card of document.querySelectorAll('.copilot-run')) syncRunOutput(card);
-  for (const id of S.runOutputs.keys()) if (!S.runs.has(id)) S.runOutputs.delete(id);
+  for (const [id, view] of S.runOutputs) {
+    if (!S.runs.has(id)) S.runOutputs.delete(id);
+    // Hiding a panel can clear selection without a deliberate return to the bottom.
+    else if (!view.element.isConnected) view.selectionPaused = false;
+  }
+  restoreRunOutputSelection(selection);
+}
+
+function restoreRunOutputSelection(selection) {
   if (selection?.anchor.isConnected && selection.focus.isConnected)
     window.getSelection().setBaseAndExtent(selection.anchor, selection.anchorOffset, selection.focus, selection.focusOffset);
 }
@@ -606,13 +624,19 @@ function syncRunOutput(card) {
     S.runOutputs.set(r.runId, view);
     output.addEventListener('scroll', () => rememberRunOutput(view));
     output.addEventListener('wheel', e => {
-      if (e.deltaY < 0 && output.scrollTop > 0) view.following = false;
-      else if (e.deltaY > 0 && runOutputAtBottom(output) && !runOutputSelected(output)) view.following = true;
+      if (e.deltaY < 0 && output.scrollTop > 0) { view.following = false; view.selectionPaused = false; }
+      else if (e.deltaY > 0 && runOutputAtBottom(output)) {
+        if (runOutputSelected(output)) view.selectionPaused = true;
+        else view.following = true;
+      }
     }, { passive: true });
     output.addEventListener('keydown', e => {
-      if (output.scrollTop > 0 && ['ArrowUp', 'PageUp', 'Home'].includes(e.key)) view.following = false;
+      if (output.scrollTop > 0 && ['ArrowUp', 'PageUp', 'Home'].includes(e.key)) { view.following = false; view.selectionPaused = false; }
       else if (!e.shiftKey && ['ArrowDown', 'PageDown', 'End'].includes(e.key) &&
-        runOutputAtBottom(output) && !runOutputSelected(output)) view.following = true;
+        runOutputAtBottom(output)) {
+        if (runOutputSelected(output)) view.selectionPaused = true;
+        else view.following = true;
+      }
     });
   } else if (view.element !== output) {
     output.replaceWith(view.element);
@@ -625,6 +649,7 @@ function syncRunOutput(card) {
   const newPrefix = text.startsWith(notice) ? notice.length : 0;
   const removed = r.outputOffset - view.offset + before.length - oldPrefix - (text.length - newPrefix);
   const retentionMoved = newPrefix && Number.isSafeInteger(removed) && removed > 0;
+  if (retentionMoved && !view.following) view.selectionPaused = false;
   if (text !== before || retentionMoved) {
     const node = output.firstChild;
     if (node?.nodeType === 3 && !retentionMoved && text.startsWith(before)) node.appendData(text.slice(before.length));
@@ -665,9 +690,10 @@ function syncRunOutput(card) {
   }
 }
 
+const runCardTitle = earlier => earlier ? 'Earlier run · Copilot in WSL' : 'Fix PR · Copilot in WSL';
 function renderRunCard(key, r = runForPr(key), earlier = false) {
   return `<div class="card copilot-run${earlier ? ' run-earlier' : ''}" data-run-key="${esc(key)}" data-run-id="${esc(r?.runId || '')}">
-    <h3><span class="grow">${earlier ? 'Earlier run · Copilot in WSL' : 'Fix PR · Copilot in WSL'}</span>
+    <h3><span class="grow">${runCardTitle(earlier)}</span>
       <button class="mini" data-act="cancelRun" data-run-id="${esc(r?.runId || '')}" ${runCancelable(r) ? '' : 'hidden'}>${svg('x')} Cancel run</button></h3>
     <div class="body">
       <p class="small">Starts in a separate PR worktree with --yolo: tools, paths and URLs are allowed without confirmation for this run, not globally. This is not a filesystem sandbox. New runs are told to commit validated fixes and ordinary-push them only to this PR's captured source branch; that limit is a prompt instruction, not enforced. Merge/PR-update command denies and the prompt's approval/policy boundaries remain; earlier runs keep their original no-push scope. Sign-in is required beforehand; this panel is noninteractive. Exit 0 does not verify the PR fix.</p>
@@ -720,10 +746,29 @@ function updateCopilotRun(r) {
   S.runs.set(r.runId, r);
   const previousSelection = old ? null : captureRunOutputs();
   syncCopilotButton(r.key);
-  // Stream only into this panel; never replace rows or move another click target.
-  const latest = runForPr(r.key)?.runId === r.runId;
-  const cards = [...document.querySelectorAll('.copilot-run')].filter(el => el.dataset.runKey === r.key &&
-    (el.dataset.runId === r.runId || (latest && !el.classList.contains('run-earlier'))));
+  // Stream only into this PR's panels; preserve controls while rows are in use.
+  const latestId = runForPr(r.key)?.runId, latest = latestId === r.runId;
+  const runCards = [...document.querySelectorAll('.copilot-run')].filter(el => el.dataset.runKey === r.key);
+  const main = runCards.find(el => !el.classList.contains('run-earlier'));
+  const promoted = runCards.find(el => el.dataset.runId === latestId);
+  if (main && promoted && main !== promoted && rowsInUse()) { S.rowsPending = true; renderStatus(); }
+  else if (main && promoted && main !== promoted) {
+    const selection = captureRunOutputs();
+    main.classList.add('run-earlier'); $('h3 .grow', main).textContent = runCardTitle(true);
+    promoted.classList.remove('run-earlier'); $('h3 .grow', promoted).textContent = runCardTitle(false);
+    main.before(promoted);
+    for (const card of [main, promoted]) {
+      const view = S.runOutputs.get(card.dataset.runId);
+      if (view) {
+        view.element.scrollTop = view.top;
+        view.element.scrollLeft = view.left;
+        view.top = view.element.scrollTop;
+      }
+    }
+    restoreRunOutputSelection(selection);
+  }
+  const cards = runCards.filter(el =>
+    (el.dataset.runId === r.runId || (latest && !promoted && !el.classList.contains('run-earlier'))));
   if (!cards.length) {
     renderRunShelf();
     if (!old) { renderRows(true); restoreRunOutputs(previousSelection); }

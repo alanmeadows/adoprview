@@ -1254,6 +1254,120 @@ test('real row hit testing and action identity across refreshes', { timeout: 900
       }
     });
 
+    await t.test('Fix output resumes after clearing a bottom selection but not after retention clamps it there', async () => {
+      await reset();
+      await evaluate(`{const key='sample-service-id:101',output='Selected bottom synthetic output\\n'.repeat(160);
+        S.runs.set('selection-resume-run',{...S.snap.prs.find(p=>p.key===key),runId:'selection-resume-run',
+          status:'running',output,outputOffset:output.length});S.expanded.add(key);render();
+        window.resumeElement=document.querySelector('[data-key="'+key+'"] .run-output');
+        window.resumeElement.scrollTop=400;
+        const node=window.resumeElement.firstChild;
+        window.getSelection().setBaseAndExtent(node,700,node,730);
+        window.resumeSelected=window.getSelection().toString();}`);
+      await frame();
+      await evaluate('window.resumeElement.scrollTop=window.resumeElement.scrollHeight-window.resumeElement.clientHeight');
+      await frame();
+      assert.equal(await evaluate('window.getSelection().toString()'), await evaluate('window.resumeSelected'));
+      await evaluate(`window.getSelection().removeAllRanges();
+        {const run=runForPr('sample-service-id:101'),extra='After clearing bottom selection\\n'.repeat(40);
+          updateCopilotRun({...run,output:run.output+extra,outputOffset:run.outputOffset+extra.length});}`);
+      await frame();
+      assert.ok(await evaluate('window.resumeElement.scrollHeight-window.resumeElement.clientHeight-window.resumeElement.scrollTop') <= 2,
+        'Clearing the selection after deliberately returning to bottom resumes following on the next append');
+      await evaluate(`{const node=window.resumeElement.firstChild;
+        window.getSelection().setBaseAndExtent(node,node.length-60,node,node.length-30);renderRows();}`);
+      await frame();
+      const beforeFilter = await evaluate('window.resumeElement.scrollTop');
+      await evaluate(`S.q='No matching synthetic PR';renderRows();S.q='';renderRows();`);
+      await frame();
+      await evaluate(`{const run=runForPr('sample-service-id:101'),extra='After hiding selected output\\n'.repeat(40);
+        updateCopilotRun({...run,output:run.output+extra,outputOffset:run.outputOffset+extra.length});}`);
+      await frame();
+      assert.equal(await evaluate('window.resumeElement.scrollTop'), beforeFilter,
+        'A filter clearing the browser selection preserves the paused reading intent');
+      await evaluate('window.resumeElement.scrollTop=window.resumeElement.scrollHeight-window.resumeElement.clientHeight');
+      await frame();
+      await evaluate(`{const node=window.resumeElement.firstChild;
+        window.getSelection().setBaseAndExtent(node,node.length-60,node,node.length-30);renderRows();}`);
+      await frame();
+      await evaluate(`{const run=runForPr('sample-service-id:101'),extra='Only a new retained beginning\\n';
+        updateCopilotRun({...run,output:'[Earlier output truncated]\\n'+extra,outputOffset:run.outputOffset+extra.length});}`);
+      await frame();
+      assert.equal(await evaluate('window.resumeElement.scrollTop'), 0);
+      await evaluate(`window.getSelection().removeAllRanges();
+        {const run=runForPr('sample-service-id:101'),extra='After selected anchor was lost\\n'.repeat(160);
+          updateCopilotRun({...run,output:run.output+extra,outputOffset:run.outputOffset+extra.length});}`);
+      await frame();
+      assert.equal(await evaluate('window.resumeElement.scrollTop'), 0,
+        'Losing the selected anchor and clamping to bottom must not count as a deliberate return to the tail');
+    });
+
+    await t.test('Fix output reconciles recovered run promotion and demotion before moving cached output', async () => {
+      for (const interacting of [false, true]) {
+        await reset();
+        await evaluate(`{const key='sample-service-id:101',pr=S.snap.prs.find(p=>p.key===key);
+          const older=Array.from({length:160},(_,n)=>'Older recovered synthetic line '+n+'\\n').join('');
+          const newer='Newer completed synthetic output\\n'.repeat(160);
+          S.runs.set('older-recovered-run',{...pr,runId:'older-recovered-run',status:'needs-attention',mayBeRunning:false,
+            startedAt:'2026-01-01T00:00:00Z',output:older,outputOffset:older.length});
+          S.runs.set('newer-completed-run',{...pr,runId:'newer-completed-run',status:'completed',mayBeRunning:false,
+            startedAt:'2026-01-02T00:00:00Z',output:newer,outputOffset:newer.length});
+          S.expanded.add(key);render();
+          window.promotionRow=document.querySelector('#rows [data-key="'+key+'"]');
+          window.promotionFix=window.promotionRow.querySelector('.row [data-act="triage"]');
+          window.olderOutput=window.promotionRow.querySelector('[data-run-id="older-recovered-run"] .run-output');
+          window.newerOutput=window.promotionRow.querySelector('[data-run-id="newer-completed-run"] .run-output');
+          window.olderOutput.scrollTop=400;window.newerOutput.scrollTop=700;
+          window.olderNode=window.olderOutput.firstChild;
+          window.olderReadingY=()=>{const range=document.createRange(),node=window.olderOutput.firstChild;
+            const start=node.data.indexOf('Older recovered synthetic line 30\\n');
+            range.setStart(node,start);range.setEnd(node,start+1);
+            return range.getBoundingClientRect().top-window.olderOutput.getBoundingClientRect().top;};
+          const start=window.olderNode.data.indexOf('Older recovered synthetic line 30\\n');
+          window.getSelection().setBaseAndExtent(window.olderNode,start,window.olderNode,start+25);
+          window.promotionSelected=window.getSelection().toString();}`);
+        await frame();
+        const readingY = await evaluate('window.olderReadingY()');
+        if (interacting) {
+          const p = await point('sample-service-id:101', '.row [data-act="triage"]');
+          await move(p.x, p.y);
+        }
+        await evaluate(`{const run=S.runs.get('older-recovered-run'),extra='Recovered run is now active\\n';
+          const cut=run.output.indexOf('Older recovered synthetic line 2\\n');
+          updateCopilotRun({...run,status:'recovering',mayBeRunning:true,output:'[Earlier output truncated]\\n'+run.output.slice(cut)+extra,
+            outputOffset:run.outputOffset+extra.length});}`);
+        await frame();
+        const roles = () => evaluate(`[...window.promotionRow.querySelectorAll('.copilot-run')].map(e=>[e.dataset.runId,e.classList.contains('run-earlier')])`);
+        if (interacting) {
+          assert.deepEqual(await roles(), [['newer-completed-run', false], ['older-recovered-run', true]],
+            'While interacting, update the existing recovered card without moving controls or duplicating output');
+          assert.equal(await evaluate('window.promotionRow===document.querySelector("#rows [data-key=\\"sample-service-id:101\\"]")'), true);
+          assert.equal(await evaluate('window.promotionRow.querySelector(".row [data-act=\\"triage\\"]")===window.promotionFix'), true);
+          await move(10, 10); await frame();
+          await evaluate('window.promotionRow=document.querySelector("#rows [data-key=\\"sample-service-id:101\\"]")');
+        }
+        assert.deepEqual(await roles(), [['older-recovered-run', false], ['newer-completed-run', true]]);
+        assert.equal(await evaluate('window.promotionRow.querySelector(".copilot-run:not(.run-earlier) .run-output")===window.olderOutput'), true);
+        assert.equal(await evaluate('window.promotionRow.querySelector(".run-earlier .run-output")===window.newerOutput'), true);
+        assert.equal(await evaluate('window.olderOutput.firstChild===window.olderNode'), true);
+        assert.equal(await evaluate('window.getSelection().toString()'), await evaluate('window.promotionSelected'));
+        assert.ok(Math.abs(await evaluate('window.olderReadingY()') - readingY) <= 1, 'Promotion preserves the retained reading anchor');
+        assert.equal(await evaluate('window.newerOutput.scrollTop'), 700);
+        if (!interacting) {
+          assert.equal(await evaluate('window.promotionRow===document.querySelector("#rows [data-key=\\"sample-service-id:101\\"]")'), true);
+          assert.equal(await evaluate('window.promotionRow.querySelector(".row [data-act=\\"triage\\"]")===window.promotionFix'), true,
+            'Reconciliation does not replace the PR row or its action target');
+        }
+        assert.equal(await evaluate('window.promotionRow.querySelector(".copilot-run:not(.run-earlier) [data-act=\\"cancelRun\\"]").dataset.runId'), 'older-recovered-run');
+        await evaluate(`updateCopilotRun({...S.runs.get('older-recovered-run'),status:'completed',mayBeRunning:false})`);
+        await frame();
+        assert.deepEqual(await roles(), [['newer-completed-run', false], ['older-recovered-run', true]]);
+        assert.equal(await evaluate('window.getSelection().toString()'), await evaluate('window.promotionSelected'));
+        assert.ok(Math.abs(await evaluate('window.olderReadingY()') - readingY) <= 1, 'Demotion preserves the same retained reading anchor');
+        assert.equal(await evaluate('window.newerOutput.scrollTop'), 700);
+      }
+    });
+
     await t.test('inline output streams without replacing rows, remains on captured PR through refresh/removal, and cancels that run', async () => {
       await send('Emulation.setDeviceMetricsOverride', { width: 1600, height: 1000, deviceScaleFactor: 1, mobile: false });
       await reset(true);
