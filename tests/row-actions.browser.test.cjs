@@ -1205,11 +1205,17 @@ test('real row hit testing and action identity across refreshes', { timeout: 900
         await evaluate(`{const key='sample-service-id:101',output='Short synthetic output\\n';
           S.runs.set('short-follow-run',{...S.snap.prs.find(p=>p.key===key),runId:'short-follow-run',status:'running',
             output,outputOffset:output.length});S.expanded.add(key);render();
-          window.shortElement=document.querySelector('[data-key="'+key+'"] .run-output');}`);
+          window.shortElement=document.querySelector('[data-key="'+key+'"] .run-output');
+          window.shortWheelTrusted=false;window.shortElement.addEventListener('wheel',e=>window.shortWheelTrusted=e.isTrusted,{once:true});}`);
         const p = await elementPoint('[data-key="sample-service-id:101"] .run-output');
         if (input === 'wheel') {
           await move(p.x, p.y);
           await send('Input.dispatchMouseEvent', { type: 'mouseWheel', x: p.x, y: p.y, deltaX: 0, deltaY: -600 });
+          await evaluate(`new Promise((resolve,reject)=>{
+            const deadline=Date.now()+2000;
+            const check=()=>window.shortWheelTrusted ? resolve() : Date.now()>deadline
+              ? reject(Error('Trusted wheel did not reach the short output panel')) : setTimeout(check,10);check();
+          })`);
         } else {
           await evaluate('window.shortElement.focus()');
           const code = { Home: 36, ArrowUp: 38, PageUp: 33 }[input];
