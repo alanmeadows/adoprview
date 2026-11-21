@@ -871,7 +871,7 @@ public sealed partial class PrService
         catch { context.Dispose(); throw; }
     }
 
-    public async Task<(PrView Pr, string SourceRef, string SourceCommit, string Prompt)> GetCopilotSourceAsync(string key)
+    public async Task<(PrView Pr, string SourceRef, string SourceCommit, string Prompt, string? AdditionalInstructions)> GetCopilotSourceAsync(string key)
     {
         var pr = Find(key);
         void CheckAvailable()
@@ -904,12 +904,13 @@ public sealed partial class PrService
         var previewSource = S(fresh["lastMergeSourceCommit"]?["commitId"]);
         if (!string.IsNullOrEmpty(previewSource) && !commit.Equals(previewSource, StringComparison.OrdinalIgnoreCase))
             throw new InvalidOperationException("The PR source changed while its ADO preview was updating. Refresh and retry once ADO reports the current source.");
-        var prompt = await BuildTriagePromptAsync(key);
+        var additional = _store.Current.AdditionalTriageInstructions;
+        var prompt = await BuildTriagePromptAsync(key, includeAdditionalInstructions: false);
         CheckAvailable();
-        return (pr, sourceRef, commit, prompt);
+        return (pr, sourceRef, commit, prompt, additional);
     }
 
-    public async Task<string> BuildTriagePromptAsync(string key)
+    public async Task<string> BuildTriagePromptAsync(string key, bool includeAdditionalInstructions = true)
     {
         var pr = Find(key);
         var sb = new StringBuilder();
@@ -1032,7 +1033,7 @@ public sealed partial class PrService
             "Do not create a new PR, merge/complete a PR, approve it, set auto-complete, bypass policies, force-push, or push anything other than the source-branch update authorized above. " +
             "Do not resolve human-authored review threads. Preserve generated work and report what changed and what remains unverified. " +
             "Output is inline and noninteractive; no separate terminal or desktop session is available. If existing CLI permissions prevent required work, explain the blocked permission rather than bypassing it.");
-        return sb.ToString();
+        return includeAdditionalInstructions ? CopilotRunService.AppendAdditionalInstructions(sb.ToString(), settings.AdditionalTriageInstructions) : sb.ToString();
     }
 
     [GeneratedRegex(@"(?m)^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\.\d+Z ")]

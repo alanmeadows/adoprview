@@ -19,6 +19,7 @@ public sealed record CopilotRunRequest(
     public string Repository => Repo;
     public string? WslPath => Directory;
     public string? WslDistribution => Distro;
+    public string? AdditionalInstructions { get; init; }
 }
 
 public sealed record CopilotRunState(
@@ -81,6 +82,9 @@ public sealed partial class CopilotRunService : IAsyncDisposable
     public static string Notice(CopilotRunRequest request) => request.PushToSource ? PushNotice : HeadlessNotice;
 
     static string ShellQuote(string value) => "'" + value.Replace("'", "'\\''") + "'";
+
+    internal static string AppendAdditionalInstructions(string prompt, string? additional) =>
+        string.IsNullOrWhiteSpace(additional) ? prompt : prompt + "\n## Additional instructions\n" + additional;
 
     /// <summary>Exact remote/ref appended to a new run's prompt after the WSL remote was verified.</summary>
     internal static string PublishInstructions(CopilotRunRequest r, string remote, string? pushHash) => r.PushToSource
@@ -314,7 +318,8 @@ public sealed partial class CopilotRunService : IAsyncDisposable
         if (r.PrId <= 0 || string.IsNullOrWhiteSpace(r.PrKey) || string.IsNullOrWhiteSpace(r.Organization) ||
             string.IsNullOrWhiteSpace(r.Project) || string.IsNullOrWhiteSpace(r.Repository) || string.IsNullOrWhiteSpace(r.Prompt))
             throw new InvalidOperationException("The selected PR identity and fix prompt are required.");
-        if (r.Prompt.Length > 1024 * 1024 || r.Prompt.Contains('\0'))
+        if (AppendAdditionalInstructions(r.Prompt, r.AdditionalInstructions).Length > 1024 * 1024 ||
+            r.Prompt.Contains('\0') || r.AdditionalInstructions?.Contains('\0') == true)
             throw new InvalidOperationException("The fix prompt is empty, contains NUL, or exceeds 1 MiB.");
         if (!Regex.IsMatch(r.SourceCommit ?? "", @"\A(?:[0-9a-fA-F]{40}|[0-9a-fA-F]{64})\z") ||
             !(r.SourceRef ?? "").StartsWith("refs/heads/", StringComparison.Ordinal))
@@ -369,8 +374,10 @@ public sealed partial class CopilotRunService : IAsyncDisposable
             if (!verifiedReceipt)
                 throw new RunSetupException("WSL returned an invalid worktree receipt; no Copilot task was launched.");
             token.ThrowIfCancellationRequested();
+            var fullPrompt = AppendAdditionalInstructions(r.Prompt + PublishInstructions(r, env.Remote, env.PushHash), r.AdditionalInstructions);
+            if (fullPrompt.Length > 1024 * 1024) throw new RunSetupException("The complete fix prompt exceeds 1 MiB; shorten its instructions before retrying.");
             var staged = await Invoke("stage-prompt", env.Distribution, StagePromptScript,
-                [e.RunDirectory], r.Prompt + PublishInstructions(r, env.Remote, env.PushHash), token: token).ConfigureAwait(false);
+                [e.RunDirectory], fullPrompt, token: token).ConfigureAwait(false);
             RequireSuccess(staged, "Could not securely stage the prompt in the app-owned run directory.");
             token.ThrowIfCancellationRequested();
             Append(e, "\nStarting isolated worktree run. Interactive approvals are not available.\n", false);

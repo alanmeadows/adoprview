@@ -1439,8 +1439,10 @@ function renderDrawer() {
     </div>
     <div class="section">
       <h4>Copilot triage instructions</h4>
-      <p class="help">The "Ask" appended to every triage prompt. Leave empty for the default (drive the PR to green, no auto-complete).</p>
-      <div class="field"><textarea id="triageInstructions" placeholder="Default instructions">${esc(st.triageInstructions || '')}</textarea></div>
+      <p class="help">Override the "Ask" in new Fix prompts. Leave empty to keep the default (drive the PR to green, no auto-complete). Required gates and execution boundaries still apply.</p>
+      <div class="field"><label for="triageInstructions">Custom Ask (override)</label><textarea id="triageInstructions" placeholder="Default instructions">${esc(st.triageInstructions || '')}</textarea></div>
+      <p class="help">Additional instructions are appended once at the very end of Copy prompt and new Fix launches, after the generated gates and verified launch/publish context. They do not replace the default or custom Ask, or change existing sessions.</p>
+      <div class="field"><label for="additionalTriageInstructions">Additional instructions (append)</label><textarea id="additionalTriageInstructions" placeholder="Optional additional instructions">${esc(st.additionalTriageInstructions || '')}</textarea></div>
     </div>
     <div class="section"><button class="btn primary" data-dact="save">${svg('check')} Save settings</button></div>`;
 }
@@ -1547,6 +1549,7 @@ async function onDrawerAction(act, el) {
           ignoreDrafts: $('#ignoreDrafts').checked,
           autoComplete: { mergeStrategy: $('#mergeStrategy').value, deleteSourceBranch: $('#deleteSourceBranch').checked, transitionWorkItems: $('#transitionWorkItems').checked },
           triageInstructions: $('#triageInstructions').value,
+          additionalTriageInstructions: $('#additionalTriageInstructions').value,
           wslDistro: $('#wslDistro').value.trim(),
           wslRepoDirectories: Object.fromEntries([...document.querySelectorAll('[data-wsl-repo]')].map(e => [e.dataset.wslRepo, e.value.trim()]).filter(([, value]) => value)),
         });

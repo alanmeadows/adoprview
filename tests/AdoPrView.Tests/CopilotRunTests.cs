@@ -50,6 +50,21 @@ static class CopilotRunTests
 
     public static async Task Run(Func<string, Func<Task>, Task> test)
     {
+        await test("Copilot additional instructions are captured once after exact launch publication boundaries", async () =>
+        {
+            var fake = new FakeTransport();
+            await using var service = new CopilotRunService(fake);
+            const string extra = "  CAPTURED EXTRA\r\nlast line\n";
+            var request = Request() with { PushToSource = true, AdditionalInstructions = extra };
+            var run = await service.StartAsync(request);
+            request = request with { AdditionalInstructions = "CHANGED" };
+            await fake.Started.Task.WaitAsync(TimeSpan.FromSeconds(5));
+            Check(fake.Calls.Single(c => c.Operation == "stage-prompt").StandardInput ==
+                run.Request.Prompt + CopilotRunService.PublishInstructions(run.Request, "origin", FakeTransport.PushHash) +
+                "\n## Additional instructions\n" + extra, "Suffix was changed, duplicated or placed before launch gates");
+            fake.Finish(0);
+            await Wait(service, run.RunId, s => !s.IsActive);
+        });
         await test("Copilot returns preparing immediately, captures immutable identity/prompt and streams both channels", async () =>
         {
             var fake = new FakeTransport();

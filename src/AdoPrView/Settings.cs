@@ -80,6 +80,7 @@ public sealed class AppSettings
     public bool IgnoreDrafts { get; set; }
     public AutoCompleteOptions AutoComplete { get; set; } = new();
     public string? TriageInstructions { get; set; }
+    public string? AdditionalTriageInstructions { get; set; }
     public string? WslDistro { get; set; }
     public Dictionary<string, string> WslRepoDirectories { get; set; } = new(StringComparer.OrdinalIgnoreCase);
     public WindowPlacement? Window { get; set; }

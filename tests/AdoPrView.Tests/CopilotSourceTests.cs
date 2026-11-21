@@ -119,6 +119,26 @@ static class CopilotSourceTests
 
     public static async Task Run(Func<string, Func<Task>, Task> test)
     {
+        foreach (var custom in new[] { false, true })
+            await test($"Copilot additional instructions follow all generated gates without replacing Ask (custom={custom})", async () =>
+            {
+                using var f = new Fixture();
+                if (custom) f.Store.Current.TriageInstructions = "  CUSTOM ASK ONLY  ";
+                var baseline = await f.Service.BuildTriagePromptAsync(f.Pr.Key);
+                const string additional = "  EXTRA ONLY\r\nKeep this final newline.\n";
+                f.Store.Current.AdditionalTriageInstructions = additional;
+                var copy = await f.Service.BuildTriagePromptAsync(f.Pr.Key);
+                var source = await f.Service.GetCopilotSourceAsync(f.Pr.Key);
+                Check(copy == baseline + "\n## Additional instructions\n" + additional &&
+                    source.Prompt == baseline && source.AdditionalInstructions == additional,
+                    "Copy/launch changed the base prompt, normalized the suffix or duplicated it");
+                CheckReviewGate(copy);
+                Check(custom ? copy.Contains("## Ask\r\nCUSTOM ASK ONLY\r\n") :
+                    copy.Contains("Work on this existing PR for the repo repository and drive it to green"),
+                    "Additional instructions replaced the default/custom Ask");
+                f.Store.Current.AdditionalTriageInstructions = " \r\n\t";
+                Check(await f.Service.BuildTriagePromptAsync(f.Pr.Key) == baseline, "Empty suffix changed existing prompt behavior");
+            });
         foreach (var draft in new bool?[] { null, true, false })
             await test($"Copilot preflight verifies fresh draft status when ignoring drafts: {draft}", async () =>
             {
