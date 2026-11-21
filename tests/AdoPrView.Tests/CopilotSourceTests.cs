@@ -120,6 +120,39 @@ static class CopilotSourceTests
 
     public static async Task Run(Func<string, Func<Task>, Task> test)
     {
+        foreach (var suffix in new[] { false, true })
+            await test($"Copilot additional instructions reject NUL before returning copied or captured prompts (suffix={suffix})", async () =>
+            {
+                using var f = new Fixture();
+                if (suffix) f.Store.Current.AdditionalTriageInstructions = "EXTRA\0GUIDANCE";
+                else f.Store.Current.TriageInstructions = "CUSTOM\0ASK";
+                await RejectPrompt(() => f.Service.BuildTriagePromptAsync(f.Pr.Key));
+                await RejectPrompt(() => f.Service.GetCopilotSourceAsync(f.Pr.Key));
+            });
+        foreach (var custom in new[] { false, true })
+            foreach (var overflow in new[] { 0, 1 })
+                await test($"Copilot additional instructions enforce copied effective prompt boundary (custom={custom}, overflow={overflow})", async () =>
+                {
+                    using var f = new Fixture();
+                    if (custom) f.Store.Current.TriageInstructions = "CUSTOM ASK";
+                    var baseline = await f.Service.BuildTriagePromptAsync(f.Pr.Key);
+                    const string heading = "\n## Additional instructions\n";
+                    var extra = new string('s', 1024 * 1024 - baseline.Length - heading.Length + overflow);
+                    f.Store.Current.AdditionalTriageInstructions = extra;
+                    if (overflow == 1)
+                    {
+                        await RejectPrompt(() => f.Service.BuildTriagePromptAsync(f.Pr.Key));
+                        await RejectPrompt(() => f.Service.GetCopilotSourceAsync(f.Pr.Key));
+                    }
+                    else
+                    {
+                        var copied = await f.Service.BuildTriagePromptAsync(f.Pr.Key);
+                        var captured = await f.Service.GetCopilotSourceAsync(f.Pr.Key);
+                        Check(copied.Length == 1024 * 1024 && copied == baseline + heading + extra &&
+                            captured.Prompt + heading + captured.AdditionalInstructions == copied,
+                            "Exact-limit Copy/capture prompt was truncated, normalized or inconsistent");
+                    }
+                });
         foreach (var copy in new[] { false, true })
             foreach (var custom in new[] { false, true })
                 await test($"Copilot additional instructions snapshot all prompt settings before log awaits (copy={copy}, custom={custom})", async () =>
@@ -282,6 +315,17 @@ static class CopilotSourceTests
         try { await action(); }
         catch (InvalidOperationException) { return; }
         throw new Exception("Unverified source was accepted");
+    }
+
+    static async Task RejectPrompt(Func<Task> action)
+    {
+        try { await action(); }
+        catch (InvalidOperationException ex)
+        {
+            Check(ex.Message.Contains("contains NUL, or exceeds 1 MiB"), "Prompt failure was not explicit: " + ex.Message);
+            return;
+        }
+        throw new Exception("Invalid effective prompt was returned for copying or capture");
     }
 
     sealed class Fixture : IDisposable

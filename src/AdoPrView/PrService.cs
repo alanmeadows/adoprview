@@ -1045,7 +1045,10 @@ public sealed partial class PrService
             "Do not create a new PR, merge/complete a PR, approve it, set auto-complete, bypass policies, force-push, or push anything other than the source-branch update authorized above. " +
             "Do not resolve human-authored review threads. Preserve generated work and report what changed and what remains unverified. " +
             "Output is inline and noninteractive; no separate terminal or desktop session is available. If existing CLI permissions prevent required work, explain the blocked permission rather than bypassing it.");
-        return includeAdditionalInstructions ? CopilotRunService.AppendAdditionalInstructions(sb.ToString(), settings.AdditionalTriageInstructions) : sb.ToString();
+        var prompt = sb.ToString();
+        var effective = CopilotRunService.AppendAdditionalInstructions(prompt, settings.AdditionalTriageInstructions);
+        CopilotRunService.ValidatePrompt(effective);
+        return includeAdditionalInstructions ? effective : prompt;
     }
 
     [GeneratedRegex(@"(?m)^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\.\d+Z ")]

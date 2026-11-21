@@ -511,6 +511,9 @@ The generated Fix/Copy prompt is configurable in settings:
   includes it once after the captured source and verified publish target.
   Ask, additional guidance, skill and reviewer choices are captured together
   before asynchronous source/log reads; later settings saves apply to future prompts.
+  Copy prompt and Fix reject NUL or effective prompts over 1,048,576 characters.
+  Launch also checks the complete prompt after adding verified publication context;
+  instructions are never silently truncated.
   Blank leaves existing behavior unchanged. Saving does not modify running or
   recovered sessions, their prompts or history; all existing gates still apply.
 

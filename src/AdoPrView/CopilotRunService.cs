@@ -86,6 +86,12 @@ public sealed partial class CopilotRunService : IAsyncDisposable
     internal static string AppendAdditionalInstructions(string prompt, string? additional) =>
         string.IsNullOrWhiteSpace(additional) ? prompt : prompt + "\n## Additional instructions\n" + additional;
 
+    internal static void ValidatePrompt(string prompt)
+    {
+        if (string.IsNullOrWhiteSpace(prompt) || prompt.Length > 1024 * 1024 || prompt.Contains('\0'))
+            throw new InvalidOperationException("The fix prompt is empty, contains NUL, or exceeds 1 MiB.");
+    }
+
     /// <summary>Exact remote/ref appended to a new run's prompt after the WSL remote was verified.</summary>
     internal static string PublishInstructions(CopilotRunRequest r, string remote, string? pushHash) => r.PushToSource
         ? "\n## Verified publish target for this run\n" +
@@ -318,9 +324,7 @@ public sealed partial class CopilotRunService : IAsyncDisposable
         if (r.PrId <= 0 || string.IsNullOrWhiteSpace(r.PrKey) || string.IsNullOrWhiteSpace(r.Organization) ||
             string.IsNullOrWhiteSpace(r.Project) || string.IsNullOrWhiteSpace(r.Repository) || string.IsNullOrWhiteSpace(r.Prompt))
             throw new InvalidOperationException("The selected PR identity and fix prompt are required.");
-        if (AppendAdditionalInstructions(r.Prompt, r.AdditionalInstructions).Length > 1024 * 1024 ||
-            r.Prompt.Contains('\0') || r.AdditionalInstructions?.Contains('\0') == true)
-            throw new InvalidOperationException("The fix prompt is empty, contains NUL, or exceeds 1 MiB.");
+        ValidatePrompt(AppendAdditionalInstructions(r.Prompt, r.AdditionalInstructions));
         if (!Regex.IsMatch(r.SourceCommit ?? "", @"\A(?:[0-9a-fA-F]{40}|[0-9a-fA-F]{64})\z") ||
             !(r.SourceRef ?? "").StartsWith("refs/heads/", StringComparison.Ordinal))
             throw new InvalidOperationException("A fresh PR source branch ref and exact source commit are required before launching.");
