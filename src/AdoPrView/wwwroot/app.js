@@ -606,11 +606,11 @@ function syncRunOutput(card) {
     S.runOutputs.set(r.runId, view);
     output.addEventListener('scroll', () => rememberRunOutput(view));
     output.addEventListener('wheel', e => {
-      if (e.deltaY < 0) view.following = false;
+      if (e.deltaY < 0 && output.scrollTop > 0) view.following = false;
       else if (e.deltaY > 0 && runOutputAtBottom(output) && !runOutputSelected(output)) view.following = true;
     }, { passive: true });
     output.addEventListener('keydown', e => {
-      if (['ArrowUp', 'PageUp', 'Home'].includes(e.key)) view.following = false;
+      if (output.scrollTop > 0 && ['ArrowUp', 'PageUp', 'Home'].includes(e.key)) view.following = false;
       else if (!e.shiftKey && ['ArrowDown', 'PageDown', 'End'].includes(e.key) &&
         runOutputAtBottom(output) && !runOutputSelected(output)) view.following = true;
     });
@@ -633,9 +633,14 @@ function syncRunOutput(card) {
       if (newPrefix && Number.isSafeInteger(removed) && removed >= 0 && removed < before.length - oldPrefix &&
         text.slice(newPrefix).startsWith(retained)) {
         const anchor = view.following ? null : view.anchor;
+        const selection = window.getSelection(), cut = oldPrefix + removed;
+        const selected = selection?.isCollapsed === false && selection.anchorNode === node && selection.focusNode === node &&
+          Math.min(selection.anchorOffset, selection.focusOffset) >= cut
+          ? { anchor: selection.anchorOffset - cut + newPrefix, focus: selection.focusOffset - cut + newPrefix } : null;
         node.deleteData(0, oldPrefix + removed);
         node.insertData(0, text.slice(0, newPrefix));
         node.appendData(text.slice(newPrefix + retained.length));
+        if (selected) selection.setBaseAndExtent(node, selected.anchor, node, selected.focus);
         if (!view.following) {
           if (anchor && anchor.offset >= oldPrefix + removed) {
             const range = document.createRange(), offset = anchor.offset - oldPrefix - removed + newPrefix;

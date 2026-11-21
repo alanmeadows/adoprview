@@ -181,7 +181,7 @@ public sealed partial class CopilotRunService : IAsyncDisposable
                 entry.RunDirectory = latest.RunDirectory;
                 entry.LaunchIntent = latest.LaunchIntent;
                 entry.TaskIdentity = latest.TaskIdentity;
-                Update(entry, s => latest.State with { Output = s.Output });
+                Update(entry, s => latest.State with { Output = s.Output, OutputOffset = s.OutputOffset });
                 if (latest.State.Status is "completed" or "cancelled" or "failed")
                 {
                     lock (gate) activePrs.Remove(PrIdentity(entry.State.Request));

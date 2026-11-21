@@ -1199,6 +1199,55 @@ test('real row hit testing and action identity across refreshes', { timeout: 900
       assert.ok(Math.abs(await evaluate('window.anchorElement.scrollTop') - after.top) <= 1, 'Clamping does not resume following');
     });
 
+    await t.test('Fix output keeps following when wheel or upward keys cannot scroll a short log', async () => {
+      for (const input of ['wheel', 'Home', 'ArrowUp', 'PageUp']) {
+        await reset();
+        await evaluate(`{const key='sample-service-id:101',output='Short synthetic output\\n';
+          S.runs.set('short-follow-run',{...S.snap.prs.find(p=>p.key===key),runId:'short-follow-run',status:'running',
+            output,outputOffset:output.length});S.expanded.add(key);render();
+          window.shortElement=document.querySelector('[data-key="'+key+'"] .run-output');}`);
+        const p = await elementPoint('[data-key="sample-service-id:101"] .run-output');
+        if (input === 'wheel') {
+          await move(p.x, p.y);
+          await send('Input.dispatchMouseEvent', { type: 'mouseWheel', x: p.x, y: p.y, deltaX: 0, deltaY: -600 });
+        } else {
+          await evaluate('window.shortElement.focus()');
+          const code = { Home: 36, ArrowUp: 38, PageUp: 33 }[input];
+          await send('Input.dispatchKeyEvent', { type: 'keyDown', key: input, code: input, windowsVirtualKeyCode: code });
+          await send('Input.dispatchKeyEvent', { type: 'keyUp', key: input, code: input, windowsVirtualKeyCode: code });
+        }
+        await frame();
+        await evaluate(`{const run=runForPr('sample-service-id:101'),extra='Now overflowing synthetic output\\n'.repeat(160);
+          updateCopilotRun({...run,output:run.output+extra,outputOffset:run.outputOffset+extra.length});}`);
+        await frame();
+        assert.ok(await evaluate('window.shortElement.scrollHeight-window.shortElement.clientHeight-window.shortElement.scrollTop') <= 2,
+          `${input}: input that never left the bottom must not disable following`);
+      }
+    });
+
+    await t.test('Fix output preserves forward and backward selection at the exact retained truncation boundary', async () => {
+      for (const alreadyTruncated of [false, true]) for (const backward of [false, true]) {
+        await reset();
+        await evaluate(`{const key='sample-service-id:101',prefix='[Earlier output truncated]\\n';
+          const body=Array.from({length:160},(_,n)=>'Selection boundary synthetic line '+n+'\\n').join('');
+          const output=${alreadyTruncated} ? prefix+body : body,cut=body.indexOf('Selection boundary synthetic line 2\\n');
+          S.runs.set('selection-boundary-run',{...S.snap.prs.find(p=>p.key===key),runId:'selection-boundary-run',
+            status:'running',output,outputOffset:output.length});S.expanded.add(key);render();
+          window.boundaryElement=document.querySelector('[data-key="'+key+'"] .run-output');
+          window.boundaryElement.scrollTop=400;
+          const node=window.boundaryElement.firstChild,start=(${alreadyTruncated} ? prefix.length : 0)+cut,end=start+30;
+          window.getSelection().setBaseAndExtent(node,${backward} ? end : start,node,${backward} ? start : end);
+          window.boundarySelected=window.getSelection().toString();
+          const run=runForPr(key),extra='After selection boundary\\n';
+          updateCopilotRun({...run,output:prefix+body.slice(cut)+extra,outputOffset:run.outputOffset+extra.length});}`);
+        await frame();
+        assert.equal(await evaluate('window.getSelection().toString()'), await evaluate('window.boundarySelected'),
+          'Every selected character survived; prefix insertion must not add the truncation notice to copied text');
+        await evaluate('renderRows()'); await frame();
+        assert.equal(await evaluate('window.getSelection().toString()'), await evaluate('window.boundarySelected'));
+      }
+    });
+
     await t.test('inline output streams without replacing rows, remains on captured PR through refresh/removal, and cancels that run', async () => {
       await send('Emulation.setDeviceMetricsOverride', { width: 1600, height: 1000, deviceScaleFactor: 1, mobile: false });
       await reset(true);

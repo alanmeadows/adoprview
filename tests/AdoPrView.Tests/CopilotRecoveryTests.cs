@@ -325,6 +325,28 @@ static class CopilotRecoveryTests
                 "Authentication/continuation failure restarted in a loop or lost work");
         });
 
+        await test("Copilot recovered cancellation preserves replayed output offsets while reconciling terminal saved state", async () =>
+        {
+            using var f = new Fixture();
+            var first = f.Service();
+            var run = await first.StartAsync(Request());
+            await Wait(first, run.RunId, s => s.Output.Contains("FAKE-READY"));
+            await first.DisposeAsync();
+            f.Transport.End(143, outcome: false);
+            await using var resumed = f.Service();
+            await resumed.RecoverAsync();
+            f.Transport.Emit("Synthetic continuation failed.\n");
+            f.Transport.End(1);
+            var rendered = await Wait(resumed, run.RunId, s => s.Status == "needs-attention" &&
+                s.OutputOffset > f.Store.Load().Single().Saved!.State.OutputOffset);
+            var saved = f.Store.Load().Single().Saved!;
+            f.Store.Write(saved with { State = saved.State with { Status = "cancelled", FinishedAt = DateTimeOffset.UtcNow } });
+            var cancelled = await resumed.CancelAsync(run.Key, run.RunId);
+            Check(cancelled!.Status == "cancelled" && cancelled.Output == rendered.Output &&
+                cancelled.OutputOffset == rendered.OutputOffset && cancelled.WorktreeRetained,
+                "Saved-state reconciliation regressed the rendered UTF-16 offset and would discard a valid cancellation in the UI");
+        });
+
         await test("Copilot crash after successful worktree removal keeps terminal history and replays its logs without resume", async () =>
         {
             using var f = new Fixture();
