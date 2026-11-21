@@ -1429,7 +1429,7 @@ test('real row hit testing and action identity across refreshes', { timeout: 900
           window.shelfCancel=window.shelfRow.querySelector('.copilot-run:not(.run-earlier) [data-act="cancelRun"]');
           window.shelfOutput=window.shelfRow.querySelector('.copilot-run:not(.run-earlier) .run-output');
           window.shelfOutput.scrollTop=400;
-          const node=window.shelfOutput.firstChild;window.getSelection().setBaseAndExtent(node,700,node,725);
+          {const node=window.shelfOutput.firstChild;window.getSelection().setBaseAndExtent(node,700,node,725);}
           window.shelfSelected=window.getSelection().toString();`);
         await frame();
         await evaluate(`{const run=S.runs.get('shelf-collapsed-run'),extra='Collapsed background append\\n';
