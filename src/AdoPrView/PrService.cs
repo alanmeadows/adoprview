@@ -52,7 +52,7 @@ public sealed partial class PrService
         }
         s.ApprovalProviderError = _approvalError;
         Snapshot previous;
-        lock (_snapGate) { previous = _snapshot; _snapshot = s; }
+        lock (_snapGate) { previous = _snapshot; s.Revision = previous.Revision + 1; _snapshot = s; }
         NotifyLaneChanges(previous, s);
         Changed?.Invoke(s);
     }

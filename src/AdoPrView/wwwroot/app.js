@@ -206,6 +206,8 @@ function flushRowUpdates() {
 
 function setSnapshot(snap) {
   snap = snap || { prs: [] };
+  const currentRevision = (S.pendingSnapshot || S.snap).revision;
+  if (Number.isSafeInteger(currentRevision) && Number.isSafeInteger(snap.revision) && snap.revision < currentRevision) return;
   const revision = snap.orderRevision ?? 0;
   const sorted = [...snap.prs].sort((a, b) =>
     Object.keys(LANES).indexOf(a.lane) - Object.keys(LANES).indexOf(b.lane) ||

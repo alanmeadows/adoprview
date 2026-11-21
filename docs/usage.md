@@ -622,6 +622,8 @@ execution lock), the app keeps the reservation and reports uncertainty rather
 than claiming success. Worktrees and supervised logs remain available.
 During blocked or failed shutdown, exact-run controls stay available until
 other service teardown succeeds. A failed exit restores browser output delivery.
+Native Stop entries include the full run ID to distinguish retained runs for
+the same PR. Unreadable history without a PR identity is not an actionable target.
 
 Output uses a fixed-size tail buffer, and native delivery keeps at most one
 unacknowledged browser message plus the latest pending snapshot per run. A busy
@@ -630,7 +632,10 @@ retain the latest terminal/status update while acknowledgements are missing;
 pending runs are served fairly even while another run keeps streaming.
 Dashboard ready/init resynchronizes after navigation or reload. Monotonic
 lifecycle revisions reject old same-output status/worktree snapshots. The initial
-dashboard response also reads authoritative run states.
+dashboard response also reads authoritative run states and the latest PR snapshot
+after asynchronous lists finish. Whole PR snapshots have a separate publication
+revision, so delayed init/refresh messages cannot replace newer displayed or
+queued state. This does not change row-order or interaction-pause behavior.
 These changes do not cap CPU/RAM or automatically kill tasks; whole-system resource exhaustion
 can still affect the app and Windows.
 

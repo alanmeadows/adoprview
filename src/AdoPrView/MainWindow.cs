@@ -111,14 +111,7 @@ public sealed class MainWindow : Window, IApprovalUi
         stopMenu.DropDownOpening += (_, _) =>
         {
             stopMenu.DropDownItems.Clear();
-            foreach (var run in _copilot.Runs.Where(r => r.IsActive || r.MayBeRunning || r.Status == "needs-attention"))
-            {
-                var selected = run;
-                stopMenu.DropDownItems.Add($"!{run.Id} {run.Repo} ({run.Status})", null,
-                    (_, _) => _ = StopCopilotFromNativeAsync(selected));
-            }
-            if (stopMenu.DropDownItems.Count == 0)
-                stopMenu.DropDownItems.Add(new System.Windows.Forms.ToolStripMenuItem("No owned runs to stop") { Enabled = false });
+            stopMenu.DropDownItems.AddRange(CopilotStopMenuItems(_copilot.Runs, run => _ = StopCopilotFromNativeAsync(run)));
         };
         menu.Items.Add(stopMenu);
         menu.Items.Add("Exit", null, (_, _) => { _shutdownReason = "tray-exit"; _quitting = true; Close(); });
@@ -283,6 +276,16 @@ public sealed class MainWindow : Window, IApprovalUi
         run.WorktreePath, run.WorktreeStatus, run.WorktreeRetained, run.Distro, run.SourceDirectory, run.StartedAt, run.FinishedAt,
         run.SessionId, run.ResumeAttempts, run.LogPath, run.OutputOffset, run.Revision, run.MayBeRunning, run.PreparationLogPath,
     };
+
+    internal static System.Windows.Forms.ToolStripMenuItem[] CopilotStopMenuItems(
+        IEnumerable<CopilotRunState> runs, Action<CopilotRunState> stop)
+    {
+        var items = runs.Where(r => r.IsActive || r.MayBeRunning || (r.Status == "needs-attention" && r.Id > 0))
+            .Select(run => new System.Windows.Forms.ToolStripMenuItem($"!{run.Id} {run.Repo} ({run.Status}) - {run.RunId}", null,
+                (_, _) => stop(run))).ToArray();
+        return items.Length != 0 ? items :
+            [new System.Windows.Forms.ToolStripMenuItem("No owned runs to stop") { Enabled = false }];
+    }
 
     async Task<object> HandleExplainAsync(string action, JsonObject parameters)
     {

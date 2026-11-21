@@ -63,11 +63,12 @@ public sealed class Bridge(PrService prs, SettingsStore store, Func<string, Task
         switch (method)
         {
             case "init":
-                return new { settings = store.Current, snapshot = prs.Current,
+                return new {
                     runs = copilotAction is null ? Array.Empty<object>() : await copilotAction("listCopilot", p),
                     explanations = explainAction is null ? Array.Empty<object>() : await explainAction("listExplanations", p),
                     investigations = investigationAction is null ? Array.Empty<object>() : await investigationAction("listInvestigations", p),
                     videos = videoAction is null ? Array.Empty<object>() : await videoAction("listVideos", p),
+                    settings = store.Current, snapshot = prs.Current,
                     version = typeof(Bridge).Assembly.GetName().Version?.ToString(3) };
             case "refresh":
                 kickRefresh(true);

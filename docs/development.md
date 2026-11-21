@@ -193,6 +193,14 @@ This bounded synthetic check is
 not an installed-app or live WSL/model end-to-end test. Do not run browser or WSL
 opt-ins during unresolved shared-machine overload.
 
+`Copilot native menu` uses actual generated menu items and click callbacks to
+check full run identity, duplicate PR labels and unreadable-history eligibility.
+`Native init reads` holds a synthetic asynchronous run list while the real
+publisher advances the whole snapshot, then checks the serialized init response.
+The frontend whole-init regression exercises the real boot/RPC/event path with
+unrelated DOM wiring stubbed, including queued row updates and late run state.
+Publication revision is separate from `OrderRevision`; row ordering is unchanged.
+
 The smaller kernel-control opt-in executes the exact production runner in an
 explicitly selected, already-responsive WSL distribution:
 

@@ -78,6 +78,31 @@ test('a delayed pre-navigation Fix snapshot cannot overwrite newer initial outpu
   assert.equal(hooks.S.runs.get(current.runId).error, 'newer cleanup diagnostic');
 });
 
+test('whole native init cannot replace a newer received or queued snapshot and run state', async () => {
+  for (const queued of [false, true]) {
+    const { hooks, pr, sent, window, context } = setup('', true);
+    const booted = vm.runInContext('wire = () => {}; boot()', context);
+    const init = sent.find(message => message.method === 'init');
+    const current = { key: pr.key, runId: 'same-run', status: 'completed', output: 'latest', outputOffset: 200,
+      revision: 12, worktreeStatus: 'removed-clean' };
+    hooks.updateCopilotRun(current);
+    hooks.S.pointerInRows = queued;
+    hooks.onHostMessage({ event: 'snapshot', data: { ...hooks.S.snap, revision: 12, orderRevision: 3,
+      prs: [{ ...pr, title: 'new authoritative title' }] } });
+    hooks.onHostMessage({ id: init.id, result: { settings: hooks.S.settings,
+      snapshot: { ...hooks.S.snap, revision: 11, orderRevision: 2, prs: [{ ...pr, title: 'old init title' }] },
+      runs: [{ ...current, revision: 11, worktreeStatus: 'retained-changes' }] } });
+    await booted;
+    assert.equal((hooks.S.pendingSnapshot || hooks.S.snap).prs[0].title, 'new authoritative title');
+    assert.equal(hooks.S.runs.get(current.runId).worktreeStatus, 'removed-clean');
+    assert.equal(window.__ready, true);
+    hooks.S.pointerInRows = false;
+    hooks.flushRowUpdates();
+    assert.equal(hooks.S.snap.prs[0].title, 'new authoritative title');
+    assert.equal(hooks.S.orderRevision, 3);
+  }
+});
+
 test('first video requires explicit Azure setup and missing az stays an actionable setup error without starting generation', async () => {
   const { hooks, pr, window, elements } = setup();
   hooks.S.settings.videoSpeech = null;

@@ -1,4 +1,5 @@
 using System.ComponentModel;
+using System.Reflection;
 using System.Text.Json.Nodes;
 using System.Windows;
 using System.Windows.Threading;
@@ -63,6 +64,43 @@ static class NativeActionTests
                     "Failed response delivery was retried or left as an unobserved task");
             }
             finally { Directory.Delete(directory, recursive: true); }
+        });
+        await test("Native init reads the latest whole snapshot after asynchronous run lists and serializes publication revisions", async () =>
+        {
+            var directory = Path.Combine(Path.GetTempPath(), "ado-action-" + Guid.NewGuid().ToString("N"));
+            Directory.CreateDirectory(directory);
+            var release = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            try
+            {
+                var store = new SettingsStore(Path.Combine(directory, "settings.json"));
+                var prs = new PrService(new AdoClient(), store);
+                var publish = typeof(PrService).GetMethod("Publish", BindingFlags.Instance | BindingFlags.NonPublic)!;
+                var earlier = new Snapshot { OrderRevision = 3, Error = "earlier synthetic refresh state" };
+                publish.Invoke(prs, [earlier]);
+                var entered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+                string? reply = null;
+                var bridge = new Bridge(prs, store, text => { reply = text; return Task.CompletedTask; }, _ => { },
+                    copilotAction: async (action, _) =>
+                    {
+                        Check(action == "listCopilot", "Init used an unexpected run action");
+                        entered.TrySetResult();
+                        await release.Task.WaitAsync(TimeSpan.FromSeconds(3));
+                        return Array.Empty<object>();
+                    });
+                var init = bridge.HandleAsync("""{"id":42,"method":"init"}""");
+                await entered.Task.WaitAsync(TimeSpan.FromSeconds(3));
+                var latest = new Snapshot { OrderRevision = 3, Error = "newer synthetic refresh state" };
+                publish.Invoke(prs, [latest]);
+                release.TrySetResult();
+                await init.WaitAsync(TimeSpan.FromSeconds(3));
+                var result = JsonNode.Parse(reply!)!["result"]!["snapshot"]!;
+                Check(latest.Revision > earlier.Revision &&
+                    result["revision"]!.GetValue<long>() == latest.Revision &&
+                    result["error"]!.GetValue<string>() == latest.Error &&
+                    result["orderRevision"]!.GetValue<long>() == earlier.OrderRevision,
+                    "Init serialized an obsolete whole snapshot or publication revision changed the row order");
+            }
+            finally { release.TrySetResult(); Directory.Delete(directory, recursive: true); }
         });
         if (Environment.GetEnvironmentVariable("ADOPRVIEW_TEST_NATIVE_ACTION") == "1")
             await test("Native action real WPF WebView2 popup launch failure remains handled and leaves dashboard visible", NativeBrowser);

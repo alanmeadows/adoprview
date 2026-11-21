@@ -55,6 +55,31 @@ static class CopilotRunTests
 
     public static async Task Run(Func<string, Func<Task>, Task> test)
     {
+        await test("Copilot native menu excludes unreadable records and binds distinguishable exact run identities", () =>
+        {
+            var a = new CopilotRunState(new string('a', 32), Request(), "needs-attention", "", null, null,
+                "Ubuntu", "/source", "/work", "retained", DateTimeOffset.UtcNow, null);
+            var b = a with { RunId = new string('b', 32), Request = a.Request with { Key = "other:123" }, MayBeRunning = true };
+            var unreadable = a with { RunId = new string('c', 32), Request = a.Request with { Id = 0 } };
+            var stopped = new List<(string, string)>();
+            var items = MainWindow.CopilotStopMenuItems([a, b, unreadable, a with { Status = "completed" }],
+                run => stopped.Add((run.Key, run.RunId)));
+            try
+            {
+                Check(items.Length == 2 && items[0].Text != items[1].Text &&
+                    items[0].Text?.Contains(a.RunId) == true && items[1].Text?.Contains(b.RunId) == true,
+                    "Native menu included a non-actionable record or indistinguishable cancellation targets");
+                items[1].PerformClick();
+                items[0].PerformClick();
+                Check(stopped.SequenceEqual(new[] { (b.Key, b.RunId), (a.Key, a.RunId) }),
+                    "Native menu click did not preserve its selected key/run identity");
+            }
+            finally { foreach (var item in items) item.Dispose(); }
+            var empty = MainWindow.CopilotStopMenuItems([unreadable], _ => throw new Exception("Placeholder was actionable"));
+            try { Check(empty.Length == 1 && !empty[0].Enabled, "Empty menu exposed a cancellation target"); }
+            finally { foreach (var item in empty) item.Dispose(); }
+            return Task.CompletedTask;
+        });
         await test("Copilot bounded output avoids snapshot allocation per chunk and hung follow cannot block exact cancel or detach", async () =>
         {
             foreach (var detach in new[] { false, true })
