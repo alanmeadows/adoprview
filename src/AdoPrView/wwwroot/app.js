@@ -69,6 +69,7 @@ const S = {
   approvalSettings: null,
   approvalSettingsBusy: false,
   runs: new Map(),
+  runOutputs: new Map(),
   explanations: new Map(),
   investigations: new Map(),
   videos: new Map(),
@@ -296,8 +297,10 @@ function laneVisible(prs) {
 }
 
 function renderRows(whenIdle = false) {
+  const selection = captureRunOutputs();
   const players = new Map([...document.querySelectorAll('video[data-video-media]')].map(v => [v.dataset.videoMedia, v]));
   renderRowsContent(whenIdle);
+  restoreRunOutputs(selection);
   for (const placeholder of document.querySelectorAll('video[data-video-media]')) {
     const existing = players.get(placeholder.dataset.videoMedia);
     if (existing && existing !== placeholder) placeholder.replaceWith(existing);
@@ -535,6 +538,110 @@ function runWorktreeText(r) {
     r.logPath && `Supervised log: ${r.logPath}`, r.preparationLogPath && `Private preparation log (if created): ${r.preparationLogPath}`].filter(Boolean).join('\n');
 }
 
+const runOutputAtBottom = el => el.scrollHeight - el.clientHeight - el.scrollTop <= 2;
+function runOutputSelected(el) {
+  const selection = window.getSelection();
+  return selection?.isCollapsed === false && (el.contains(selection.anchorNode) || el.contains(selection.focusNode));
+}
+
+function rememberRunOutput(view) {
+  const el = view.element;
+  if (!el.isConnected || !el.clientHeight) return;
+  if (el.scrollTop !== view.top) view.following = runOutputAtBottom(el);
+  if (runOutputSelected(el)) view.following = false;
+  view.top = el.scrollTop;
+  view.left = el.scrollLeft;
+}
+
+function captureRunOutputs() {
+  for (const view of S.runOutputs.values()) rememberRunOutput(view);
+  const selection = window.getSelection();
+  if (!selection || selection.isCollapsed !== false) return null;
+  const anchor = selection.anchorNode;
+  const output = (anchor?.nodeType === 1 ? anchor : anchor?.parentElement)?.closest('.run-output');
+  if (!output?.contains(selection.focusNode)) return null;
+  return { anchor: selection.anchorNode, anchorOffset: selection.anchorOffset,
+    focus: selection.focusNode, focusOffset: selection.focusOffset };
+}
+
+function restoreRunOutputs(selection) {
+  for (const card of document.querySelectorAll('.copilot-run')) syncRunOutput(card);
+  for (const id of S.runOutputs.keys()) if (!S.runs.has(id)) S.runOutputs.delete(id);
+  if (selection?.anchor.isConnected && selection.focus.isConnected)
+    window.getSelection().setBaseAndExtent(selection.anchor, selection.anchorOffset, selection.focus, selection.focusOffset);
+}
+
+function syncRunOutput(card) {
+  const r = S.runs.get(card.dataset.runId);
+  if (!r) return;
+  let output = $('.run-output', card), view = S.runOutputs.get(r.runId);
+  if (view?.element === output) rememberRunOutput(view);
+  if (!view) {
+    // A different run starts following; never reuse the earlier run's reading state.
+    if (output.dataset.runId && output.dataset.runId !== r.runId) {
+      const fresh = output.cloneNode(false);
+      output.replaceWith(fresh); output = fresh;
+    }
+    view = { element: output, following: true, top: 0, left: 0 };
+    output.dataset.runId = r.runId;
+    S.runOutputs.set(r.runId, view);
+    output.addEventListener('scroll', () => rememberRunOutput(view));
+    output.addEventListener('wheel', e => {
+      if (e.deltaY < 0) view.following = false;
+      else if (e.deltaY > 0 && runOutputAtBottom(output) && !runOutputSelected(output)) view.following = true;
+    }, { passive: true });
+    output.addEventListener('keydown', e => {
+      if (['ArrowUp', 'PageUp', 'Home'].includes(e.key)) view.following = false;
+      else if (!e.shiftKey && ['ArrowDown', 'PageDown', 'End'].includes(e.key) &&
+        runOutputAtBottom(output) && !runOutputSelected(output)) view.following = true;
+    });
+  } else if (view.element !== output) {
+    output.replaceWith(view.element);
+    output = view.element;
+  }
+  output.hidden = false;
+  const before = output.textContent, text = r.output;
+  if (text !== before) {
+    const node = output.firstChild;
+    if (node?.nodeType === 3 && text.startsWith(before)) node.appendData(text.slice(before.length));
+    else if (node?.nodeType === 3) {
+      const notice = '[Earlier output truncated]\n';
+      const oldPrefix = before.startsWith(notice) ? notice.length : 0;
+      const newPrefix = text.startsWith(notice) ? notice.length : 0;
+      const removed = r.outputOffset - view.offset + before.length - oldPrefix - (text.length - newPrefix);
+      const retained = before.slice(oldPrefix + removed);
+      if (newPrefix && Number.isSafeInteger(removed) && removed >= 0 && removed < before.length - oldPrefix &&
+        text.slice(newPrefix).startsWith(retained)) {
+        const box = output.getBoundingClientRect(), style = getComputedStyle(output);
+        const anchor = !view.following && document.caretRangeFromPoint?.(
+          box.left + parseFloat(style.paddingLeft) + 1, box.top + parseFloat(style.paddingTop) + 1);
+        const offset = anchor?.startContainer === node ? anchor.startOffset : null;
+        const oldTop = offset == null ? null : anchor.getBoundingClientRect().top;
+        node.deleteData(0, oldPrefix + removed);
+        node.insertData(0, text.slice(0, newPrefix));
+        node.appendData(text.slice(newPrefix + retained.length));
+        if (offset != null) {
+          if (offset >= oldPrefix + removed) {
+            anchor.setStart(node, offset - oldPrefix - removed + newPrefix); anchor.collapse(true);
+            view.top += anchor.getBoundingClientRect().top - oldTop;
+          } else view.top = 0;
+        }
+      } else {
+        node.replaceData(0, node.length, text);
+        if (newPrefix && !view.following) view.top = 0;
+      }
+    } else output.textContent = text;
+  }
+  view.offset = r.outputOffset;
+  if (output.clientHeight) {
+    output.scrollTop = view.following ? output.scrollHeight : view.top;
+    output.scrollLeft = view.left;
+    // Programmatic restoration/clamping must not turn a paused reader into a follower.
+    view.top = output.scrollTop;
+    view.left = output.scrollLeft;
+  }
+}
+
 function renderRunCard(key, r = runForPr(key), earlier = false) {
   return `<div class="card copilot-run${earlier ? ' run-earlier' : ''}" data-run-key="${esc(key)}" data-run-id="${esc(r?.runId || '')}">
     <h3><span class="grow">${earlier ? 'Earlier run · Copilot in WSL' : 'Fix PR · Copilot in WSL'}</span>
@@ -558,6 +665,7 @@ function earlierRunCards(key) {
 function renderRunShelf() {
   const shelf = $('#runShelf');
   if (!shelf) return;
+  const selection = captureRunOutputs();
   const unfiltered = !S.lane && !S.q.trim() && !S.repo && S.scope === 'all';
   const loaded = !!(S.snap.lastRefresh || S.snap.error);
   const present = new Set(S.snap.prs.filter(p => !ignoredDraft(p)).map(p => p.key));
@@ -575,6 +683,7 @@ function renderRunShelf() {
       ${open ? `<div class="detail"><div class="full stack">${renderRunCard(key, r)}${earlierRunCards(key)}</div></div>` : ''}
     </div>`;
   }).join('');
+  restoreRunOutputs(selection);
 }
 
 function updateCopilotRun(r) {
@@ -584,28 +693,32 @@ function updateCopilotRun(r) {
   if (old?.runId === r.runId && ((old.status !== 'preparing' && r.status === 'preparing') ||
     (['completed', 'failed', 'cancelled'].includes(old.status) && !old.mayBeRunning && runActive(r)))) return;
   if (old?.runId === r.runId && old.updatedAt && r.updatedAt && Date.parse(r.updatedAt) < Date.parse(old.updatedAt)) return;
+  if (Number.isFinite(old?.outputOffset) && Number.isFinite(r.outputOffset) && r.outputOffset < old.outputOffset) return;
   S.runs.set(r.runId, r);
+  const previousSelection = old ? null : captureRunOutputs();
   syncCopilotButton(r.key);
   // Stream only into this panel; never replace rows or move another click target.
   const latest = runForPr(r.key)?.runId === r.runId;
   const cards = [...document.querySelectorAll('.copilot-run')].filter(el => el.dataset.runKey === r.key &&
     (el.dataset.runId === r.runId || (latest && !el.classList.contains('run-earlier'))));
-  if (!cards.length) { renderRunShelf(); if (!old) renderRows(true); return; }
+  if (!cards.length) {
+    renderRunShelf();
+    if (!old) { renderRows(true); restoreRunOutputs(previousSelection); }
+    return;
+  }
   for (const card of cards) {
+    const previousView = S.runOutputs.get(card.dataset.runId);
+    if (previousView) rememberRunOutput(previousView);
     card.dataset.runId = r.runId;
     $('.run-status', card).textContent = runSummary(r);
     $('.run-worktree', card).textContent = runWorktreeText(r);
-    const output = $('.run-output', card);
-    const atBottom = output.scrollHeight - output.clientHeight - output.scrollTop < 30;
-    output.hidden = false;
-    output.textContent = r.output;
-    if (atBottom) output.scrollTop = output.scrollHeight;
+    syncRunOutput(card);
     const cancel = $('[data-act="cancelRun"]', card);
     cancel.hidden = !runCancelable(r);
     cancel.disabled = isBusy(r.key, 'cancelRun');
     cancel.dataset.runId = r.runId;
   }
-  if (!old) { renderRunShelf(); renderRows(true); }
+  if (!old) { renderRunShelf(); renderRows(true); restoreRunOutputs(previousSelection); }
 }
 
 function syncCopilotButton(key) {

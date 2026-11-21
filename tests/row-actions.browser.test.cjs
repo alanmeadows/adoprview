@@ -9,6 +9,10 @@ const { pathToFileURL } = require('node:url');
 
 // No browser packages required: Node 22+ and a local Chromium browser.
 test('real row hit testing and action identity across refreshes', { timeout: 90000 }, async t => {
+  if (process.env.ROW_TEST_FILTER) {
+    const run = t.test.bind(t), names = process.env.ROW_TEST_FILTER.split('|');
+    t.test = (name, ...args) => names.some(part => name.includes(part)) ? run(name, ...args) : Promise.resolve();
+  }
   const profile = await mkdtemp(path.join(os.tmpdir(), 'ado-row-tests-'));
   const browser = process.env.ROW_TEST_BROWSER || 'C:\\Program Files (x86)\\Microsoft\\Edge\\Application\\msedge.exe';
   const child = spawn(browser, [
@@ -169,7 +173,7 @@ test('real row hit testing and action identity across refreshes', { timeout: 900
       await evaluate('S.speechSetup ? closeSpeechSetup() : null');
       await release({ x: 10, y: 10 });
       await move(10, 10);
-      await evaluate(`document.activeElement?.blur();`);
+      await evaluate(`document.activeElement?.blur();window.getSelection().removeAllRanges();`);
       await frame();
       await evaluate(`S.expanded.clear();S.lane=null;S.repo='';S.q='';S.scope='all';
         S.rowOrder=[];S.orderRevision=null;S.laneRetained.clear();S.runs.clear();S.busy.clear();closeRowMenu();
@@ -973,6 +977,157 @@ test('real row hit testing and action identity across refreshes', { timeout: 900
       } finally {
         await send('Emulation.setDeviceMetricsOverride', { width: 1600, height: 1000, deviceScaleFactor: 1, mobile: false });
       }
+    });
+
+    await t.test('Fix output follows the tail by default, respects wheel and keyboard reading, and resumes at the bottom', async () => {
+      const key = 'sample-service-id:101';
+      try {
+        for (const width of [1600, 900]) {
+          await send('Emulation.setDeviceMetricsOverride', { width, height: 1000, deviceScaleFactor: 1, mobile: false });
+          await reset();
+          await evaluate(`window.tailLines=Array.from({length:160},(_,n)=>'Synthetic line '+n+' for scrolling only.\\n').join('');
+            window.tailRun={...S.snap.prs.find(p=>p.key==='${key}'),runId:'tail-follow',status:'running',
+              output:window.tailLines,outputOffset:window.tailLines.length};
+            S.runs.set(window.tailRun.runId,window.tailRun);S.expanded.add('${key}');render();
+            window.tailElement=document.querySelector('[data-key="${key}"] .run-output');
+            window.tailNode=window.tailElement.firstChild;
+            window.tailState=()=>({top:window.tailElement.scrollTop,
+              bottom:window.tailElement.scrollHeight-window.tailElement.clientHeight-window.tailElement.scrollTop,
+              height:window.tailElement.clientHeight,same:window.tailElement===document.querySelector('[data-key="${key}"] .run-output'),
+              sameText:window.tailNode===window.tailElement.firstChild});
+            window.appendTail=()=>{const run=runForPr('${key}'),extra='Synthetic appended line\\n'.repeat(12);
+              updateCopilotRun({...run,output:run.output+extra,outputOffset:run.outputOffset+extra.length});};`);
+          await frame();
+          assert.ok((await evaluate('window.tailState()')).bottom <= 2, `${width}: a newly opened existing log starts at the tail`);
+          await evaluate('window.appendTail()'); await frame();
+          assert.ok((await evaluate('window.tailState()')).bottom <= 2, `${width}: coalesced output follows the tail`);
+          await evaluate(`S.expanded.delete('${key}');renderRows();window.appendTail();
+            S.expanded.add('${key}');renderRows();S.q='no matching PR';render();window.appendTail();S.q='';render();`);
+          await frame();
+          assert.ok((await evaluate('window.tailState()')).bottom <= 2,
+            'Following intent survives collapse and filter return with hidden output');
+          const p = await elementPoint(`[data-key="${key}"] .run-output`);
+          await move(p.x, p.y);
+          await send('Input.dispatchMouseEvent', { type: 'mouseWheel', x: p.x, y: p.y, deltaX: 0, deltaY: -600 });
+          await frame();
+          await evaluate(`new Promise(resolve=>setTimeout(resolve,250))`);
+          const reading = await evaluate('window.tailState()');
+          assert.ok(reading.bottom > 100, 'Trusted wheel input leaves the tail');
+          await evaluate('window.appendTail()'); await frame();
+          assert.ok(Math.abs((await evaluate('window.tailState()')).top - reading.top) <= 1, 'New output does not fight wheel reading');
+          await evaluate('window.tailElement.focus()');
+          await send('Input.dispatchKeyEvent', { type: 'keyDown', key: 'End', code: 'End', windowsVirtualKeyCode: 35 });
+          await send('Input.dispatchKeyEvent', { type: 'keyUp', key: 'End', code: 'End', windowsVirtualKeyCode: 35 });
+          await evaluate(`new Promise(resolve=>setTimeout(resolve,250))`); await frame();
+          await evaluate('window.appendTail()'); await frame();
+          assert.ok((await evaluate('window.tailState()')).bottom <= 2, 'Reaching the bottom automatically resumes following');
+          await send('Input.dispatchKeyEvent', { type: 'keyDown', key: 'Home', code: 'Home', windowsVirtualKeyCode: 36 });
+          await send('Input.dispatchKeyEvent', { type: 'keyUp', key: 'Home', code: 'Home', windowsVirtualKeyCode: 36 });
+          await evaluate(`new Promise(resolve=>setTimeout(resolve,250))`); await frame();
+          await evaluate('window.appendTail()'); await frame();
+          const home = await evaluate('window.tailState()');
+          assert.ok(home.top <= 1 && home.bottom > 100, 'Keyboard reading at the beginning stays there');
+          assert.equal(home.same && home.sameText, true, 'Streaming preserves the output and text node identities');
+          assert.equal(home.height, 280, 'Output geometry is unchanged');
+        }
+      } finally {
+        await send('Emulation.setDeviceMetricsOverride', { width: 1600, height: 1000, deviceScaleFactor: 1, mobile: false });
+      }
+    });
+
+    await t.test('Fix output preserves per-run position and selected text through rerenders, collapse, filters and refresh', async () => {
+      await reset();
+      const key = 'sample-service-id:101';
+      await evaluate(`{window.readingText=Array.from({length:160},(_,n)=>'Read selected synthetic line '+n+'\\n').join('');
+        const pr=S.snap.prs.find(p=>p.key==='${key}');
+        S.runs.set('reading-run',{...pr,runId:'reading-run',status:'running',output:window.readingText,outputOffset:window.readingText.length});
+        S.expanded.add('${key}');render();
+        window.readingElement=document.querySelector('[data-key="${key}"] .run-output');
+        window.readingNode=window.readingElement.firstChild;window.readingElement.scrollTop=400;}`);
+      await frame();
+      await evaluate(`window.getSelection().setBaseAndExtent(window.readingNode,600,window.readingNode,626);
+        window.selectedText=window.getSelection().toString();
+        updateCopilotRun({...runForPr('${key}'),output:window.readingText+'Appended synthetic text\\n',
+          outputOffset:window.readingText.length+24});renderRows();`);
+      await frame();
+      assert.equal(await evaluate('window.getSelection().toString()'), await evaluate('window.selectedText'), 'Append and shared rerender retain selected text');
+      assert.equal(await evaluate(`document.querySelector('[data-key="${key}"] .run-output')===window.readingElement`), true);
+      assert.equal(await evaluate('window.readingElement.firstChild===window.readingNode'), true);
+      assert.ok(Math.abs(await evaluate('window.readingElement.scrollTop') - 400) <= 1);
+      await move(10, 10); await evaluate('document.activeElement?.blur()'); await frame();
+      await evaluate(`setSnapshot({...S.snap,orderRevision:(S.snap.orderRevision||0)+1});`);
+      await frame();
+      assert.equal(await evaluate('window.getSelection().toString()'), await evaluate('window.selectedText'),
+        'A same-run snapshot refresh preserves selected text');
+      await evaluate(`window.getSelection().removeAllRanges();S.expanded.delete('${key}');renderRows();
+        updateCopilotRun({...runForPr('${key}'),output:runForPr('${key}').output+'Hidden append\\n',
+          outputOffset:runForPr('${key}').outputOffset+14});S.expanded.add('${key}');renderRows();`);
+      await frame();
+      assert.ok(Math.abs(await evaluate('window.readingElement.scrollTop') - 400) <= 1, 'Collapse and hidden output keep reading position');
+      await move(10, 10); await evaluate('document.activeElement?.blur()'); await frame();
+      await evaluate(`S.q='no matching PR';render();S.q='';render();
+        setSnapshot({...S.snap,orderRevision:(S.snap.orderRevision||0)+1});`);
+      await frame();
+      assert.equal(await evaluate(`document.querySelector('[data-key="${key}"] .run-output')===window.readingElement`), true);
+      assert.ok(Math.abs(await evaluate('window.readingElement.scrollTop') - 400) <= 1, 'Filter return and refresh keep the same run position');
+      await evaluate(`{const run=runForPr('${key}'),extra='After filter return\\n';
+        updateCopilotRun({...run,output:run.output+extra,outputOffset:run.outputOffset+extra.length});}`);
+      await frame();
+      assert.ok(Math.abs(await evaluate('window.readingElement.scrollTop') - 400) <= 1,
+        'The paused intent survives filter return and refresh, including the next update');
+      await evaluate(`{const old=runForPr('${key}');
+        updateCopilotRun({...old,runId:'different-run',startedAt:new Date().toISOString(),
+          output:window.readingText,outputOffset:window.readingText.length});}`);
+      await frame();
+      const newState = await evaluate(`(()=>{const output=document.querySelector('[data-key="${key}"] .copilot-run:not(.run-earlier) .run-output');
+        return {different:output!==window.readingElement,bottom:output.scrollHeight-output.clientHeight-output.scrollTop,
+          earlier:document.querySelector('.run-earlier .run-output')===window.readingElement,
+          earlierTop:window.readingElement.scrollTop};})()`);
+      assert.equal(newState.different && newState.earlier, true, 'A different run never inherits another run output node or intent');
+      assert.ok(newState.bottom <= 2 && Math.abs(newState.earlierTop - 400) <= 1);
+    });
+
+    await t.test('Fix output keeps retained reading anchors during truncation and never mistakes clamping for following', async () => {
+      await reset();
+      const key = 'sample-service-id:101';
+      await evaluate(`window.truncText=Array.from({length:160},(_,n)=>'Retained synthetic line '+n+'\\n').join('');
+        S.runs.set('truncated-run',{...S.snap.prs.find(p=>p.key==='${key}'),runId:'truncated-run',status:'running',
+          output:window.truncText,outputOffset:window.truncText.length});
+        S.expanded.add('${key}');render();
+        window.truncElement=document.querySelector('[data-key="${key}"] .run-output');window.truncElement.scrollTop=600;`);
+      const p = await elementPoint(`[data-key="${key}"] .run-output`); await move(p.x, p.y);
+      await frame();
+      await evaluate(`{const box=window.truncElement.getBoundingClientRect(),style=getComputedStyle(window.truncElement);
+        const range=document.caretRangeFromPoint(box.left+parseFloat(style.paddingLeft)+1,box.top+parseFloat(style.paddingTop)+1);
+        window.anchorText=window.truncElement.textContent.slice(range.startOffset,range.startOffset+30);
+        const run=runForPr('${key}'),cut=run.output.indexOf('\\n',run.output.indexOf('\\n')+1)+1,extra='New tail line\\n';
+        updateCopilotRun({...run,output:'[Earlier output truncated]\\n'+run.output.slice(cut)+extra,
+          outputOffset:run.outputOffset+extra.length});}`);
+      await frame();
+      assert.equal(await evaluate(`(()=>{const box=window.truncElement.getBoundingClientRect(),style=getComputedStyle(window.truncElement);
+        const range=document.caretRangeFromPoint(box.left+parseFloat(style.paddingLeft)+1,box.top+parseFloat(style.paddingTop)+1);
+        return window.truncElement.textContent.slice(range.startOffset,range.startOffset+30);})()`),
+        await evaluate('window.anchorText'), 'A retained visible anchor does not shift when the tail drops earlier lines');
+      await evaluate(`{const run=runForPr('${key}'),prefix='[Earlier output truncated]\\n';
+        const body=run.output.slice(prefix.length),cut=body.indexOf('Retained synthetic line 80\\n'),extra='New tail line\\n';
+        updateCopilotRun({...run,output:prefix+body.slice(cut)+extra,outputOffset:run.outputOffset+extra.length});}`);
+      await frame();
+      assert.ok(await evaluate('window.truncElement.scrollTop') <= 1,
+        'A removed anchor moves to the retained beginning even when later old output survives');
+      await evaluate(`{const run=runForPr('${key}');
+        updateCopilotRun({...run,output:'[Earlier output truncated]\\nOnly the new retained tail\\n',outputOffset:run.outputOffset+10000});}`);
+      await frame();
+      await evaluate(`{const run=runForPr('${key}'),extra='More new output\\n'.repeat(80);
+        updateCopilotRun({...run,output:run.output+extra,outputOffset:run.outputOffset+extra.length});}`);
+      await frame();
+      assert.ok(await evaluate('window.truncElement.scrollTop') <= 1, 'Lost historical position stays at the disclosed retained beginning, not the new tail');
+      assert.match(await evaluate('window.truncElement.textContent'), /^\[Earlier output truncated\]/);
+      await evaluate(`window.truncElement.scrollTop=window.truncElement.scrollHeight-window.truncElement.clientHeight-1.25;`); await frame();
+      await evaluate(`{const run=runForPr('${key}'),extra='Fractional-scroll tail\\n';
+        updateCopilotRun({...run,output:run.output+extra,outputOffset:run.outputOffset+extra.length});}`);
+      await frame();
+      assert.ok(await evaluate('window.truncElement.scrollHeight-window.truncElement.clientHeight-window.truncElement.scrollTop') <= 2,
+        'The small bottom tolerance resumes tail following');
     });
 
     await t.test('inline output streams without replacing rows, remains on captured PR through refresh/removal, and cancels that run', async () => {
