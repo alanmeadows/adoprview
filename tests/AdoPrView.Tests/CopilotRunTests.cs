@@ -59,11 +59,8 @@ static class CopilotRunTests
         {
             foreach (var detach in new[] { false, true })
             {
-                using var fixture = new CopilotRecoveryTests.Fixture();
-                var fake = fixture.Transport;
-                fake.BlockFollowers = true;
-                var service = fixture.Service();
-                Task? recovery = null;
+                var fake = new FakeTransport { IgnoreFollowCancellation = true };
+                var service = new CopilotRunService(fake);
                 var run = await service.StartAsync(Request());
                 await fake.Started.Task.WaitAsync(TimeSpan.FromSeconds(5));
                 var chunk = new string('x', 4096);
@@ -529,8 +526,11 @@ static class CopilotRunTests
                 Exception? failure = null;
                 CoreWebView2Environment? environment = null;
                 var exited = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
-                var fake = new FakeTransport { IgnoreFollowCancellation = true };
-                var service = new CopilotRunService(fake);
+                using var fixture = new CopilotRecoveryTests.Fixture();
+                var fake = fixture.Transport;
+                fake.BlockFollowers = true;
+                var service = fixture.Service();
+                Task? recovery = null;
                 CopilotRunDelivery? delivery = null;
                 try
                 {
