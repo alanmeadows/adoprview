@@ -1124,13 +1124,17 @@ test('real row hit testing and action identity across refreshes', { timeout: 900
         S.settings.futureProvider={preserve:'synthetic unknown field'};
         S.settings.autoComplete.futureOption='synthetic nested option';
         window.committedDraftSettings=structuredClone(S.settings);
-        window.draftWrites=[];window.denyDraftMethod='';
+        window.draftWrites=[];window.denyDraftMethod='';window.holdDraftMethod='';
         MockHost.rpc=async(method,p)=>{
           if(['saveSettings','setTheme','addRepo','removeRepo'].includes(method)){
             window.draftWrites.push({method,params:structuredClone(p)});
+            if(window.holdDraftMethod===method)await new Promise(resolve=>window.completeDraftWrite=resolve);
             if(window.denyDraftMethod===method)throw Error('Synthetic '+method+' write failed');
             const next=structuredClone(window.committedDraftSettings);
-            if(method==='saveSettings')Object.assign(next,p.settings,{theme:next.theme});
+            if(method==='saveSettings'){
+              Object.assign(next,p.settings,{theme:next.theme});
+              next.wslDistro=next.wslDistro?.trim()||null;
+            }
             if(method==='setTheme')next.theme=p.theme;
             if(method==='addRepo'){
               if(p.url!=='https://dev.azure.com/contoso/Sample/_git/synthetic-draft-repo')
@@ -1293,6 +1297,70 @@ test('real row hit testing and action identity across refreshes', { timeout: 900
         await frame();
         await assertDraft(); await assertCommitted({ ...saved, theme:'light' });
         assert.equal(await evaluate('document.documentElement.dataset.theme'), 'light');
+      });
+    });
+
+    await t.test('GUI settings delayed Save and Add preserve independent, newer and reopened-drawer drafts', async () => {
+      await withSettingsDraftFixture(async () => {
+        const finishWrite = async () => {
+          assert.equal(await evaluate(`typeof window.completeDraftWrite`), 'function', 'Synthetic write must be pending');
+          await evaluate(`window.holdDraftMethod='';window.completeDraftWrite();delete window.completeDraftWrite;`);
+          await frame();
+        };
+        await evaluate(`window.holdDraftMethod='saveSettings';
+          document.querySelector('#repoUrl').value='Unsubmitted repository URL';
+          document.querySelector('#wlInput').value='Unsubmitted author';`);
+        await click(await elementPoint('[data-dact="save"]')); await frame();
+        await evaluate(`document.querySelector('#triageInstructions').value='Newer Custom Ask';
+          document.querySelector('#refreshSeconds').value='334';
+          document.querySelector('#mergeStrategy').value='squash';
+          document.querySelector('#notifications').checked=true;
+          renderDrawer();`);
+        await finishWrite();
+        assert.equal(await evaluate('S.settings.triageInstructions'), 'Unsaved Custom Ask\n');
+        assert.equal(await evaluate('S.settings.refreshSeconds'), 333);
+        assert.equal(await evaluate(`document.querySelector('#triageInstructions').value`), 'Newer Custom Ask');
+        assert.equal(await evaluate(`document.querySelector('#refreshSeconds').value`), '334');
+        assert.equal(await evaluate(`document.querySelector('#mergeStrategy').value`), 'squash');
+        assert.equal(await evaluate(`document.querySelector('#notifications').checked`), true);
+        assert.equal(await evaluate(`document.querySelector('#repoUrl').value`), 'Unsubmitted repository URL');
+        assert.equal(await evaluate(`document.querySelector('#wlInput').value`), 'Unsubmitted author');
+        assert.equal(await evaluate(`document.querySelector('#wslDistro').value`), 'Synthetic Ubuntu');
+
+        await evaluate(`window.holdDraftMethod='saveSettings';document.querySelector('#wslDistro').value='  Submitted distro  ';`);
+        await click(await elementPoint('[data-dact="save"]')); await frame();
+        await evaluate(`(async()=>{closeDrawer();await openDrawer();
+          document.querySelector('#triageInstructions').value='Newer Custom Ask';
+          document.querySelector('#wslDistro').value='  Submitted distro  ';
+          document.querySelector('#wlInput').value='Reopened author';renderDrawer();})()`);
+        await finishWrite();
+        assert.equal(await evaluate('S.settings.triageInstructions'), 'Newer Custom Ask');
+        assert.equal(await evaluate(`document.querySelector('#triageInstructions').value`), 'Newer Custom Ask');
+        assert.equal(await evaluate('S.settings.wslDistro'), 'Submitted distro');
+        assert.equal(await evaluate(`document.querySelector('#wslDistro').value`), '  Submitted distro  ', 'Same-valued reopened input is not normalized by the previous drawer Save');
+        assert.equal(await evaluate(`document.querySelector('#wlInput').value`), 'Reopened author');
+
+        for (const action of ['addRepo','addWl']) {
+          const id = action === 'addRepo' ? 'repoUrl' : 'wlInput';
+          const method = action === 'addRepo' ? 'addRepo' : 'saveSettings';
+          const submitted = action === 'addRepo' ? 'https://dev.azure.com/contoso/Sample/_git/synthetic-draft-repo' : 'Submitted author';
+          await evaluate(`window.holdDraftMethod=${JSON.stringify(method)};
+            document.querySelector('#${id}').value=${JSON.stringify(submitted)};`);
+          await click(await elementPoint(`[data-dact="${action}"]`)); await frame();
+          await evaluate(`document.querySelector('#${id}').value='Next unsubmitted value';renderDrawer();`);
+          await finishWrite();
+          assert.equal(await evaluate(`document.querySelector('#${id}').value`), 'Next unsubmitted value', `${action} must preserve newer text after rerender`);
+          if (action === 'addRepo') {
+            await click(await elementPoint('[data-dact="removeRepo"][data-key="contoso/sample/synthetic-draft-repo"]')); await frame();
+          }
+
+          await evaluate(`window.holdDraftMethod=${JSON.stringify(method)};
+            document.querySelector('#${id}').value=${JSON.stringify(submitted)};`);
+          await click(await elementPoint(`[data-dact="${action}"]`)); await frame();
+          await evaluate(`(async()=>{closeDrawer();await openDrawer();document.querySelector('#${id}').value=${JSON.stringify(submitted)};renderDrawer();})()`);
+          await finishWrite();
+          assert.equal(await evaluate(`document.querySelector('#${id}').value`), submitted, `${action} must not clear same-valued text in a reopened drawer`);
+        }
       });
     });
 
