@@ -1415,19 +1415,19 @@ test('real row hit testing and action identity across refreshes', { timeout: 900
           const output='Shelf reading synthetic output\\n'.repeat(160);
           S.runs.set('shelf-older-run',{...pr,runId:'shelf-older-run',status:'needs-attention',mayBeRunning:false,
             startedAt:'2026-01-01T00:00:00Z',output,outputOffset:output.length});
-          S.runs.set('shelf-newer-run',{...pr,runId:'shelf-newer-run',status:'completed',mayBeRunning:false,
+          S.runs.set('shelf-newer-run',{...pr,runId:'shelf-newer-run',status:'needs-attention',mayBeRunning:false,
             startedAt:'2026-01-02T00:00:00Z',output,outputOffset:output.length});
           S.runs.set('shelf-collapsed-run',{...other,runId:'shelf-collapsed-run',status:'running',output:'Collapsed output\\n',
             outputOffset:'Collapsed output\\n'.length});
           render();setSnapshot({...S.snap,orderRevision:(S.snap.orderRevision||0)+1,prs:[]});}`);
         await frame();
         await click(await point('sample-service-id:101', '.run-heading')); await frame();
-        const captured = await point('sample-service-id:101', '.run-earlier [data-act="cancelRun"]');
+        const captured = await point('sample-service-id:101', '.copilot-run:not(.run-earlier) [data-act="cancelRun"]');
         await move(captured.x, captured.y);
         if (pressed) await press(captured);
         await evaluate(`window.shelfRow=document.querySelector('#runShelf [data-key="sample-service-id:101"]');
-          window.shelfCancel=window.shelfRow.querySelector('.run-earlier [data-act="cancelRun"]');
-          window.shelfOutput=window.shelfRow.querySelector('.run-earlier .run-output');
+          window.shelfCancel=window.shelfRow.querySelector('.copilot-run:not(.run-earlier) [data-act="cancelRun"]');
+          window.shelfOutput=window.shelfRow.querySelector('.copilot-run:not(.run-earlier) .run-output');
           window.shelfOutput.scrollTop=400;
           const node=window.shelfOutput.firstChild;window.getSelection().setBaseAndExtent(node,700,node,725);
           window.shelfSelected=window.getSelection().toString();`);
@@ -1436,11 +1436,16 @@ test('real row hit testing and action identity across refreshes', { timeout: 900
           updateCopilotRun({...run,output:run.output+extra,outputOffset:run.outputOffset+extra.length});}`);
         await frame();
         assert.equal(await evaluate('window.shelfCancel.isConnected'), true, 'A collapsed run update must not rebuild another captured shelf card');
+        if (pressed) {
+          await evaluate(`{const run=S.runs.get('shelf-newer-run');
+            updateCopilotRun({...run,runId:'shelf-unseen-run',status:'recovering',startedAt:'2026-01-03T00:00:00Z'});}`);
+          await frame();
+        }
         await evaluate(`{const run=S.runs.get('shelf-older-run'),extra='Recovery while interacting\\n';
           updateCopilotRun({...run,status:'recovering',output:run.output+extra,outputOffset:run.outputOffset+extra.length});}`);
         await frame();
-        assert.equal(await evaluate('window.shelfRow.querySelector(".run-earlier [data-act=\\"cancelRun\\"]")===window.shelfCancel'), true);
-        assert.equal(await evaluate('window.shelfCancel.dataset.runId'), 'shelf-older-run');
+        assert.equal(await evaluate('window.shelfRow.querySelector(".copilot-run:not(.run-earlier) [data-act=\\"cancelRun\\"]")===window.shelfCancel'), true);
+        assert.equal(await evaluate('window.shelfCancel.dataset.runId'), 'shelf-newer-run');
         assert.equal(await evaluate('window.shelfOutput.scrollTop'), 400);
         assert.equal(await evaluate('window.getSelection().toString()'), await evaluate('window.shelfSelected'));
         const hit = await evaluate(`(()=>{const r=window.shelfCancel.getBoundingClientRect();
@@ -1450,11 +1455,13 @@ test('real row hit testing and action identity across refreshes', { timeout: 900
         if (!pressed) await press(captured);
         await release(captured); await frame();
         assert.deepEqual((await calls()).filter(c=>c.method==='cancelCopilot'),
-          [{method:'cancelCopilot',key:'sample-service-id:101',runId:'shelf-older-run'}]);
+          [{method:'cancelCopilot',key:'sample-service-id:101',runId:'shelf-newer-run'}]);
         await move(10,10); await evaluate('document.activeElement?.blur()'); await frame();
         assert.equal(await evaluate('S.rowsPending'), false, 'Deferred shelf changes flush after interaction ends');
-        assert.equal(await evaluate('document.querySelector("#runShelf [data-run-id=\\"shelf-older-run\\"] .run-output")===window.shelfOutput'), true);
+        assert.equal(await evaluate('document.querySelector("#runShelf [data-run-id=\\"shelf-newer-run\\"] .run-output")===window.shelfOutput'), true);
         assert.equal(await evaluate('window.shelfOutput.scrollTop'), 400);
+        const latest = pressed ? 'shelf-unseen-run' : 'shelf-older-run';
+        assert.equal(await evaluate('document.querySelector("#runShelf .copilot-run:not(.run-earlier)").dataset.runId'), latest);
       }
     });
 
