@@ -1267,6 +1267,7 @@ test('real row hit testing and action identity across refreshes', { timeout: 900
           const deadline=Date.now()+10000;
           const check=()=>window.__ready?resolve():Date.now()>deadline?reject(Error('UI did not boot')):setTimeout(check,20);check();
         })`);
+        await send('Page.bringToFront');
         await frame();
       };
       for (const hint of ['', '&theme=github']) {
