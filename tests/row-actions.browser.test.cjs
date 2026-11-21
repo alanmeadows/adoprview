@@ -1345,12 +1345,16 @@ test('real row hit testing and action identity across refreshes', { timeout: 900
             startedAt:'2026-01-01T00:00:00Z',output:older,outputOffset:older.length});
           S.runs.set('newer-completed-run',{...pr,runId:'newer-completed-run',status:'completed',mayBeRunning:false,
             startedAt:'2026-01-02T00:00:00Z',output:newer,outputOffset:newer.length});
+          S.runs.set('middle-completed-run',{...pr,runId:'middle-completed-run',status:'completed',mayBeRunning:false,
+            startedAt:'2026-01-01T12:00:00Z',output:newer,outputOffset:newer.length});
           S.expanded.add(key);render();
           window.promotionRow=document.querySelector('#rows [data-key="'+key+'"]');
           window.promotionFix=window.promotionRow.querySelector('.row [data-act="triage"]');
           window.olderOutput=window.promotionRow.querySelector('[data-run-id="older-recovered-run"] .run-output');
           window.newerOutput=window.promotionRow.querySelector('[data-run-id="newer-completed-run"] .run-output');
+          window.middleOutput=window.promotionRow.querySelector('[data-run-id="middle-completed-run"] .run-output');
           window.olderOutput.scrollTop=400;window.newerOutput.scrollTop=700;
+          window.middleOutput.scrollTop=500;
           window.olderNode=window.olderOutput.firstChild;
           window.olderReadingY=()=>{const range=document.createRange(),node=window.olderOutput.firstChild;
             const start=node.data.indexOf('Older recovered synthetic line 30\\n');
@@ -1372,20 +1376,21 @@ test('real row hit testing and action identity across refreshes', { timeout: 900
         await frame();
         const roles = () => evaluate(`[...window.promotionRow.querySelectorAll('.copilot-run')].map(e=>[e.dataset.runId,e.classList.contains('run-earlier')])`);
         if (interacting) {
-          assert.deepEqual(await roles(), [['newer-completed-run', false], ['older-recovered-run', true]],
+          assert.deepEqual(await roles(), [['newer-completed-run', false], ['middle-completed-run', true], ['older-recovered-run', true]],
             'While interacting, update the existing recovered card without moving controls or duplicating output');
           assert.equal(await evaluate('window.promotionRow===document.querySelector("#rows [data-key=\\"sample-service-id:101\\"]")'), true);
           assert.equal(await evaluate('window.promotionRow.querySelector(".row [data-act=\\"triage\\"]")===window.promotionFix'), true);
           await move(10, 10); await frame();
           await evaluate('window.promotionRow=document.querySelector("#rows [data-key=\\"sample-service-id:101\\"]")');
         }
-        assert.deepEqual(await roles(), [['older-recovered-run', false], ['newer-completed-run', true]]);
+        assert.deepEqual(await roles(), [['older-recovered-run', false], ['newer-completed-run', true], ['middle-completed-run', true]]);
         assert.equal(await evaluate('window.promotionRow.querySelector(".copilot-run:not(.run-earlier) .run-output")===window.olderOutput'), true);
         assert.equal(await evaluate('window.promotionRow.querySelector(".run-earlier .run-output")===window.newerOutput'), true);
         assert.equal(await evaluate('window.olderOutput.firstChild===window.olderNode'), true);
         assert.equal(await evaluate('window.getSelection().toString()'), await evaluate('window.promotionSelected'));
         assert.ok(Math.abs(await evaluate('window.olderReadingY()') - readingY) <= 1, 'Promotion preserves the retained reading anchor');
         assert.equal(await evaluate('window.newerOutput.scrollTop'), 700);
+        assert.equal(await evaluate('window.middleOutput.scrollTop'), 500);
         if (!interacting) {
           assert.equal(await evaluate('window.promotionRow===document.querySelector("#rows [data-key=\\"sample-service-id:101\\"]")'), true);
           assert.equal(await evaluate('window.promotionRow.querySelector(".row [data-act=\\"triage\\"]")===window.promotionFix'), true,
@@ -1394,10 +1399,62 @@ test('real row hit testing and action identity across refreshes', { timeout: 900
         assert.equal(await evaluate('window.promotionRow.querySelector(".copilot-run:not(.run-earlier) [data-act=\\"cancelRun\\"]").dataset.runId'), 'older-recovered-run');
         await evaluate(`updateCopilotRun({...S.runs.get('older-recovered-run'),status:'completed',mayBeRunning:false})`);
         await frame();
-        assert.deepEqual(await roles(), [['newer-completed-run', false], ['older-recovered-run', true]]);
+        assert.deepEqual(await roles(), [['newer-completed-run', false], ['middle-completed-run', true], ['older-recovered-run', true]],
+          'Demoting an older recovered run preserves the existing chronological history order');
         assert.equal(await evaluate('window.getSelection().toString()'), await evaluate('window.promotionSelected'));
         assert.ok(Math.abs(await evaluate('window.olderReadingY()') - readingY) <= 1, 'Demotion preserves the same retained reading anchor');
         assert.equal(await evaluate('window.newerOutput.scrollTop'), 700);
+        assert.equal(await evaluate('window.middleOutput.scrollTop'), 500);
+      }
+    });
+
+    await t.test('Fix output shelf defers background card changes while hovering or pressing captured cancellation', async () => {
+      for (const pressed of [false, true]) {
+        await reset(true);
+        await evaluate(`{const key='sample-service-id:101',pr=S.snap.prs.find(p=>p.key===key),other=S.snap.prs.find(p=>p.id===104);
+          const output='Shelf reading synthetic output\\n'.repeat(160);
+          S.runs.set('shelf-older-run',{...pr,runId:'shelf-older-run',status:'needs-attention',mayBeRunning:false,
+            startedAt:'2026-01-01T00:00:00Z',output,outputOffset:output.length});
+          S.runs.set('shelf-newer-run',{...pr,runId:'shelf-newer-run',status:'completed',mayBeRunning:false,
+            startedAt:'2026-01-02T00:00:00Z',output,outputOffset:output.length});
+          S.runs.set('shelf-collapsed-run',{...other,runId:'shelf-collapsed-run',status:'running',output:'Collapsed output\\n',
+            outputOffset:'Collapsed output\\n'.length});
+          render();setSnapshot({...S.snap,orderRevision:(S.snap.orderRevision||0)+1,prs:[]});}`);
+        await frame();
+        await click(await point('sample-service-id:101', '.run-heading')); await frame();
+        const captured = await point('sample-service-id:101', '.run-earlier [data-act="cancelRun"]');
+        await move(captured.x, captured.y);
+        if (pressed) await press(captured);
+        await evaluate(`window.shelfRow=document.querySelector('#runShelf [data-key="sample-service-id:101"]');
+          window.shelfCancel=window.shelfRow.querySelector('.run-earlier [data-act="cancelRun"]');
+          window.shelfOutput=window.shelfRow.querySelector('.run-earlier .run-output');
+          window.shelfOutput.scrollTop=400;
+          const node=window.shelfOutput.firstChild;window.getSelection().setBaseAndExtent(node,700,node,725);
+          window.shelfSelected=window.getSelection().toString();`);
+        await frame();
+        await evaluate(`{const run=S.runs.get('shelf-collapsed-run'),extra='Collapsed background append\\n';
+          updateCopilotRun({...run,output:run.output+extra,outputOffset:run.outputOffset+extra.length});}`);
+        await frame();
+        assert.equal(await evaluate('window.shelfCancel.isConnected'), true, 'A collapsed run update must not rebuild another captured shelf card');
+        await evaluate(`{const run=S.runs.get('shelf-older-run'),extra='Recovery while interacting\\n';
+          updateCopilotRun({...run,status:'recovering',output:run.output+extra,outputOffset:run.outputOffset+extra.length});}`);
+        await frame();
+        assert.equal(await evaluate('window.shelfRow.querySelector(".run-earlier [data-act=\\"cancelRun\\"]")===window.shelfCancel'), true);
+        assert.equal(await evaluate('window.shelfCancel.dataset.runId'), 'shelf-older-run');
+        assert.equal(await evaluate('window.shelfOutput.scrollTop'), 400);
+        assert.equal(await evaluate('window.getSelection().toString()'), await evaluate('window.shelfSelected'));
+        const hit = await evaluate(`(()=>{const r=window.shelfCancel.getBoundingClientRect();
+          return {x:r.x+r.width/2,y:r.y+r.height/2,hit:document.elementFromPoint(${captured.x},${captured.y})?.closest('[data-act]')===window.shelfCancel};})()`);
+        assert.ok(Math.abs(hit.x-captured.x)<=1 && Math.abs(hit.y-captured.y)<=1 && hit.hit,
+          'The same captured cancellation target remains under the pointer');
+        if (!pressed) await press(captured);
+        await release(captured); await frame();
+        assert.deepEqual((await calls()).filter(c=>c.method==='cancelCopilot'),
+          [{method:'cancelCopilot',key:'sample-service-id:101',runId:'shelf-older-run'}]);
+        await move(10,10); await evaluate('document.activeElement?.blur()'); await frame();
+        assert.equal(await evaluate('S.rowsPending'), false, 'Deferred shelf changes flush after interaction ends');
+        assert.equal(await evaluate('document.querySelector("#runShelf [data-run-id=\\"shelf-older-run\\"] .run-output")===window.shelfOutput'), true);
+        assert.equal(await evaluate('window.shelfOutput.scrollTop'), 400);
       }
     });
 

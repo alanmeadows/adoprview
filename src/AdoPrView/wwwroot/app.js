@@ -714,9 +714,10 @@ function earlierRunCards(key) {
 
 // Runs stay inside their PR row. Departed PRs and ignored drafts keep collapsible
 // run entries here (unless hidden), only in the unfiltered view.
-function renderRunShelf() {
+function renderRunShelf(whenIdle = false) {
   const shelf = $('#runShelf');
   if (!shelf) return;
+  if (whenIdle && rowsInUse()) { S.rowsPending = true; renderStatus(); return; }
   const selection = captureRunOutputs();
   const unfiltered = !S.lane && !S.q.trim() && !S.repo && S.scope === 'all';
   const loaded = !!(S.snap.lastRefresh || S.snap.error);
@@ -754,13 +755,21 @@ function updateCopilotRun(r) {
   const runCards = [...document.querySelectorAll('.copilot-run')].filter(el => el.dataset.runKey === r.key);
   const main = runCards.find(el => !el.classList.contains('run-earlier'));
   const promoted = runCards.find(el => el.dataset.runId === latestId);
-  if (main && promoted && main !== promoted && rowsInUse()) { S.rowsPending = true; renderStatus(); }
+  const deferMain = !!main?.dataset.runId && main.dataset.runId !== latestId && rowsInUse();
+  if (deferMain) { S.rowsPending = true; renderStatus(); }
   else if (main && promoted && main !== promoted) {
     const selection = captureRunOutputs();
     main.classList.add('run-earlier'); $('h3 .grow', main).textContent = runCardTitle(true);
     promoted.classList.remove('run-earlier'); $('h3 .grow', promoted).textContent = runCardTitle(false);
     main.before(promoted);
-    for (const card of [main, promoted]) {
+    let previous = promoted;
+    for (const run of runsForPr(r.key).filter(run => run.runId !== latestId)) {
+      const card = runCards.find(card => card.dataset.runId === run.runId);
+      if (!card) continue;
+      if (previous.nextElementSibling !== card) previous.after(card);
+      previous = card;
+    }
+    for (const card of runCards) {
       const view = S.runOutputs.get(card.dataset.runId);
       if (view) {
         view.element.scrollTop = view.top;
@@ -771,9 +780,9 @@ function updateCopilotRun(r) {
     restoreRunOutputSelection(selection);
   }
   const cards = runCards.filter(el =>
-    (el.dataset.runId === r.runId || (latest && !promoted && !el.classList.contains('run-earlier'))));
+    (el.dataset.runId === r.runId || (latest && !promoted && !deferMain && !el.classList.contains('run-earlier'))));
   if (!cards.length) {
-    renderRunShelf();
+    renderRunShelf(true);
     if (!old) { renderRows(true); restoreRunOutputs(previousSelection); }
     return;
   }
@@ -789,7 +798,7 @@ function updateCopilotRun(r) {
     cancel.disabled = isBusy(r.key, 'cancelRun');
     cancel.dataset.runId = r.runId;
   }
-  if (!old) { renderRunShelf(); renderRows(true); restoreRunOutputs(previousSelection); }
+  if (!old) { renderRunShelf(true); renderRows(true); restoreRunOutputs(previousSelection); }
 }
 
 function syncCopilotButton(key) {
@@ -1782,8 +1791,15 @@ function wire() {
     message.hidden = false;
   }, true);
   document.addEventListener('contextmenu', openRowMenu);
-  rows.addEventListener('pointerenter', () => { S.pointerInRows = true; });
-  rows.addEventListener('pointerleave', () => { S.pointerInRows = false; flushRowUpdates(); });
+  const rowRegions = [rows, $('#runShelf')];
+  for (const region of rowRegions) {
+    region.addEventListener('pointerenter', () => { S.pointerInRows = true; });
+    region.addEventListener('pointerleave', e => {
+      S.pointerInRows = !!e.relatedTarget?.nodeType && rowRegions.some(root => root.contains(e.relatedTarget));
+      flushRowUpdates();
+    });
+    region.addEventListener('focusout', () => requestAnimationFrame(flushRowUpdates));
+  }
   document.addEventListener('pointerdown', (e) => {
     if (S.rowMenu && !e.target.closest('#rowMenu')) { closeRowMenu(); requestAnimationFrame(flushRowUpdates); }
     if (e.target.closest('.pr')) S.rowPointerDown = true;
@@ -1794,7 +1810,6 @@ function wire() {
   };
   document.addEventListener('pointerup', endPointer, true);
   document.addEventListener('pointercancel', endPointer, true);
-  rows.addEventListener('focusout', () => requestAnimationFrame(flushRowUpdates));
   window.addEventListener('blur', () => {
     closeRowMenu();
     S.pointerInRows = false;

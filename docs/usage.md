@@ -580,6 +580,8 @@ cleared. Hiding a selected panel or losing the selected text to truncation does
 not resume following. A selection surviving retention at an unchanged,
 unclamped bottom still resumes when cleared. Each run keeps its own
 reading position across collapse, filtering and ordinary dashboard rerenders.
+Background changes to run-shelf cards wait while you interact with their
+cancellation controls; live output continues in the existing run panel.
 If the bounded tail drops the text you were reading, its truncation notice and
 remaining beginning are shown instead of silently snapping to the latest text;
 the original supervised log remains available.
