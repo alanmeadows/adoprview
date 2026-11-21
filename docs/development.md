@@ -162,6 +162,11 @@ synthetic Windows failure and verifies the dashboard stays visible/responding.
 Browser row checks cover lost/uncertain process activity and failed action
 feedback with both normal and reduced motion.
 
+Focused browser checks can set `ROW_TEST_FILTER` to a `|`-separated list of
+subtest-name substrings, for example `Fix output` or `GUI `. Then run
+`node --test tests\row-actions.browser.test.cjs` and clear the variable.
+The harness uses disposable Edge profiles and intercepted service calls.
+
 Direct reviewer approval has a focused offline native suite:
 
 ```powershell

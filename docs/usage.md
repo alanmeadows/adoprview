@@ -212,6 +212,10 @@ their votes. Build policies have **Re-queue** and a link to the build.
 For a failed build policy, a **Failed gate** card lists the failed tasks and
 their reported issues. The first failed task's log tail loads automatically;
 other tasks have **Load log tail**. Loaded logs offer **Timestamps** and **Copy**.
+A failed log read stays visible with **Retry log tail** for that exact task.
+During retry, its previous error remains visible and duplicate requests are
+blocked; another failure stays retryable. Refreshing or reopening does not
+start an automatic retry loop.
 **Re-queue** asks ADO to re-run that build policy evaluation, and **Open logs**
 opens the build in your browser.
 
