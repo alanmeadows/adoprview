@@ -59,8 +59,11 @@ static class CopilotRunTests
         {
             foreach (var detach in new[] { false, true })
             {
-                var fake = new FakeTransport { IgnoreFollowCancellation = true };
-                var service = new CopilotRunService(fake);
+                using var fixture = new CopilotRecoveryTests.Fixture();
+                var fake = fixture.Transport;
+                fake.BlockFollowers = true;
+                var service = fixture.Service();
+                Task? recovery = null;
                 var run = await service.StartAsync(Request());
                 await fake.Started.Task.WaitAsync(TimeSpan.FromSeconds(5));
                 var chunk = new string('x', 4096);
@@ -531,9 +534,9 @@ static class CopilotRunTests
                 CopilotRunDelivery? delivery = null;
                 try
                 {
-                    environment = await CoreWebView2Environment.CreateAsync(null, profile);
+                    environment = await CoreWebView2Environment.CreateAsync(null, profile).WaitAsync(TimeSpan.FromSeconds(15));
                     environment.BrowserProcessExited += (_, _) => exited.TrySetResult();
-                    await browser.EnsureCoreWebView2Async(environment);
+                    await browser.EnsureCoreWebView2Async(environment).WaitAsync(TimeSpan.FromSeconds(15));
                     var navigated = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
                     browser.CoreWebView2.NavigationCompleted += (_, _) => navigated.TrySetResult();
                     browser.NavigateToString("<!doctype html><title>Bounded synthetic task control</title><p>No live model or ADO.</p>");
@@ -546,9 +549,25 @@ static class CopilotRunTests
                     }), ex => failure ??= ex);
                     service.Changed += delivery.Offer;
                     var run = await service.StartAsync(Request());
-                    await fake.Started.Task.WaitAsync(TimeSpan.FromSeconds(5));
-                    for (var i = 0; i < 64; i++) fake.Output("bounded synthetic output\n");
-                    fake.Output("NATIVE-TAIL\n");
+                    await Wait(service, run.RunId, state => state.Output.Contains("FAKE-READY"));
+                    var saved = fixture.Store.Load().Single().Saved!;
+                    var otherId = Guid.NewGuid().ToString("N");
+                    fixture.Store.Write(saved with
+                    {
+                        State = saved.State with
+                        {
+                            RunId = otherId, Request = Request(99) with { Prompt = "" },
+                            SessionId = Guid.NewGuid().ToString(),
+                            WorktreePath = saved.State.WorktreePath!.Replace(run.RunId, otherId)
+                        },
+                        RunDirectory = saved.RunDirectory!.Replace(run.RunId, otherId),
+                        OwnershipToken = new string('b', 64), TaskIdentity = null
+                    });
+                    fake.BlockPreflight = true;
+                    recovery = service.RecoverAsync();
+                    await fake.RecoveryEntered.Task.WaitAsync(TimeSpan.FromSeconds(3));
+                    for (var i = 0; i < 64; i++) fake.Emit("bounded synthetic output\n");
+                    fake.Emit("NATIVE-TAIL\n");
                     await Task.Delay(300);
                     Check(posts == 1, "Unacknowledged browser queued more than one output message");
                     var stopped = new TaskCompletionSource<CopilotRunState?>(TaskCreationOptions.RunContinuationsAsynchronously);
@@ -557,24 +576,40 @@ static class CopilotRunTests
                         try { stopped.TrySetResult(await service.CancelAsync(run.Key, run.RunId)); }
                         catch (Exception ex) { stopped.TrySetException(ex); }
                     };
+                    var timing = Stopwatch.StartNew();
                     stop.RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
                     var state = await stopped.Task.WaitAsync(TimeSpan.FromSeconds(3));
+                    timing.Stop();
                     Check(window.IsVisible && state is { Status: "cancelled", MayBeRunning: false, WorktreeRetained: true } &&
-                        state.Output.EndsWith("NATIVE-TAIL\n") && fake.Calls.Count(c => c.Operation == "stop") == 1,
+                        state.Output.EndsWith("NATIVE-TAIL\n") && fake.Stops == 1,
                         "Native stop waited for the browser or lost output/work");
-                    Check((await browser.CoreWebView2.ExecuteScriptAsync("document.title")).Contains("Bounded synthetic task control"),
+                    Check(!recovery.IsCompleted && !fake.ReleaseFollowers.Task.IsCompleted && posts == 1,
+                        "Native stop required blocked recovery/follow/output sentinels to resolve");
+                    Check(fixture.Store.Load().Single(record => record.Saved?.State.RunId == run.RunId).Saved!.TaskConfirmedStopped,
+                        "Native stop did not preserve its durable exact-task stop proof");
+                    Console.WriteLine($"NATIVE_CONTROL stopMs={timing.Elapsed.TotalMilliseconds:F1} deadlineMs=3000 recoveryBlocked=true followerBlocked=true unacknowledgedPosts={posts}");
+                    Check((await browser.CoreWebView2.ExecuteScriptAsync("document.title").WaitAsync(TimeSpan.FromSeconds(3))).Contains("Bounded synthetic task control"),
                         "Synthetic dashboard is not responsive");
                     await delivery.DisposeAsync().AsTask().WaitAsync(TimeSpan.FromSeconds(2));
                     await service.DisposeAsync().AsTask().WaitAsync(TimeSpan.FromSeconds(2));
-                    fake.Output("LATE");
+                    fake.Emit("LATE");
                     Check(service.Get(run.RunId)!.Output == state!.Output, "Hung follower delivered late output after disposal");
                 }
                 catch (Exception ex) { failure = ex; }
                 finally
                 {
-                    if (delivery is not null) await delivery.DisposeAsync();
-                    await service.DisposeAsync();
-                    fake.Finish(143);
+                    fake.ReleasePreflight.TrySetResult();
+                    fake.ReleaseFollowers.TrySetResult();
+                    if (recovery is not null)
+                        try { await recovery.WaitAsync(TimeSpan.FromSeconds(3)); }
+                        catch (Exception ex) { failure ??= ex; }
+                    try
+                    {
+                        if (delivery is not null) await delivery.DisposeAsync().AsTask().WaitAsync(TimeSpan.FromSeconds(3));
+                        await service.DisposeAsync().AsTask().WaitAsync(TimeSpan.FromSeconds(3));
+                    }
+                    catch (Exception ex) { failure ??= ex; }
+                    fake.End(143);
                     browser.Dispose(); window.Close();
                     try
                     {

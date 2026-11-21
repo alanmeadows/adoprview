@@ -17,9 +17,11 @@ static class CopilotControlProbe
         if (result.ExitCode != 0)
             throw new Exception($"Disposable WSL runner fixture failed (exit {result.ExitCode}); no existing jobs were used.");
         using var report = JsonDocument.Parse(result.StandardOutput);
-        foreach (var name in new[] { "escalated", "freeLock", "orphanLockHeld", "foreignReceiptRefused", "workAndLogPreserved", "cleaned" })
+        foreach (var name in new[] { "escalated", "freeLock", "orphanLockHeld", "foreignReceiptRefused",
+            "staleIdentityRefused", "missingIdentityRefused", "workAndLogPreserved", "cleaned" })
             if (!report.RootElement.GetProperty(name).GetBoolean())
                 throw new Exception("Disposable WSL runner check failed: " + name);
+        Console.WriteLine("KERNEL_CONTROL " + result.StandardOutput.Trim());
     }
 
     const string Controller = """"
@@ -113,6 +115,42 @@ static class CopilotControlProbe
             return run,child,nonce,session
         report={}
         try:
+            # Exercise the verbatim production signal guards with stale/absent
+            # captured identities, without trying to force real host PID reuse.
+            begin=runner_script.index("read_cli_identity() {")
+            end=runner_script.index("trap stop_cli TERM INT\n",begin)
+            guards=runner_script[begin:end]
+            guard_script="set -euo pipefail\n"+guards+r'''
+        child=""; child_identity=""; interrupted=0
+        cleanup() {
+          child_identity="$original"
+          if owns_cli_group; then kill -KILL -- "-$child" 2>/dev/null || true; fi
+          wait "$child" 2>/dev/null || true
+        }
+        setsid python3 -I -c 'import json,os,pathlib,sys,time; p=os.getpid(); v=pathlib.Path(f"/proc/{p}/stat").read_text().rsplit(") ",1)[1].split(); out=pathlib.Path(sys.argv[1]); tmp=out.with_suffix(".tmp"); tmp.write_text(json.dumps({"pid":p,"state":v[0],"group":int(v[2]),"session":int(v[3]),"start":v[19],"uid":pathlib.Path(f"/proc/{p}").stat().st_uid})); tmp.replace(out); time.sleep(15)' "$1/guard.json" & child=$!
+        for attempt in {1..10}; do child_identity="$(read_cli_identity)" && break; sleep .01; done
+        original="$child_identity"
+        [[ -n "$original" ]] || exit 2
+        trap cleanup EXIT
+        child_identity="${original%:*}:0"
+        stop_cli
+        kill -0 "$child"
+        child_identity=""
+        stop_cli
+        kill -0 "$child"
+        printf 'GUARDS_REFUSED\n'
+        '''
+            guard=subprocess.Popen(["bash","--noprofile","--norc","-c",guard_script,"fixture-guards",str(root)],
+                stdin=subprocess.DEVNULL,stdout=subprocess.PIPE,stderr=subprocess.PIPE,start_new_session=True,
+                env={**os.environ,"BASH_ENV":"/dev/null"})
+            children.append(guard)
+            current=identity(guard.pid)
+            if current is not None: remember(current)
+            remember(wait_file(root/"guard.json"))
+            stdout,stderr=guard.communicate(timeout=4)
+            assert guard.returncode==0 and stdout==b"GUARDS_REFUSED\n", "production guards signalled a stale/absent identity"
+            report["staleIdentityRefused"]=True
+            report["missingIdentityRefused"]=True
             run,child,nonce,session=launch("stubborn")
             leader=remember(wait_file(run/"leader.json"))
             descendant=remember(wait_file(run/"descendant.json"))
@@ -122,7 +160,8 @@ static class CopilotControlProbe
             started=time.monotonic()
             child.send_signal(signal.SIGTERM)
             assert child.wait(timeout=4)==143
-            assert time.monotonic()-started<4
+            report["escalationMs"]=round((time.monotonic()-started)*1000,1)
+            assert report["escalationMs"]<4000
             assert not alive(leader) and not alive(descendant), "TERM-ignoring owned group survived"
             assert (run/"outcome").read_text().splitlines()==[nonce,session,"143"]
             report["escalated"]=True

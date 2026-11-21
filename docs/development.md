@@ -176,8 +176,12 @@ They cover bounded per-chunk allocations, a follower that ignores
 cancellation, stop/detach with retained output, uncertain owned liveness and
 browser acknowledgement/coalescing/disposal. The existing
 `ADOPRVIEW_TEST_NATIVE_ACTION=1` opt-in also enables `Native Copilot`: a real
-disposable WPF/WebView2 window with withheld output acknowledgements and a fake
-hung follower, stopped through a native button. This bounded synthetic check is
+disposable WPF/WebView2 window with withheld output acknowledgements, a fake
+hung follower and an actual unrelated recovery blocked at its fake preflight.
+The native button stops the selected run while those sentinels remain blocked,
+asserts a three-second control deadline and prints the measured milliseconds.
+It also verifies retained output/work and durable exact-task stop proof.
+This bounded synthetic check is
 not an installed-app or live WSL/model end-to-end test. Do not run browser or WSL
 opt-ins during unresolved shared-machine overload.
 
@@ -196,7 +200,10 @@ It requires Bash, Python 3, `flock`, `setsid` and `timeout`. A disposable sleepi
 CLI and its descendant ignore TERM so the runner must escalate only its owned
 group to KILL. The fixture checks the real exit receipt, free execution lock,
 preserved synthetic work/logs, a held orphan-descendant lock and refusal of a
-foreign ownership receipt. It has a 20-second Linux deadline, a 25-second host
+foreign ownership receipt. It additionally exercises the verbatim production
+signal guards with stale-start/absent captured identities and a real disposable
+leader; it does not force genuine host PID reuse. The report includes measured
+TERM-to-KILL time. It has a 20-second Linux deadline, a 25-second host
 cancellation deadline and identity-checked cleanup of only its recorded helpers.
 It never invokes Copilot, bgtask, ADO, installed app state or existing user jobs;
 it does not establish live supervisor integration or installed-app E2E.

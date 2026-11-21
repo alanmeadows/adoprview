@@ -367,7 +367,7 @@ static class CopilotRecoveryTests
         });
     }
 
-    sealed class Fixture : IDisposable
+    internal sealed class Fixture : IDisposable
     {
         public readonly string Directory = Path.Combine(Environment.CurrentDirectory, ".copilot-recovery-fixture-" + Guid.NewGuid().ToString("N"));
         public readonly Fake Transport = new();
@@ -377,7 +377,7 @@ static class CopilotRecoveryTests
         public void Dispose() { if (System.IO.Directory.Exists(Directory)) System.IO.Directory.Delete(Directory, recursive: true); }
     }
 
-    sealed class Fake : ICopilotRunTransport
+    internal sealed class Fake : ICopilotRunTransport
     {
         readonly object gate = new();
         public readonly ConcurrentQueue<CopilotProcessRequest> Calls = new();
@@ -391,6 +391,10 @@ static class CopilotRecoveryTests
         public string? Failure;
         public string Cleanup = "REMOVED";
         public bool SessionAvailable = true, LockHeld, WorkspaceRemoved;
+        public bool BlockPreflight, BlockFollowers;
+        public readonly TaskCompletionSource RecoveryEntered = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        public readonly TaskCompletionSource ReleasePreflight = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        public readonly TaskCompletionSource ReleaseFollowers = new(TaskCreationOptions.RunContinuationsAsynchronously);
         static TaskCompletionSource<int> NewEnd() => new(TaskCreationOptions.RunContinuationsAsynchronously);
         public void Emit(string value) { lock (gate) { log += value; foreach (var read in readers.ToArray()) read(value); } }
         public void End(int code, bool outcome = true)
@@ -405,7 +409,13 @@ static class CopilotRecoveryTests
             string Protocol(params string[] values) => "ADOPRVIEW1\0" + string.Join('\0', values) + "\0";
             switch (r.Operation)
             {
-                case "preflight": return new(0, Protocol("Offline-Ubuntu", "offline", "/home/offline", "/home/offline/source",
+                case "preflight":
+                    if (BlockPreflight)
+                    {
+                        RecoveryEntered.TrySetResult();
+                        await ReleasePreflight.Task.WaitAsync(token);
+                    }
+                    return new(0, Protocol("Offline-Ubuntu", "offline", "/home/offline", "/home/offline/source",
                     "/home/offline/source/.git", "/home/offline/bin/copilot", "/home/offline/bin/bgtask", Help, "/home/offline/.copilot",
                     "origin", "https://dev.azure.com/offline-org/offline-project/_git/offline-repo",
                     "https://dev.azure.com/offline-org/offline-project/_git/offline-repo", new string('a', 64)), "");
@@ -437,7 +447,12 @@ static class CopilotRecoveryTests
                 case "follow":
                     Task done;
                     lock (gate) { if (stdout is not null) { readers.Add(stdout); stdout(log); } done = ended.Task; }
-                    try { await done.WaitAsync(token); return new(0, "", ""); }
+                    try
+                    {
+                        if (BlockFollowers) await ReleaseFollowers.Task;
+                        else await done.WaitAsync(token);
+                        return new(0, "", "");
+                    }
                     finally { lock (gate) { if (stdout is not null) readers.Remove(stdout); } }
                 case "history": stdout?.Invoke(log); return new(0, log, "");
                 case "stop": Stops++; End(143); return new(0, "", "");
