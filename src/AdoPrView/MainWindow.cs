@@ -198,12 +198,19 @@ public sealed class MainWindow : Window, IApprovalUi
     {
         if (_bridge is not { } bridge) return;
         if (_copilotDelivery is not null) _copilot.Changed -= _copilotDelivery.Offer;
-        _copilotDelivery = new((run, id) => bridge.PushCopilotRunAsync(RunForUi(run), id),
-            ex => ReportNativeActionFailure("copilot-state-delivery", ex), waitForReady);
+        _copilotDelivery = CreateCopilotDelivery((run, id) => bridge.PushCopilotRunAsync(RunForUi(run), id),
+            ex => ReportNativeActionFailure("copilot-state-delivery", ex), _failedNativeActions, waitForReady);
         _copilot.Changed += _copilotDelivery.Offer;
         if (!waitForReady)
             foreach (var run in _copilot.Runs) _copilotDelivery.Offer(run);
     }
+
+    internal static CopilotRunDelivery CreateCopilotDelivery(
+        Func<CopilotRunState, long, Task> post, Action<Exception> report, HashSet<string> failures, bool waitForReady = false) =>
+        new(post, report, waitForReady, posted: () =>
+        {
+            lock (failures) failures.Remove("copilot-state-delivery");
+        });
 
     void ShowFromTray()
     {

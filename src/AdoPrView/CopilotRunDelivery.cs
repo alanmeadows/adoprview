@@ -2,7 +2,7 @@ namespace AdoPrView;
 
 // One browser message in flight; pending updates replace older snapshots of the same run.
 internal sealed class CopilotRunDelivery(Func<CopilotRunState, long, Task> post, Action<Exception> report,
-    bool waitForReady = false) : IAsyncDisposable
+    bool waitForReady = false, Action? posted = null) : IAsyncDisposable
 {
     readonly object gate = new();
     readonly Dictionary<string, CopilotRunState> pending = new(StringComparer.Ordinal);
@@ -82,6 +82,8 @@ internal sealed class CopilotRunDelivery(Func<CopilotRunState, long, Task> post,
                 _ = posting.ContinueWith(t => _ = t.Exception, CancellationToken.None,
                     TaskContinuationOptions.OnlyOnFaulted | TaskContinuationOptions.ExecuteSynchronously, TaskScheduler.Default);
                 await posting.WaitAsync(lifetime.Token).ConfigureAwait(false);
+                lock (gate)
+                    if (!disposed) posted?.Invoke();
                 await acknowledgement.WaitAsync(lifetime.Token).ConfigureAwait(false);
                 lock (gate) inFlight = null;
             }

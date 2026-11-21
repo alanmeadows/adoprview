@@ -202,6 +202,10 @@ unrelated DOM wiring stubbed, including queued row updates and late run state.
 Publication revision is separate from `OrderRevision`; row ordering is unchanged.
 `Copilot restored replay` verifies pending and in-flight snapshots retain newer
 lifecycle/worktree state or same-revision output when restoration offers old data.
+`Copilot restored delivery reports` uses the production delivery factory to
+check failure/repeated-failure/success/later-failure notification recovery and
+prove an abandoned post cannot clear the current failure marker. The actual
+WPF control fixture uses that same factory.
 
 The smaller kernel-control opt-in executes the exact production runner in an
 explicitly selected, already-responsive WSL distribution:

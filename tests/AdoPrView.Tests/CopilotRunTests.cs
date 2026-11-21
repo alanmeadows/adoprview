@@ -149,6 +149,58 @@ static class CopilotRunTests
             Check(posted.Last().State.Output == "final worktree status", "Later terminal cleanup/status update was lost");
             await delivery.DisposeAsync().AsTask().WaitAsync(TimeSpan.FromSeconds(2));
         });
+        await test("Copilot restored delivery reports later failure only after a successful resynchronization post", async () =>
+        {
+            var failures = new HashSet<string>(StringComparer.Ordinal);
+            var first = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            var repeated = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            var later = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            var success = new TaskCompletionSource<long>(TaskCreationOptions.RunContinuationsAsynchronously);
+            var attempts = 0; var reports = 0; var notifications = 0;
+            await using var delivery = MainWindow.CreateCopilotDelivery((_, id) =>
+            {
+                if (Interlocked.Increment(ref attempts) != 3) throw new IOException("synthetic disconnected dashboard");
+                success.TrySetResult(id);
+                return Task.CompletedTask;
+            }, _ =>
+            {
+                lock (failures)
+                    if (failures.Add("copilot-state-delivery")) notifications++;
+                switch (Interlocked.Increment(ref reports))
+                {
+                    case 1: first.TrySetResult(); break;
+                    case 2: repeated.TrySetResult(); break;
+                    case 3: later.TrySetResult(); break;
+                }
+            }, failures);
+            var state = new CopilotRunState("offline", Request(), "running", "retained", null, null,
+                null, null, "/offline/work", "in-use", DateTimeOffset.UtcNow, null) { Revision = 1 };
+            delivery.Offer(state);
+            await first.Task.WaitAsync(TimeSpan.FromSeconds(3));
+            delivery.Ready();
+            await repeated.Task.WaitAsync(TimeSpan.FromSeconds(3));
+            Check(notifications == 1, "Repeated failure without successful recovery generated duplicate notifications");
+            delivery.Ready();
+            var id = await success.Task.WaitAsync(TimeSpan.FromSeconds(3));
+            delivery.Acknowledge(id);
+            delivery.Offer(state with { Revision = 2, Status = "completed" });
+            await later.Task.WaitAsync(TimeSpan.FromSeconds(3));
+            Check(notifications == 2, "A successful resynchronization left later delivery failure silently suppressed");
+            var entered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            var release = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            await using var abandoned = MainWindow.CreateCopilotDelivery((_, _) =>
+            {
+                entered.TrySetResult();
+                return release.Task;
+            }, ex => throw ex, failures);
+            abandoned.Offer(state);
+            await entered.Task.WaitAsync(TimeSpan.FromSeconds(3));
+            await abandoned.DisposeAsync().AsTask().WaitAsync(TimeSpan.FromSeconds(2));
+            release.TrySetResult();
+            await Task.Delay(50);
+            lock (failures)
+                Check(failures.Contains("copilot-state-delivery"), "An abandoned late post cleared the current failure marker");
+        });
         await test("Copilot restored replay cannot replace newer pending lifecycle or output snapshots", async () =>
         {
             var initial = new CopilotRunState("offline", Request(), "running", "initial", null, null,
@@ -757,13 +809,13 @@ static class CopilotRunTests
                     await navigated.Task.WaitAsync(TimeSpan.FromSeconds(15));
                     var posts = 0;
                     long postedRevision = -1;
-                    delivery = new(async (state, id) => await window.Dispatcher.InvokeAsync(() =>
+                    delivery = MainWindow.CreateCopilotDelivery(async (state, id) => await window.Dispatcher.InvokeAsync(() =>
                     {
                         posts++;
                         postedRevision = state.Revision;
                         browser.CoreWebView2.PostWebMessageAsJson(JsonSerializer.Serialize(
                             new { @event = "copilotRun", data = MainWindow.RunForUi(state), deliveryId = id }, Bridge.Json));
-                    }), ex => failure ??= ex);
+                    }), ex => failure ??= ex, new HashSet<string>(StringComparer.Ordinal));
                     service.Changed += delivery.Offer;
                     var run = await service.StartAsync(Request());
                     await Wait(service, run.RunId, state => state.Output.Contains("FAKE-READY"));

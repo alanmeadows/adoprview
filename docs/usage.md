@@ -632,6 +632,9 @@ retain the latest terminal/status update while acknowledgements are missing;
 pending runs are served fairly even while another run keeps streaming.
 Older lifecycle/output replay cannot replace a newer pending or in-flight
 snapshot during delivery restoration.
+Repeated errors during one unresolved delivery failure are reported once.
+A successful resynchronization post resets that suppression, so a later
+delivery failure is reported again; abandoned late posts do not reset it.
 Dashboard ready/init resynchronizes after navigation or reload. Monotonic
 lifecycle revisions reject old same-output status/worktree snapshots. The initial
 dashboard response also reads authoritative run states and the latest PR snapshot
