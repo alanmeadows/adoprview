@@ -306,12 +306,19 @@ function renderRows(whenIdle = false) {
   restoreExpansionFocus(focused);
 }
 
+function expansionControl(target) {
+  const control = target?.closest?.('[role="button"][data-act][aria-expanded]');
+  return control && !control.closest('.md') && control.matches(
+    '.row > .c-pr[data-act="toggle"], .row > .gate > .pill[data-act="gate"], #runShelf > .pr > .run-heading[data-act="toggle"]')
+    ? control : null;
+}
+
 function restoreExpansionFocus(control) {
-  if (!control?.matches?.('[role="button"][data-act][aria-expanded]') || control.isConnected) return;
+  if (expansionControl(control) !== control || !control || control.isConnected) return;
   const key = control.closest('.pr')?.dataset.key;
   const row = [...document.querySelectorAll('.pr')].find(el => el.dataset.key === key);
   const next = [...(row?.querySelectorAll('[role="button"][data-act][aria-expanded]') || [])]
-    .find(el => el.dataset.act === control.dataset.act && el.dataset.gate === control.dataset.gate);
+    .find(el => expansionControl(el) === el && el.dataset.act === control.dataset.act && el.dataset.gate === control.dataset.gate);
   next?.focus({ preventScroll: true });
 }
 
@@ -1672,7 +1679,7 @@ function wire() {
   });
   document.addEventListener('keydown', (e) => {
     if (e.key === 'Escape' && S.rowMenu) { e.preventDefault(); closeRowMenu(); flushRowUpdates(); return; }
-    const control = e.target.closest('[role="button"][data-act][aria-expanded]');
+    const control = expansionControl(e.target);
     if (control && ['Enter', ' '].includes(e.key)) {
       e.preventDefault();
       if (e.repeat || control.getAttribute('aria-disabled') === 'true') return;

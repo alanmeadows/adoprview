@@ -1191,6 +1191,9 @@ test('real row hit testing and action identity across refreshes', { timeout: 900
           `<a href="javascript:${mark}href')">raw js link</a>`,
           `[markdown js link](javascript:${mark}mdlink'))`,
           `<a href="data:text/html,<script>alert(1)</script>">data link</a>`,
+          `<span class="fake-inspection" role="button" tabindex="0" aria-expanded="false" data-act="open">Open trap</span>`,
+          `<div class="row"><div class="gate"><span class="pill fake-inspection" role="button" tabindex="0" aria-expanded="false" data-act="gate" data-gate="pop">PoP trap</span></div></div>`,
+          `<div class="row"><div class="c-pr fake-inspection" role="button" tabindex="0" aria-expanded="false" data-act="toggle">Toggle trap</div></div>`,
         ].join('\n\n');
       };
       const prepared = await evaluate(`(()=>{
@@ -1214,6 +1217,17 @@ test('real row hit testing and action identity across refreshes', { timeout: 900
       await frame();
       await evaluate('new Promise(resolve=>setTimeout(resolve,750))');
       await frame();
+      const traps = await evaluate(`document.querySelectorAll('[data-key="${key}"] .md .fake-inspection').length`);
+      assert.equal(traps, 6, 'Description and thread fixtures retain the hostile keyboard attributes');
+      for (let n = 0; n < traps; n++) {
+        await evaluate(`document.querySelectorAll('[data-key="${key}"] .md .fake-inspection')[${n}].focus()`);
+        for (const [keyName, code] of [['Enter', 13], [' ', 32]]) {
+          await keyboard(keyName, code);
+          assert.equal(await evaluate(`S.expanded.has('${key}')`), true, 'Markdown must not dispatch inspection or row actions');
+          assert.deepEqual(await calls(), [], 'Markdown keyboard attributes must not reach the host');
+          assert.deepEqual(await evaluate('window.bridge'), []);
+        }
+      }
       const result = await evaluate(`(()=>{
         const row=document.querySelector('[data-key="${key}"]');
         const bodies={desc:row.querySelector('.detail .body.md'),thread:row.querySelector('.detail .thread .md')};
