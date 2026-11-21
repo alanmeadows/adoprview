@@ -76,6 +76,8 @@ const S = {
   speechEpoch: 0,
   rowMenu: null,
   drawer: false,
+  drawerFocus: null,
+  drawerInert: new Map(),
   themeBusy: false,
   discovered: null,
 };
@@ -1349,10 +1351,25 @@ async function onSpeechAction(action) {
 }
 
 async function openDrawer() {
+  if (S.drawer) return;
+  S.drawerFocus = document.activeElement;
+  for (const el of document.body.children || []) {
+    if (['drawer', 'scrim', 'toasts'].includes(el.id)) continue;
+    S.drawerInert.set(el, el.inert); el.inert = true;
+  }
   S.drawer = true; $('#drawer').hidden = false; $('#scrim').hidden = false; renderDrawer();
+  $('#closeDrawer').focus?.({ preventScroll: true });
   await loadApprovalSettings();
 }
-function closeDrawer() { S.drawer = false; $('#drawer').hidden = true; $('#scrim').hidden = true; }
+function closeDrawer() {
+  S.drawer = false; $('#drawer').hidden = true; $('#scrim').hidden = true;
+  for (const [el, inert] of S.drawerInert) el.inert = inert;
+  S.drawerInert.clear();
+  const saved = S.drawerFocus;
+  const opener = saved && saved !== document.body && saved.isConnected && !saved.disabled && saved.getClientRects().length ? saved : $('#settingsBtn');
+  S.drawerFocus = null;
+  opener.focus?.({ preventScroll: true });
+}
 
 async function loadApprovalSettings() {
   if (!S.snap.approvalProvider) { S.approvalSettings = null; return; }
@@ -1370,6 +1387,12 @@ async function loadApprovalSettings() {
 function renderDrawer() {
   const st = S.settings;
   if (!st) return;
+  const focusBody = $('#drawerBody');
+  const focusKey = el => el.id || `wsl:${el.dataset.wslRepo}`;
+  const focusFields = [...focusBody.querySelectorAll('input[id], select[id], textarea[id], input[data-wsl-repo]')];
+  const focused = focusFields.find(el => el === document.activeElement);
+  const focusSelection = focused && { start: focused.selectionStart, end: focused.selectionEnd, direction: focused.selectionDirection };
+  const focusTop = focusBody.scrollTop;
   const titles = new Map(S.snap.prs.map((p) => [p.key.toLowerCase(), p]));
   const disc = S.discovered;
   $('#drawerBody').innerHTML = `
@@ -1443,6 +1466,14 @@ function renderDrawer() {
       <div class="field"><textarea id="triageInstructions" placeholder="Default instructions">${esc(st.triageInstructions || '')}</textarea></div>
     </div>
     <div class="section"><button class="btn primary" data-dact="save">${svg('check')} Save settings</button></div>`;
+
+  const focusCurrent = [...focusBody.querySelectorAll('input[id], select[id], textarea[id], input[data-wsl-repo]')];
+  focusBody.scrollTop = focusTop;
+  const next = focused && focusCurrent.find(el => focusKey(el) === focusKey(focused));
+  if (S.drawer && next && !next.disabled) {
+    next.focus({ preventScroll: true });
+    if (typeof focusSelection.start === 'number') next.setSelectionRange(focusSelection.start, focusSelection.end, focusSelection.direction);
+  } else if (S.drawer && !S.themeBusy && !document.activeElement?.closest('#drawer')) $('#closeDrawer').focus?.({ preventScroll: true });
 }
 
 async function saveSettings(patch) {
@@ -1656,6 +1687,21 @@ function wire() {
     if (e.target.id === 'theme') changeTheme(e.target);
   });
   document.addEventListener('keydown', (e) => {
+    if (S.drawer) {
+      if (e.key === 'Escape') { e.preventDefault(); closeDrawer(); }
+      else if (e.key === 'Tab') {
+        const drawer = $('#drawer');
+        const controls = [...drawer.querySelectorAll('button, input, select, textarea, a[href], [tabindex]')]
+          .filter(el => !el.disabled && el.tabIndex >= 0 && el.getClientRects().length);
+        const first = controls[0], last = controls.at(-1);
+        if (!drawer.contains(document.activeElement) || (e.shiftKey ? document.activeElement === first : document.activeElement === last)) {
+          e.preventDefault(); (e.shiftKey ? last : first)?.focus();
+        }
+      } else if (e.key === 'Enter' && ['wlInput', 'repoUrl'].includes(document.activeElement?.id)) {
+        e.preventDefault(); void onDrawerAction(document.activeElement.id === 'wlInput' ? 'addWl' : 'addRepo');
+      }
+      return;
+    }
     if (e.key === 'Escape' && S.rowMenu) { e.preventDefault(); closeRowMenu(); flushRowUpdates(); return; }
     const inInput = /INPUT|TEXTAREA|SELECT/.test(document.activeElement?.tagName) || document.activeElement?.isContentEditable;
     if (!inInput && e.ctrlKey && !e.shiftKey && !e.altKey && !e.metaKey && e.key.toLowerCase() === 'z' && S.hideUndo.length) {

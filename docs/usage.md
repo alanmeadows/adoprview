@@ -47,6 +47,9 @@ calls used see [DESIGN.md](DESIGN.md); for building and tests see
 - The current refresh interval is shown in the status bar and is configurable
   in Settings (default: 2 minutes; merge re-check: 10 minutes).
 
+Settings keeps keyboard focus inside the drawer and makes background controls
+inert. Closing Settings returns focus to its opener, including after theme updates.
+
 ### Themes
 
 Choose **Settings > Appearance > Theme**: **Light Mode** (the default, inspired
