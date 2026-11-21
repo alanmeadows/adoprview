@@ -7,7 +7,7 @@ const vm = require('node:vm');
 const source = fs.readFileSync(path.join(__dirname, '..', 'src', 'AdoPrView', 'wwwroot', 'app.js'), 'utf8');
 const themeSource = fs.readFileSync(path.join(__dirname, '..', 'src', 'AdoPrView', 'wwwroot', 'theme.js'), 'utf8');
 
-function setup(search = '?mock=1') {
+function setup(search = '?mock=1', native = false) {
   const elements = new Map();
   const element = () => ({
     innerHTML: '', textContent: '', dataset: {}, scrollTop: 0, children: [],
@@ -26,8 +26,10 @@ function setup(search = '?mock=1') {
     body: { insertAdjacentHTML() {} },
   };
   const dialogs = [];
+  const sent = [];
   const window = { MockHost: { rpc: () => new Promise(() => {}) }, addEventListener() {}, getSelection: () => '',
     confirm: text => { dialogs.push(text); return true; } };
+  if (native) window.chrome = { webview: { postMessage: text => sent.push(text === 'ready' ? text : JSON.parse(text)), addEventListener() {} } };
   const location = { href: 'https://app.local/index.html' + search, search };
   const context = vm.createContext({
     window, document, URL, URLSearchParams, location,
@@ -46,7 +48,7 @@ function setup(search = '?mock=1') {
   hooks.S.settings = { repos: [{}], hidden: [], whitelist: [], autoComplete: { mergeStrategy: 'squash' }, refreshSeconds: 120, mergeCheckMinutes: 10 };
   hooks.S.settings.videoSpeech = { voice: 'offline-voice' };
   hooks.S.snap = { prs: [pr], lastRefresh: new Date().toISOString(), approvalProvider: { name: 'Sample approval' } };
-  return { hooks, pr, window, elements, dialogs, document, context, element };
+  return { hooks, pr, window, elements, dialogs, document, context, element, sent };
 }
 
 test('native Fix delivery is acknowledged even when rendering rejects data; only native sequenced events get acknowledgements', () => {
