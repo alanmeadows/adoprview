@@ -13,7 +13,7 @@ static class SettingsTests
         await test("settings additional Fix instructions round-trip independently and older clients preserve them", () => InDir(dir =>
         {
             var path = Path.Combine(dir, "settings.json");
-            File.WriteAllText(path, """{"triageInstructions":"CUSTOM","approvalProvider":{"enabled":false,"futureProvider":"KEEP"},"futureTop":"KEEP"}""");
+            File.WriteAllText(path, """{"triageInstructions":"CUSTOM","refreshSeconds":45,"hidden":["offline:123"],"approvalProvider":{"enabled":false,"futureProvider":"KEEP"},"futureTop":"KEEP"}""");
             var store = new SettingsStore(path);
             using var http = new HttpClient();
             var prs = new PrService(new AdoClient(http, _ => Task.FromResult(new AuthenticationHeaderValue("Bearer", "offline"))), store);
@@ -32,11 +32,23 @@ static class SettingsTests
                 reloaded.Current.Extra!["futureTop"].GetString() == "KEEP", "Suffix save lost Ask, whitespace or private/future fields");
             form.Remove("additionalTriageInstructions");
             Save();
-            Check(new SettingsStore(path).Current.AdditionalTriageInstructions == extra, "Older client erased the suffix");
-            form["additionalTriageInstructions"] = " \r\n\t";
-            Save();
-            Check(new SettingsStore(path).Current.AdditionalTriageInstructions is null &&
-                new SettingsStore(path).Current.TriageInstructions == "CUSTOM", "Clearing suffix changed custom Ask");
+            reloaded = new SettingsStore(path);
+            Check(reloaded.Current.AdditionalTriageInstructions == extra &&
+                reloaded.Current.ApprovalProvider!.Extra!["futureProvider"].GetString() == "KEEP" &&
+                reloaded.Current.Extra!["futureTop"].GetString() == "KEEP", "Older client erased suffix or integration fields");
+            foreach (var cleared in new string?[] { null, "", " \r\n\t" })
+            {
+                form["additionalTriageInstructions"] = extra;
+                Save();
+                form["additionalTriageInstructions"] = cleared;
+                Save();
+                reloaded = new SettingsStore(path);
+                Check(reloaded.Current.AdditionalTriageInstructions is null &&
+                    reloaded.Current.TriageInstructions == "CUSTOM" && reloaded.Current.RefreshSeconds == 45 &&
+                    reloaded.Current.Hidden.SequenceEqual(["offline:123"]) &&
+                    reloaded.Current.ApprovalProvider!.Extra!["futureProvider"].GetString() == "KEEP" &&
+                    reloaded.Current.Extra!["futureTop"].GetString() == "KEEP", "Clearing suffix changed unrelated settings");
+            }
         }));
         await test("settings missing file starts empty without seeded repos, authors or bot", () => InDir(dir =>
         {

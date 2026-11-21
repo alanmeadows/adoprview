@@ -9,9 +9,10 @@ static class CopilotSourceTests
 {
     const string Sha = "1111111111111111111111111111111111111111";
     static void Check(bool condition, string message) { if (!condition) throw new Exception(message); }
-    public static async Task<string> CreatePrompt()
+    public static async Task<string> CreatePrompt(string? customAsk = null)
     {
         using var f = new Fixture();
+        f.Store.Current.TriageInstructions = customAsk;
         return (await f.Service.GetCopilotSourceAsync(f.Pr.Key)).Prompt;
     }
 
@@ -136,8 +137,15 @@ static class CopilotSourceTests
                 Check(custom ? copy.Contains("## Ask\r\nCUSTOM ASK ONLY\r\n") :
                     copy.Contains("Work on this existing PR for the repo repository and drive it to green"),
                     "Additional instructions replaced the default/custom Ask");
-                f.Store.Current.AdditionalTriageInstructions = " \r\n\t";
-                Check(await f.Service.BuildTriagePromptAsync(f.Pr.Key) == baseline, "Empty suffix changed existing prompt behavior");
+                foreach (var empty in new string?[] { null, "", " \r\n\t" })
+                {
+                    f.Store.Current.AdditionalTriageInstructions = empty;
+                    Check(await f.Service.BuildTriagePromptAsync(f.Pr.Key) == baseline, "Empty suffix changed existing prompt behavior");
+                }
+                f.Store.Current.TriageInstructions = "CHANGED ASK";
+                f.Store.Current.AdditionalTriageInstructions = "CHANGED SUFFIX";
+                Check(source.Prompt == baseline && source.AdditionalInstructions == additional,
+                    "Later settings changed an already captured launch");
             });
         foreach (var draft in new bool?[] { null, true, false })
             await test($"Copilot preflight verifies fresh draft status when ignoring drafts: {draft}", async () =>

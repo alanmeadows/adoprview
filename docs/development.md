@@ -132,6 +132,22 @@ skipped detail reads and writes, publication/back-to-draft transitions, and stal
 notification delivery. Frontend checks cover the Ignored drafts filter, deferred
 snapshots and retained Fix controls without starting a live Fix.
 
+Additional Fix guidance has focused offline settings, copied/captured prompt,
+complete staged-input boundary and durable-history regressions:
+
+```powershell
+$env:ADOPRVIEW_TEST_FILTER = 'additional instructions|settings additional Fix'
+dotnet run --project tests\AdoPrView.Tests -c Release
+Remove-Item Env:\ADOPRVIEW_TEST_FILTER
+node --test --test-name-pattern='Fix drawer' tests\approval-ui.test.cjs
+node --test --test-name-pattern='Additional Fix fields' tests\row-actions.browser.test.cjs
+```
+
+The last check edits the actual current-source settings drawer in a disposable
+headless Edge profile using mouse/keyboard input. Its settings host is synthetic;
+native tests separately verify disk persistence, launch staging and recovery.
+It does not launch Copilot, contact ADO or modify the installed app.
+
 The opt-in WSL preflight regression uses a disposable `/tmp` checkout and fake
 CLI executables. It checks non-login discovery, quoted paths, inherited child
 PATH and dependency diagnostics without starting a Fix or contacting ADO:
