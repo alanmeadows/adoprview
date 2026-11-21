@@ -1153,7 +1153,7 @@ test('real row hit testing and action identity across refreshes', { timeout: 900
       assert.equal(await evaluate('S.scope'), 'drafts');
       assert.equal(await evaluate('S.lane'), null);
       assert.deepEqual(await evaluate(`[...document.querySelectorAll('#laneCounters .n')].map(e=>e.textContent)`), ['0', '0', '0', '0']);
-      assert.deepEqual(await evaluate(`[...document.querySelectorAll('#rows [data-key="${key}"] .row [data-act]')].map(e=>e.dataset.act)`), ['open']);
+      assert.deepEqual(await evaluate(`[...document.querySelectorAll('#rows [data-key="${key}"] .row [data-act]')].map(e=>e.dataset.act)`), ['toggle', 'open']);
       await click(await point(key, '.row [data-act="open"]')); await frame();
       assert.deepEqual((await calls()).filter(c => c.method === 'openUrl'),
         [{ method: 'openUrl', url: 'https://dev.azure.com/contoso/Sample/_git/sample-service/pullrequest/101' }]);
