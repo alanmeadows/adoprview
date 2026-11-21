@@ -174,7 +174,9 @@ Remove-Item Env:\ADOPRVIEW_TEST_FILTER
 
 They cover bounded per-chunk allocations, a follower that ignores
 cancellation, stop/detach with retained output, uncertain owned liveness and
-browser acknowledgement/coalescing/disposal. The existing
+browser acknowledgement/coalescing/disposal, fair delivery between runs,
+independent response deadlines with blocking/throwing cancellation callbacks,
+and intentional recovered-history replay after cancellation. The existing
 `ADOPRVIEW_TEST_NATIVE_ACTION=1` opt-in also enables `Native Copilot`: a real
 disposable WPF/WebView2 window with withheld output acknowledgements, a fake
 hung follower and an actual unrelated recovery blocked at its fake preflight.
@@ -196,15 +198,22 @@ dotnet run --project tests\AdoPrView.Tests -c Release
 Remove-Item Env:\ADOPRVIEW_TEST_FILTER, Env:\ADOPRVIEW_TEST_WSL_CONTROL, Env:\ADOPRVIEW_TEST_WSL_DISTRO
 ```
 
-It requires Bash, Python 3, `flock`, `setsid` and `timeout`. A disposable sleeping
+It requires Bash, Python 3 with Linux pidfd support, `flock`, `setsid` and
+`timeout`, plus permission to become a child subreaper. A disposable sleeping
 CLI and its descendant ignore TERM so the runner must escalate only its owned
 group to KILL. The fixture checks the real exit receipt, free execution lock,
 preserved synthetic work/logs, a held orphan-descendant lock and refusal of a
 foreign ownership receipt. It additionally exercises the verbatim production
 signal guards with stale-start/absent captured identities and a real disposable
-leader; it does not force genuine host PID reuse. The report includes measured
+leader; it does not force genuine host PID reuse. A fixture-only `BASH_ENV`
+DEBUG hook schedules TERM immediately before the production identity-capture
+assignment, proving pending Stop is replayed. A deliberately missing readiness
+file verifies cleanup of unregistered descendants. The report includes measured
 TERM-to-KILL time. It has a 20-second Linux deadline, a 25-second host
-cancellation deadline and identity-checked cleanup of only its recorded helpers.
+cancellation deadline and identity-checked, pidfd-backed cleanup of only its
+own descendant tree, independent of successful readiness. Cleanup has a
+two-second deadline; unconfirmed cleanup preserves the fixture directory and
+fails rather than claiming success.
 It never invokes Copilot, bgtask, ADO, installed app state or existing user jobs;
 it does not establish live supervisor integration or installed-app E2E.
 

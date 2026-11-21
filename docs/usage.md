@@ -612,7 +612,8 @@ If the dashboard browser is busy, right-click the native tray icon and select
 **Stop Copilot run → !number repository**. This bypasses the browser and does
 not wait for unrelated startup recovery. Cancellation signals the owned
 transport before durable IO; short status/stop/ownership probes have bounded
-response limits. An explicit stop escalates TERM to KILL only for the new
+response limits independent of transport cancellation callbacks. An explicit
+stop, including one arriving before CLI identity capture, escalates TERM to KILL only for the new
 runner's own CLI group, after verifying its captured parent/group/session and
 Linux start time; a missing or reused leader is refused. No process-name searches or global WSL
 termination are used. Already-running runners retain their original scripts.
@@ -624,7 +625,8 @@ Output uses a fixed-size tail buffer, and native delivery keeps at most one
 unacknowledged browser message plus the latest pending snapshot per run. A busy
 browser cannot accumulate an unlimited output/dispatcher queue. Updates
 retain the latest terminal/status update while acknowledgements are missing;
-dashboard ready/init resynchronizes after navigation or reload. The initial
+pending runs are served fairly even while another run keeps streaming.
+Dashboard ready/init resynchronizes after navigation or reload. The initial
 dashboard response also reads authoritative run states.
 These changes do not cap CPU/RAM or automatically kill tasks; whole-system resource exhaustion
 can still affect the app and Windows.

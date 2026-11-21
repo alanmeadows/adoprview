@@ -18,14 +18,19 @@ static class CopilotControlProbe
             throw new Exception($"Disposable WSL runner fixture failed (exit {result.ExitCode}); no existing jobs were used.");
         using var report = JsonDocument.Parse(result.StandardOutput);
         foreach (var name in new[] { "escalated", "freeLock", "orphanLockHeld", "foreignReceiptRefused",
-            "staleIdentityRefused", "missingIdentityRefused", "workAndLogPreserved", "cleaned" })
+            "staleIdentityRefused", "missingIdentityRefused", "earlyStopReplayed", "readinessFailureCleaned",
+            "workAndLogPreserved", "cleaned" })
             if (!report.RootElement.GetProperty(name).GetBoolean())
                 throw new Exception("Disposable WSL runner check failed: " + name);
         Console.WriteLine("KERNEL_CONTROL " + result.StandardOutput.Trim());
     }
 
     const string Controller = """"
-        import fcntl,json,os,pathlib,shutil,signal,subprocess,sys,tempfile,time,uuid
+        import ctypes,fcntl,json,os,pathlib,shutil,signal,subprocess,sys,tempfile,time,uuid
+        if not hasattr(os,"pidfd_open") or not hasattr(signal,"pidfd_send_signal"):
+            raise RuntimeError("Disposable cleanup requires Linux pidfd support; no helpers launched")
+        if ctypes.CDLL(None,use_errno=True).prctl(36,1,0,0,0)!=0:
+            raise RuntimeError("Disposable cleanup requires a child subreaper; no helpers launched")
         runner_script=sys.argv[1]
         root=pathlib.Path(tempfile.mkdtemp(prefix="ado-control-probe-"))
         owned=[]
@@ -36,7 +41,7 @@ static class CopilotControlProbe
                 values=text[text.rfind(") ")+2:].split()
                 return {"pid":pid,"state":values[0],"group":int(values[2]),"session":int(values[3]),
                     "start":values[19],"uid":pathlib.Path(f"/proc/{pid}").stat().st_uid}
-            except FileNotFoundError: return None
+            except (FileNotFoundError,ProcessLookupError): return None
         def remember(value):
             assert value["uid"]==os.getuid()
             owned.append(value)
@@ -48,13 +53,49 @@ static class CopilotControlProbe
             current=identity(value["pid"])
             if current is None or current["state"]=="Z": return
             assert all(current[key]==value[key] for key in ("start","group","session","uid")), "fixture PID identity changed"
-            os.kill(value["pid"],signal.SIGKILL)
-        def wait_file(path):
-            end=time.monotonic()+4
+            try: handle=os.pidfd_open(value["pid"],0)
+            except ProcessLookupError: return
+            try:
+                current=identity(value["pid"])
+                if current is None or current["state"]=="Z": return
+                assert all(current[key]==value[key] for key in ("start","group","session","uid")), "fixture PID identity changed"
+                try: signal.pidfd_send_signal(handle,signal.SIGKILL)
+                except ProcessLookupError: pass
+            finally: os.close(handle)
+        def wait_file(path,seconds=4):
+            end=time.monotonic()+seconds
             while not path.exists():
                 if time.monotonic()>end: raise TimeoutError("fixture readiness expired")
                 time.sleep(.02)
             return json.loads(path.read_text())
+        def cleanup_children():
+            signal.signal(signal.SIGTERM,signal.SIG_IGN)
+            end=time.monotonic()+2
+            child_file=pathlib.Path(f"/proc/{os.getpid()}/task/{os.getpid()}/children")
+            while True:
+                # Only this subreaper's descendants are eligible, independent of readiness files.
+                for pid in map(int,child_file.read_text().split()):
+                    before=identity(pid)
+                    if before is None or before["state"]=="Z": continue
+                    assert before["uid"]==os.getuid()
+                    try: handle=os.pidfd_open(pid,0)
+                    except ProcessLookupError: continue
+                    try:
+                        after=identity(pid)
+                        if after is None or after["state"]=="Z": continue
+                        assert all(before[key]==after[key] for key in ("uid","start","group","session"))
+                        remember(after)
+                        try: signal.pidfd_send_signal(handle,signal.SIGKILL)
+                        except ProcessLookupError: pass
+                    finally: os.close(handle)
+                while True:
+                    try: reaped,_=os.waitpid(-1,os.WNOHANG)
+                    except ChildProcessError: break
+                    if reaped==0: break
+                if not child_file.read_text().split(): break
+                if time.monotonic()>end: raise TimeoutError("disposable descendant cleanup unconfirmed")
+                time.sleep(.01)
+            assert not any(alive(value) for value in owned), "owned helper survived cleanup"
         def lock_free(run):
             with (run/"task.lock").open("a") as lock:
                 try: fcntl.flock(lock,fcntl.LOCK_EX|fcntl.LOCK_NB)
@@ -94,7 +135,9 @@ static class CopilotControlProbe
         time.sleep(30)
         ''')
         cli.chmod(0o700)
-        def launch(mode,foreign=False):
+        hook=root/"early-stop.sh"
+        hook.write_text(r'''trap 'if [[ "$BASH_COMMAND" == '\''child_identity="$(read_cli_identity)"'\'' ]]; then trap - DEBUG; kill -TERM "$$"; fi' DEBUG'''+"\n")
+        def launch(mode,foreign=False,early=False):
             run=root/mode
             run.mkdir()
             (run/"worktree").mkdir()
@@ -108,7 +151,7 @@ static class CopilotControlProbe
                 child=subprocess.Popen(["bash","--noprofile","--norc","-c",runner_script,"fixture-runner",
                     str(cli),str(run),session,uuid.uuid4().hex*2 if foreign else nonce,"start"],
                     cwd=run,stdin=subprocess.DEVNULL,stdout=log,stderr=log,start_new_session=True,
-                    env={**os.environ,"BASH_ENV":"/dev/null"})
+                    env={**os.environ,"BASH_ENV":str(hook) if early else "/dev/null"})
             children.append(child)
             current=identity(child.pid)
             if current is not None: remember(current)
@@ -178,14 +221,21 @@ static class CopilotControlProbe
             stop_owned(descendant)
             run,child,nonce,session=launch("foreign",foreign=True)
             report["foreignReceiptRefused"]=child.wait(timeout=3)==76 and not (run/"leader.json").exists()
+            run,child,nonce,session=launch("early",early=True)
+            report["earlyStopReplayed"]=child.wait(timeout=4)==143 and lock_free(run) and \
+                (run/"outcome").read_text().splitlines()==[nonce,session,"143"]
+            run,child,nonce,session=launch("unready")
+            unregistered=wait_file(run/"descendant.json")
+            assert alive(unregistered) and unregistered not in owned
+            try:
+                wait_file(run/"never-ready.json",seconds=.1)
+                raise AssertionError("missing readiness unexpectedly succeeded")
+            except TimeoutError: pass
         finally:
-            for value in reversed(owned): stop_owned(value)
+            cleanup_children()
             for child in children: child.wait(timeout=2)
-            end=time.monotonic()+2
-            while any(alive(value) for value in owned):
-                if time.monotonic()>end: raise TimeoutError("owned fixture cleanup unconfirmed")
-                time.sleep(.02)
             shutil.rmtree(root)
+        report["readinessFailureCleaned"]=not alive(unregistered)
         report["cleaned"]=not root.exists()
         print(json.dumps(report))
         """";

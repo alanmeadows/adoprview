@@ -135,6 +135,54 @@ static class CopilotRunTests
             await delivery.DisposeAsync().AsTask().WaitAsync(TimeSpan.FromSeconds(2));
             release.TrySetResult();
         });
+        await test("Copilot browser delivery fairly publishes a second run while the first keeps updating", async () =>
+        {
+            var posted = new ConcurrentQueue<(CopilotRunState State, long Id)>();
+            await using var delivery = new CopilotRunDelivery((state, id) =>
+            { posted.Enqueue((state, id)); return Task.CompletedTask; }, ex => throw ex);
+            var first = new CopilotRunState("first", Request(), "running", "A1", null, null,
+                null, null, "/offline/worktree", "in-use", DateTimeOffset.UtcNow, null);
+            var second = first with { RunId = "second", Request = Request(2), Status = "cancelled", Output = "B final" };
+            delivery.Offer(first);
+            using var deadline = new CancellationTokenSource(TimeSpan.FromSeconds(3));
+            while (posted.Count < 1) await Task.Delay(10, deadline.Token);
+            delivery.Offer(first with { Output = "A2" });
+            delivery.Offer(second);
+            delivery.Acknowledge(posted.Last().Id);
+            while (posted.Count < 2) await Task.Delay(10, deadline.Token);
+            delivery.Offer(first with { Output = "A3" });
+            delivery.Acknowledge(posted.Last().Id);
+            while (posted.Count < 3) await Task.Delay(10, deadline.Token);
+            Check(posted.Last().State == second, "Streaming first run starved the second run's terminal state");
+        });
+        await test("Copilot response deadline bypasses blocking and throwing transport cancellation callbacks", async () =>
+        {
+            foreach (var throwing in new[] { false, true })
+            {
+                using var fake = new FakeTransport { HungOperation = "status", ThrowCancellation = throwing };
+                await using var service = new CopilotRunService(fake);
+                var output = new StringBuilder();
+                try
+                {
+                    var timing = Stopwatch.StartNew();
+                    var control = service.Invoke("status", "Offline-Ubuntu", "", [],
+                        stdout: text => output.Append(text), responseLimit: TimeSpan.FromMilliseconds(100));
+                    await fake.ControlEntered.Task.WaitAsync(TimeSpan.FromSeconds(3));
+                    try { await control.WaitAsync(TimeSpan.FromSeconds(2)); throw new Exception("Hung transport reported success"); }
+                    catch (Exception ex) when (ex.Message.Contains("response limit") && ex.Message.Contains("unconfirmed")) { }
+                    Check(timing.Elapsed < TimeSpan.FromSeconds(1), "Transport callback held the independent deadline");
+                    await fake.CancellationEntered.Task.WaitAsync(TimeSpan.FromSeconds(3));
+                    fake.Output("ABANDONED OUTPUT");
+                    Check(output.Length == 0, "Abandoned control emitted late output");
+                }
+                finally
+                {
+                    fake.ReleaseCancellation.Set();
+                    await fake.CancellationFinished.Task.WaitAsync(TimeSpan.FromSeconds(3));
+                    fake.ControlReleased.TrySetResult();
+                }
+            }
+        });
         await test("Copilot cancellation and detach bypass a blocked transport cancellation callback", async () =>
         {
             foreach (var detach in new[] { false, true })
@@ -637,6 +685,10 @@ static class CopilotRunTests
         public const string PushHash = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
         public string CliHelp = Help;
         public string? FailOperation, ThrowOperation, ThrowIoOperation, ThrowWin32Operation;
+        public string? HungOperation;
+        public bool ThrowCancellation;
+        public readonly TaskCompletionSource ControlEntered = NewSignal();
+        public readonly TaskCompletionSource ControlReleased = NewSignal();
         public bool MissingReceipt, IgnoreFollowCancellation, BlockCancellation;
         public readonly ManualResetEventSlim ReleaseCancellation = new();
         public readonly TaskCompletionSource CancellationFinished = NewSignal();
@@ -658,6 +710,23 @@ static class CopilotRunTests
         {
             Calls.Enqueue(request);
             token.ThrowIfCancellationRequested();
+            if (HungOperation == request.Operation)
+            {
+                stdout = output; stderr = error;
+                using var registration = token.Register(() =>
+                {
+                    try
+                    {
+                        CancellationEntered.TrySetResult();
+                        ReleaseCancellation.Wait(TimeSpan.FromSeconds(5));
+                        if (ThrowCancellation) throw new InvalidOperationException("synthetic cancellation failure");
+                    }
+                    finally { CancellationFinished.TrySetResult(); }
+                });
+                ControlEntered.TrySetResult();
+                await ControlReleased.Task;
+                return new(0, "", "");
+            }
             if (ThrowOperation == request.Operation) throw new InvalidOperationException("offline-secret");
             if (ThrowIoOperation == request.Operation) throw new IOException("offline-secret");
             if (ThrowWin32Operation == request.Operation) throw new System.ComponentModel.Win32Exception(2, "offline-secret");

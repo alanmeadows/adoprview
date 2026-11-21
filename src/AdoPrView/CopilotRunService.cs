@@ -211,7 +211,7 @@ public sealed partial class CopilotRunService : IAsyncDisposable
                 entry.LaunchIntent = latest.LaunchIntent;
                 entry.TaskConfirmedStopped = latest.TaskConfirmedStopped;
                 entry.TaskIdentity = latest.TaskIdentity;
-                Update(entry, s => latest.State with { Request = s.Request, Output = s.Output });
+                Update(entry, s => latest.State with { Request = s.Request, Output = s.Output, OutputOffset = s.OutputOffset });
                 if ((latest.State.Status is "completed" or "cancelled" or "failed") && !latest.State.MayBeRunning &&
                     (!latest.LaunchIntent || latest.TaskConfirmedStopped))
                 {
@@ -526,13 +526,21 @@ public sealed partial class CopilotRunService : IAsyncDisposable
         }
     }
 
-    async Task<CopilotProcessResult> Invoke(string operation, string? distribution, string script, IReadOnlyList<string> arguments,
-        string? input = null, Action<string>? stdout = null, Action<string>? stderr = null, CancellationToken token = default)
+    internal async Task<CopilotProcessResult> Invoke(string operation, string? distribution, string script, IReadOnlyList<string> arguments,
+        string? input = null, Action<string>? stdout = null, Action<string>? stderr = null, CancellationToken token = default,
+        TimeSpan? responseLimit = null)
     {
-        var deadline = CancellationTokenSource.CreateLinkedTokenSource(token);
-        if (operation != "follow")
-            deadline.CancelAfter(TimeSpan.FromSeconds(operation is "stop" or "status" or "verify-run" ? 10 : 125));
-        var cancellation = deadline.Token;
+        var source = new CancellationTokenSource();
+        var cancellation = source.Token;
+        var limit = responseLimit ?? (operation == "follow" ? Timeout.InfiniteTimeSpan :
+            TimeSpan.FromSeconds(operation is "stop" or "status" or "verify-run" ? 10 : 125));
+        var cancelGate = new object();
+        Task? cancelled = null;
+        Task CancelTransport()
+        {
+            lock (cancelGate) return cancelled ??= source.CancelAsync();
+        }
+        var registration = token.Register(() => _ = CancelTransport());
         var acceptingOutput = 1;
         // A disconnected transport must not hold cancellation hostage or deliver late output into a detached run.
         var work = Task.Run(() => transport.ExecuteAsync(new(operation, string.IsNullOrWhiteSpace(distribution) ? null : distribution,
@@ -540,24 +548,20 @@ public sealed partial class CopilotRunService : IAsyncDisposable
             (operation is "status" or "stop" ? "set -euo pipefail\nexport NO_COLOR=1 TERM=dumb" : EnvironmentScript) + "\n" + script, arguments, input),
             stdout is null ? null : text => { if (Volatile.Read(ref acceptingOutput) != 0 && !token.IsCancellationRequested && !cancellation.IsCancellationRequested) stdout(text); },
             stderr is null ? null : text => { if (Volatile.Read(ref acceptingOutput) != 0 && !token.IsCancellationRequested && !cancellation.IsCancellationRequested) stderr(text); }, cancellation));
-        try { return await work.WaitAsync(cancellation).WaitAsync(token).ConfigureAwait(false); }
-        catch (OperationCanceledException)
+        try { return await work.WaitAsync(limit, token).ConfigureAwait(false); }
+        catch (TimeoutException)
         {
-            _ = work.ContinueWith(t => _ = t.Exception, CancellationToken.None,
-                TaskContinuationOptions.OnlyOnFaulted | TaskContinuationOptions.ExecuteSynchronously, TaskScheduler.Default);
-            if (token.IsCancellationRequested) throw;
             throw new RunSetupException($"The {operation} transport exceeded its response limit. Task liveness is unconfirmed; work and its reservation are preserved.");
         }
         finally
         {
             Volatile.Write(ref acceptingOutput, 0);
-            if (token.IsCancellationRequested)
-            {
-                // The independent waiter may finish before linked callbacks run. Keep their source alive until they finish.
-                _ = deadline.CancelAsync().ContinueWith(t => { _ = t.Exception; deadline.Dispose(); },
-                    CancellationToken.None, TaskContinuationOptions.ExecuteSynchronously, TaskScheduler.Default);
-            }
-            else deadline.Dispose();
+            registration.Dispose();
+            if (!work.IsCompleted || token.IsCancellationRequested) _ = CancelTransport();
+            // Abandoned work and callback failures are observed; neither may use a disposed source.
+            _ = Task.WhenAll(work, cancelled ?? Task.CompletedTask).ContinueWith(t =>
+            { _ = t.Exception; source.Dispose(); }, CancellationToken.None,
+                TaskContinuationOptions.ExecuteSynchronously, TaskScheduler.Default);
         }
     }
 
@@ -794,11 +798,11 @@ public sealed partial class CopilotRunService : IAsyncDisposable
         }
     }
 
-    void Append(Entry e, string text, bool stderr)
+    void Append(Entry e, string text, bool stderr, bool history = false)
     {
         lock (e.OutputGate)
         {
-            if (e.Detaching || e.Cancellation.IsCancellationRequested) return;
+            if (e.Detaching || !history && e.Cancellation.IsCancellationRequested) return;
             var clean = (stderr ? e.StderrFilter : e.StdoutFilter).Filter(text);
             if (clean.Length == 0) return;
             e.Output.Append(clean);
@@ -1134,6 +1138,7 @@ public sealed partial class CopilotRunService : IAsyncDisposable
           child_identity="$(read_cli_identity)" && break
           sleep 0.01
         done
+        if [[ "$interrupted" != 0 ]]; then stop_cli; fi
         wait "$child"; code=$?
         if [[ "$interrupted" != 0 ]]; then wait "$child"; code="$interrupted"; fi
         trap - TERM INT

@@ -6,6 +6,7 @@ internal sealed class CopilotRunDelivery(Func<CopilotRunState, long, Task> post,
 {
     readonly object gate = new();
     readonly Dictionary<string, CopilotRunState> pending = new(StringComparer.Ordinal);
+    readonly Queue<string> pendingOrder = new();
     readonly CancellationTokenSource lifetime = new();
     Task worker = Task.CompletedTask;
     TaskCompletionSource? received;
@@ -19,7 +20,7 @@ internal sealed class CopilotRunDelivery(Func<CopilotRunState, long, Task> post,
         lock (gate)
         {
             if (disposed) return;
-            pending[state.RunId] = state;
+            Queue(state);
             if (working || !ready) return;
             working = true;
             worker = Task.Run(DrainAsync);
@@ -33,7 +34,7 @@ internal sealed class CopilotRunDelivery(Func<CopilotRunState, long, Task> post,
             if (disposed) return;
             ready = true;
             // Reload/init is an explicit resynchronization, not an automatic retry loop.
-            if (inFlight is { } state) pending.TryAdd(state.RunId, state);
+            if (inFlight is { } state && !pending.ContainsKey(state.RunId)) Queue(state);
             received?.TrySetResult();
             if (working || pending.Count == 0) return;
             working = true;
@@ -45,6 +46,12 @@ internal sealed class CopilotRunDelivery(Func<CopilotRunState, long, Task> post,
     {
         lock (gate)
             if (id == sequence) received?.TrySetResult();
+    }
+
+    void Queue(CopilotRunState state)
+    {
+        if (!pending.ContainsKey(state.RunId)) pendingOrder.Enqueue(state.RunId);
+        pending[state.RunId] = state;
     }
 
     async Task DrainAsync()
@@ -59,9 +66,9 @@ internal sealed class CopilotRunDelivery(Func<CopilotRunState, long, Task> post,
                 lock (gate)
                 {
                     if (disposed || !ready || pending.Count == 0) { working = false; return; }
-                    var next = pending.First();
-                    pending.Remove(next.Key);
-                    state = next.Value;
+                    var key = pendingOrder.Dequeue();
+                    state = pending[key];
+                    pending.Remove(key);
                     inFlight = state;
                     id = ++sequence;
                     received = new(TaskCreationOptions.RunContinuationsAsynchronously);
@@ -77,7 +84,7 @@ internal sealed class CopilotRunDelivery(Func<CopilotRunState, long, Task> post,
         {
             lock (gate)
             {
-                if (inFlight is { } state) pending.TryAdd(state.RunId, state);
+                if (inFlight is { } state && !pending.ContainsKey(state.RunId)) Queue(state);
                 inFlight = null;
                 working = false; ready = false;
             }
@@ -91,7 +98,7 @@ internal sealed class CopilotRunDelivery(Func<CopilotRunState, long, Task> post,
         lock (gate)
         {
             if (disposed) return;
-            disposed = true; pending.Clear(); completion = worker;
+            disposed = true; pending.Clear(); pendingOrder.Clear(); completion = worker;
         }
         lifetime.Cancel();
         await completion.ConfigureAwait(false);

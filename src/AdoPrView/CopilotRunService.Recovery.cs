@@ -258,7 +258,7 @@ public sealed partial class CopilotRunService
         var env = e.Environment;
         ReadOwnedTask(e, await Invoke("status", env.Distribution, StatusScript, [env.Bgtask, e.TaskName], token: token).ConfigureAwait(false));
         var logs = await Invoke("history", env.Distribution, "\"$1\" logs \"$2\" --tail 2000", [env.Bgtask, e.TaskName],
-            stdout: s => Append(e, s, false), stderr: s => Append(e, s, true), token: token).ConfigureAwait(false);
+            stdout: s => Append(e, s, false, history: true), stderr: s => Append(e, s, true, history: true), token: token).ConfigureAwait(false);
         RequireSuccess(logs, "Saved task logs could not be read; terminal history and retained work remain recorded.");
     }
 

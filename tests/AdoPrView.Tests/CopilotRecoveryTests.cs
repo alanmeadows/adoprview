@@ -325,6 +325,31 @@ static class CopilotRecoveryTests
                 f.Transport.Stops == 1 && f.Transport.Cleanups == 0,
                 "Startup ignored explicit cancellation or resumed/cleaned its work");
         });
+        await test("Copilot cancellation before recovered follow preserves intentional history replay", async () =>
+        {
+            using var f = new Fixture();
+            var first = f.Service();
+            var run = await first.StartAsync(Request());
+            await Wait(first, run.RunId, state => state.Output.Contains("FAKE-READY"));
+            f.Transport.Emit("SUPERVISED HISTORY\n");
+            await first.DisposeAsync();
+            f.Transport.BlockPreflight = true;
+            await using var recovered = f.Service();
+            var recovery = recovered.RecoverAsync();
+            try
+            {
+                await f.Transport.RecoveryEntered.Task.WaitAsync(TimeSpan.FromSeconds(3));
+                var stopped = await recovered.CancelAsync(run.Key, run.RunId).WaitAsync(TimeSpan.FromSeconds(3));
+                Check(stopped is { Status: "cancelled", MayBeRunning: false, WorktreeRetained: true } &&
+                    stopped.Output.Contains("SUPERVISED HISTORY") && f.Transport.Launches == 1 && f.Transport.Stops == 1,
+                    "Cancelling before follow attachment discarded owned supervised history or relaunched");
+            }
+            finally
+            {
+                f.Transport.ReleasePreflight.TrySetResult();
+                await recovery.WaitAsync(TimeSpan.FromSeconds(3));
+            }
+        });
 
         await test("Copilot failed resume or missing authentication is needs-attention, retains work and never loops", async () =>
         {
