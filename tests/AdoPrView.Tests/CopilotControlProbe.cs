@@ -132,6 +132,8 @@ static class CopilotControlProbe
         original="$child_identity"
         [[ -n "$original" ]] || exit 2
         trap cleanup EXIT
+        for attempt in {1..200}; do [[ -f "$1/guard.json" ]] && break; sleep .01; done
+        [[ -f "$1/guard.json" ]] || exit 2
         child_identity="${original%:*}:0"
         stop_cli
         kill -0 "$child"
