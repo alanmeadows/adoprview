@@ -887,7 +887,9 @@ test('real row hit testing and action identity across refreshes', { timeout: 900
 
     await t.test('GUI settings drawer preserves rerender and theme focus without stealing later focus or leaving inert controls', async () => {
       await reset();
-      await evaluate(`window.settingsRpc=window.MockHost.rpc;
+      await evaluate(`window.savedTriageInstructions=S.settings.triageInstructions;
+        S.settings.triageInstructions='Synthetic saved instructions';
+        window.settingsRpc=window.MockHost.rpc;
         window.MockHost.rpc=async(method,p)=>{
           if(method==='approvalSettings')return {message:'Synthetic provider settings',actions:[]};
           if(method==='setTheme'){
@@ -934,7 +936,8 @@ test('real row hit testing and action identity across refreshes', { timeout: 900
         assert.equal((await calls()).some(c => c.method === 'saveSettings'), false, 'Theme saves remain separate from all other Settings');
       } finally {
         await evaluate(`if(S.themeBusy){window.completeTheme();await window.changingTheme}
-          if(S.drawer)closeDrawer();window.MockHost.rpc=window.settingsRpc;delete window.settingsRpc;`);
+          if(S.drawer)closeDrawer();window.MockHost.rpc=window.settingsRpc;delete window.settingsRpc;
+          S.settings.triageInstructions=window.savedTriageInstructions;delete window.savedTriageInstructions;`);
       }
     });
 
