@@ -509,6 +509,8 @@ The generated Fix/Copy prompt is configurable in settings:
   **Custom Ask (override)** and **Additional instructions (append)**. Copy
   prompt includes the suffix after its generated boundaries; a new inline launch
   includes it once after the captured source and verified publish target.
+  Ask, additional guidance, skill and reviewer choices are captured together
+  before asynchronous source/log reads; later settings saves apply to future prompts.
   Blank leaves existing behavior unchanged. Saving does not modify running or
   recovered sessions, their prompts or history; all existing gates still apply.
 

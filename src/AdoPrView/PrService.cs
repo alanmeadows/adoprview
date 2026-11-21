@@ -871,9 +871,20 @@ public sealed partial class PrService
         catch { context.Dispose(); throw; }
     }
 
+    sealed record FixPromptSettings(string? TriageInstructions, string? AdditionalTriageInstructions,
+        string? FixSkill, string[] FixReviewerModels);
+
+    FixPromptSettings CaptureFixPromptSettings()
+    {
+        var settings = _store.Current;
+        return new(settings.TriageInstructions, settings.AdditionalTriageInstructions,
+            settings.FixSkill, (settings.FixReviewerModels ?? []).ToArray());
+    }
+
     public async Task<(PrView Pr, string SourceRef, string SourceCommit, string Prompt, string? AdditionalInstructions)> GetCopilotSourceAsync(string key)
     {
         var pr = Find(key);
+        var settings = CaptureFixPromptSettings();
         void CheckAvailable()
         {
             if (!Monitored(pr) ||
@@ -904,13 +915,15 @@ public sealed partial class PrService
         var previewSource = S(fresh["lastMergeSourceCommit"]?["commitId"]);
         if (!string.IsNullOrEmpty(previewSource) && !commit.Equals(previewSource, StringComparison.OrdinalIgnoreCase))
             throw new InvalidOperationException("The PR source changed while its ADO preview was updating. Refresh and retry once ADO reports the current source.");
-        var additional = _store.Current.AdditionalTriageInstructions;
-        var prompt = await BuildTriagePromptAsync(key, includeAdditionalInstructions: false);
+        var prompt = await BuildTriagePromptAsync(key, settings, includeAdditionalInstructions: false);
         CheckAvailable();
-        return (pr, sourceRef, commit, prompt, additional);
+        return (pr, sourceRef, commit, prompt, settings.AdditionalTriageInstructions);
     }
 
-    public async Task<string> BuildTriagePromptAsync(string key, bool includeAdditionalInstructions = true)
+    public Task<string> BuildTriagePromptAsync(string key, bool includeAdditionalInstructions = true) =>
+        BuildTriagePromptAsync(key, CaptureFixPromptSettings(), includeAdditionalInstructions);
+
+    async Task<string> BuildTriagePromptAsync(string key, FixPromptSettings settings, bool includeAdditionalInstructions)
     {
         var pr = Find(key);
         var sb = new StringBuilder();
@@ -968,7 +981,6 @@ public sealed partial class PrService
             }
             sb.AppendLine();
         }
-        var settings = _store.Current;
         var instructions = settings.TriageInstructions;
         var skill = settings.FixSkill?.Trim();
         sb.AppendLine("## Ask");

@@ -120,6 +120,54 @@ static class CopilotSourceTests
 
     public static async Task Run(Func<string, Func<Task>, Task> test)
     {
+        foreach (var copy in new[] { false, true })
+            foreach (var custom in new[] { false, true })
+                await test($"Copilot additional instructions snapshot all prompt settings before log awaits (copy={copy}, custom={custom})", async () =>
+                {
+                    using var f = new Fixture();
+                    f.Store.Current.TriageInstructions = custom ? "ORIGINAL ASK" : null;
+                    f.Store.Current.FixSkill = "original-skill";
+                    const string additional = "\n  ORIGINAL SUFFIX\n";
+                    f.Store.Current.AdditionalTriageInstructions = additional;
+                    f.Pr.FailedBuilds.Add(new(7, "Offline failure", "https://example.invalid/build/7", null,
+                        [new("Compile", "Offline task", "failed", 9, ["Offline issue"])]));
+                    var baseline = await f.Service.BuildTriagePromptAsync(f.Pr.Key);
+                    var entered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+                    var release = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+                    f.DuringLog = async () =>
+                    {
+                        entered.TrySetResult();
+                        await release.Task.WaitAsync(TimeSpan.FromSeconds(5));
+                    };
+                    async Task<(string Prompt, string? Additional)> Capture()
+                    {
+                        if (copy) return (await f.Service.BuildTriagePromptAsync(f.Pr.Key), null);
+                        var source = await f.Service.GetCopilotSourceAsync(f.Pr.Key);
+                        return (source.Prompt, source.AdditionalInstructions);
+                    }
+                    var capture = Capture();
+                    try
+                    {
+                        await entered.Task.WaitAsync(TimeSpan.FromSeconds(5));
+                        f.Store.Update(settings =>
+                        {
+                            settings.TriageInstructions = "REPLACEMENT ASK";
+                            settings.AdditionalTriageInstructions = null;
+                            settings.FixSkill = "replacement-skill";
+                            settings.FixReviewerModels.Clear();
+                            settings.FixReviewerModels.Add("replacement-model");
+                        });
+                    }
+                    finally { release.TrySetResult(); }
+                    var captured = await capture;
+                    var effective = copy ? captured.Prompt : captured.Prompt + "\n## Additional instructions\n" + captured.Additional;
+                    Check(effective == baseline, "Awaited log fetch mixed settings from different saved generations");
+                    CheckReviewGate(effective);
+                    Check(copy || captured.Additional == additional, "Clearing settings erased an in-flight captured suffix");
+                    var next = await f.Service.BuildTriagePromptAsync(f.Pr.Key);
+                    Check(next.Contains("REPLACEMENT ASK") && next.Contains("Reviewer (model: replacement-model)") &&
+                        !next.Contains("ORIGINAL SUFFIX"), "Snapshot prevented subsequent prompts from using newly saved settings");
+                });
         foreach (var custom in new[] { false, true })
             await test($"Copilot additional instructions follow all generated gates without replacing Ask (custom={custom})", async () =>
             {
@@ -251,21 +299,29 @@ static class CopilotSourceTests
         public int Reads;
         public bool MissingRef;
         public Action? DuringRef;
+        public Func<Task>? DuringLog;
         public Fixture()
         {
-            _http = new(new FakeHandler(req =>
+            _http = new(new FakeHandler(async req =>
             {
                 Check(req.Method == HttpMethod.Get, "Copilot preparation attempted a state-changing ADO request");
                 Check(req.RequestUri!.Host == "dev.azure.com", "Unexpected origin");
                 Reads++;
+                if (req.RequestUri.AbsolutePath.EndsWith("/builds/7/logs"))
+                    return Json("""{"value":[{"id":9,"lineCount":1}]}""");
+                if (req.RequestUri.AbsolutePath.EndsWith("/builds/7/logs/9"))
+                {
+                    if (DuringLog is not null) await DuringLog();
+                    return new(HttpStatusCode.OK) { Content = new StringContent("Offline build log") };
+                }
                 if (req.RequestUri.AbsolutePath.EndsWith("/refs"))
                 {
                     Check(Uri.UnescapeDataString(req.RequestUri.Query).Contains("filter=heads/fix/captured"), "Wrong exact source ref");
                     DuringRef?.Invoke();
-                    return Task.FromResult(Json(MissingRef ? """{"value":[]}""" : $$"""{"value":[{"name":"refs/heads/fix/captured-other","objectId":"2222222222222222222222222222222222222222"},{"name":"refs/heads/fix/captured","objectId":"{{Sha}}"}]}"""));
+                    return Json(MissingRef ? """{"value":[]}""" : $$"""{"value":[{"name":"refs/heads/fix/captured-other","objectId":"2222222222222222222222222222222222222222"},{"name":"refs/heads/fix/captured","objectId":"{{Sha}}"}]}""");
                 }
                 Check(req.RequestUri.AbsolutePath.EndsWith("/pullrequests/123"), "Preflight switched PR");
-                return Task.FromResult(Json(Fresh.ToJsonString()));
+                return Json(Fresh.ToJsonString());
             }));
             Service = new(new AdoClient(_http, _ => Task.FromResult(new AuthenticationHeaderValue("Bearer", "offline"))), Store);
             typeof(PrService).GetField("_snapshot", BindingFlags.Instance | BindingFlags.NonPublic)!.SetValue(Service, new Snapshot { Prs = [Pr] });

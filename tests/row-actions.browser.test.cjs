@@ -87,7 +87,7 @@ test('Additional Fix fields are independently editable and restored in the real 
       document.querySelector('label[for="'+id+'"]').textContent)`);
     assert.deepEqual(labels, ['Custom Ask (override)', 'Additional instructions (append)']);
     const ask = 'CUSTOM ASK: fix only the synthetic issue';
-    const extra = '  EXTRA GUIDANCE\nKeep the final newline.\n';
+    const extra = '\n  EXTRA GUIDANCE\nKeep the final newline.\n';
     await click('#triageInstructions');
     await send('Input.insertText', { text: ask });
     await click('#additionalTriageInstructions');
@@ -102,6 +102,8 @@ test('Additional Fix fields are independently editable and restored in the real 
     await click('#settingsBtn');
     assert.deepEqual(await evaluate(`['triageInstructions','additionalTriageInstructions'].map(id=>
       document.getElementById(id).value)`), [ask, extra]);
+    await click('[data-dact="save"]');
+    assert.equal(await evaluate('window.fixSaved[1].additionalTriageInstructions'), extra);
     await evaluate(`document.querySelector('#triageInstructions').closest('.section').scrollIntoView({block:'center'});`);
     if (process.env.ADOPRVIEW_FIX_SCREENSHOT) {
       await evaluate('new Promise(resolve=>setTimeout(resolve,250))');
@@ -114,8 +116,8 @@ test('Additional Fix fields are independently editable and restored in the real 
     await send('Input.dispatchKeyEvent', { type: 'keyDown', key: 'Backspace', code: 'Backspace', windowsVirtualKeyCode: 8 });
     await send('Input.dispatchKeyEvent', { type: 'keyUp', key: 'Backspace', code: 'Backspace', windowsVirtualKeyCode: 8 });
     await click('[data-dact="save"]');
-    assert.equal(await evaluate('window.fixSaved[1].additionalTriageInstructions'), '');
-    assert.equal(await evaluate('window.fixSaved[1].triageInstructions'), ask);
+    assert.equal(await evaluate('window.fixSaved[2].additionalTriageInstructions'), '');
+    assert.equal(await evaluate('window.fixSaved[2].triageInstructions'), ask);
     assert.equal(await evaluate('window.fixExisting.every(run=>S.runs.get(run.runId)===run)'), true);
     await send('Browser.close', {}, false);
   } finally {

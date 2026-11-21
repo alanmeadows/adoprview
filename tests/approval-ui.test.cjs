@@ -64,14 +64,17 @@ test('Fix drawer saves additional instructions independently without changing ca
     elements.set('#' + id, { value: '', checked: false });
   elements.get('#triageInstructions').value = 'CUSTOM ASK';
   elements.get('#additionalTriageInstructions').value = '  UPDATED\r\nfinal\n';
+  const calls = [];
   window.MockHost.rpc = async (method, p) => {
-    assert.equal(method, 'saveSettings');
-    assert.equal(p.settings.triageInstructions, 'CUSTOM ASK');
-    assert.equal(p.settings.additionalTriageInstructions, '  UPDATED\r\nfinal\n');
-    assert.equal(p.settings.futureSetting, 'KEEP');
+    calls.push({ method, settings: { ...p.settings } });
     return p.settings;
   };
   await hooks.onDrawerAction('save', {});
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].method, 'saveSettings');
+  assert.equal(calls[0].settings.triageInstructions, 'CUSTOM ASK');
+  assert.equal(calls[0].settings.additionalTriageInstructions, '  UPDATED\r\nfinal\n');
+  assert.equal(calls[0].settings.futureSetting, 'KEEP');
   assert.equal(hooks.S.runs.get(existing.runId), existing);
 });
 
