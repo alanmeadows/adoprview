@@ -200,6 +200,8 @@ publisher advances the whole snapshot, then checks the serialized init response.
 The frontend whole-init regression exercises the real boot/RPC/event path with
 unrelated DOM wiring stubbed, including queued row updates and late run state.
 Publication revision is separate from `OrderRevision`; row ordering is unchanged.
+`Copilot restored replay` verifies pending and in-flight snapshots retain newer
+lifecycle/worktree state or same-revision output when restoration offers old data.
 
 The smaller kernel-control opt-in executes the exact production runner in an
 explicitly selected, already-responsive WSL distribution:

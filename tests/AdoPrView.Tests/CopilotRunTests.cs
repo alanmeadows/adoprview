@@ -149,6 +149,31 @@ static class CopilotRunTests
             Check(posted.Last().State.Output == "final worktree status", "Later terminal cleanup/status update was lost");
             await delivery.DisposeAsync().AsTask().WaitAsync(TimeSpan.FromSeconds(2));
         });
+        await test("Copilot restored replay cannot replace newer pending lifecycle or output snapshots", async () =>
+        {
+            var initial = new CopilotRunState("offline", Request(), "running", "initial", null, null,
+                null, null, "/offline/worktree", "in-use", DateTimeOffset.UtcNow, null)
+                { Revision = 2, OutputOffset = 100 };
+            foreach (var outputOnly in new[] { false, true })
+            {
+                var newer = outputOnly
+                    ? initial with { Output = "newer output", OutputOffset = 200 }
+                    : initial with { Revision = 3, Status = "completed", WorktreeStatus = "removed-clean" };
+                var posted = new ConcurrentQueue<(CopilotRunState State, long Id)>();
+                await using var delivery = new CopilotRunDelivery((state, id) =>
+                { posted.Enqueue((state, id)); return Task.CompletedTask; }, ex => throw ex, waitForReady: true);
+                delivery.Offer(newer);
+                delivery.Offer(initial);
+                delivery.Ready();
+                using var deadline = new CancellationTokenSource(TimeSpan.FromSeconds(3));
+                while (posted.IsEmpty) await Task.Delay(10, deadline.Token);
+                Check(posted.First().State == newer, "Restored replay permanently discarded newer pending lifecycle/output state");
+                delivery.Offer(initial);
+                delivery.Ready();
+                while (posted.Count < 2) await Task.Delay(10, deadline.Token);
+                Check(posted.Last().State == newer, "Older replay superseded the in-flight newest snapshot");
+            }
+        });
         await test("Copilot coalesced delivery disposal does not wait for hung posting transport", async () =>
         {
             foreach (var synchronous in new[] { false, true })

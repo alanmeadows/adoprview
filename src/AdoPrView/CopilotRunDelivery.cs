@@ -51,6 +51,9 @@ internal sealed class CopilotRunDelivery(Func<CopilotRunState, long, Task> post,
 
     void Queue(CopilotRunState state)
     {
+        var latest = pending.GetValueOrDefault(state.RunId) ??
+            (inFlight?.RunId == state.RunId ? inFlight : null);
+        if (latest is not null && (state.Revision < latest.Revision || state.OutputOffset < latest.OutputOffset)) return;
         if (!pending.ContainsKey(state.RunId)) pendingOrder.Enqueue(state.RunId);
         pending[state.RunId] = state;
     }

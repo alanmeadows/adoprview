@@ -630,6 +630,8 @@ unacknowledged browser message plus the latest pending snapshot per run. A busy
 browser cannot accumulate an unlimited output/dispatcher queue. Updates
 retain the latest terminal/status update while acknowledgements are missing;
 pending runs are served fairly even while another run keeps streaming.
+Older lifecycle/output replay cannot replace a newer pending or in-flight
+snapshot during delivery restoration.
 Dashboard ready/init resynchronizes after navigation or reload. Monotonic
 lifecycle revisions reject old same-output status/worktree snapshots. The initial
 dashboard response also reads authoritative run states and the latest PR snapshot
