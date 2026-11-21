@@ -975,10 +975,12 @@ test('real row hit testing and action identity across refreshes', { timeout: 900
         assert.equal(await evaluate(`document.activeElement.id`), 'settingsBtn', 'Unfocused opening returns to the visible Settings button');
         assert.equal(await evaluate(`document.querySelector('#statusline').inert`), true, 'Existing inertness is restored, not cleared');
         assert.equal(await evaluate(`document.querySelector('main').inert`), false);
-        await evaluate(`toast('Synthetic preexisting inert action','info',{label:'Already inert',run:()=>{}});
+        await evaluate(`(async()=>{
+          toast('Synthetic preexisting inert action','info',{label:'Already inert',run:()=>{}});
           window.preInertToast=document.querySelector('#toasts .toast:last-child button');window.preInertToast.inert=true;
           await hidePr(findPr('sample-service-id:101'));
-          window.existingUndo=document.querySelector('#toasts .toast:last-child button');window.existingUndo.id='existingUndoFixture';`);
+          window.existingUndo=document.querySelector('#toasts .toast:last-child button');window.existingUndo.id='existingUndoFixture';
+        })()`);
         await keyboard('Enter', 13);
         await evaluate(`toast('Synthetic late Undo','info',{label:'Undo',run:()=>undoHide()});
           window.lateUndo=document.querySelector('#toasts .toast:last-child button');window.lateUndo.id='lateUndoFixture';`);
