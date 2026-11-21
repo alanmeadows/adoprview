@@ -296,7 +296,7 @@ function laneVisible(prs) {
 }
 
 function renderRows(whenIdle = false) {
-  const focused = document.activeElement;
+  const focused = expansionControl(document.activeElement);
   const players = new Map([...document.querySelectorAll('video[data-video-media]')].map(v => [v.dataset.videoMedia, v]));
   renderRowsContent(whenIdle);
   for (const placeholder of document.querySelectorAll('video[data-video-media]')) {
@@ -314,7 +314,7 @@ function expansionControl(target) {
 }
 
 function restoreExpansionFocus(control) {
-  if (expansionControl(control) !== control || !control || control.isConnected) return;
+  if (!control || control.isConnected) return;
   const key = control.closest('.pr')?.dataset.key;
   const row = [...document.querySelectorAll('.pr')].find(el => el.dataset.key === key);
   const next = [...(row?.querySelectorAll('[role="button"][data-act][aria-expanded]') || [])]
@@ -576,7 +576,7 @@ function earlierRunCards(key) {
 function renderRunShelf() {
   const shelf = $('#runShelf');
   if (!shelf) return;
-  const focused = shelf.contains?.(document.activeElement) ? document.activeElement : null;
+  const focused = shelf.contains?.(document.activeElement) ? expansionControl(document.activeElement) : null;
   const unfiltered = !S.lane && !S.q.trim() && !S.repo && S.scope === 'all';
   const loaded = !!(S.snap.lastRefresh || S.snap.error);
   const present = new Set(S.snap.prs.filter(p => !ignoredDraft(p)).map(p => p.key));
