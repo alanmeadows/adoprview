@@ -9,6 +9,29 @@ static class CopilotControlProbe
         if (string.IsNullOrWhiteSpace(distro))
             throw new Exception("Select an already-responsive distribution with ADOPRVIEW_TEST_WSL_DISTRO before running the disposable fixture.");
         using var deadline = new CancellationTokenSource(TimeSpan.FromSeconds(25));
+        foreach (var operation in new[] { "os.pidfd_open", "signal.pidfd_send_signal" })
+        {
+            var failure = operation == "os.pidfd_open"
+                ? """OSError(38,"synthetic unavailable pidfd syscall")"""
+                : """PermissionError(1,"synthetic denied pidfd signal")""";
+            var script = $$"""
+                import os,signal,subprocess,tempfile
+                def blocked(*args): raise {{failure}}
+                def forbidden(*args,**kwargs): raise AssertionError("preflight created fixture resources")
+                {{operation}}=blocked
+                tempfile.mkdtemp=forbidden
+                subprocess.Popen=forbidden
+                """ + "\n" + Controller;
+            var rejected = await new WslCopilotRunTransport().ExecuteAsync(new("fixture-control-preflight",
+                distro, """exec timeout --signal=TERM --kill-after=2s 5s python3 -I - "$1" """,
+                [CopilotRunService.RunnerScript.Replace("\r\n", "\n")], script),
+                null, null, deadline.Token);
+            if (rejected.ExitCode == 0 ||
+                !rejected.StandardError.Contains("requires available and permitted pidfd operations; no helpers launched") ||
+                rejected.StandardError.Contains("preflight created fixture resources"))
+                throw new Exception("Disposable pidfd prerequisite did not reject " + operation + " before fixture creation.");
+        }
+        Console.WriteLine("PIDFD_PREFLIGHT unavailableRefused=true deniedRefused=true resourcesCreated=false");
         var result = await new WslCopilotRunTransport().ExecuteAsync(new("fixture-control",
             distro,
             """exec timeout --signal=TERM --kill-after=5s 20s python3 -I - "$1" """,
@@ -19,7 +42,7 @@ static class CopilotControlProbe
         using var report = JsonDocument.Parse(result.StandardOutput);
         foreach (var name in new[] { "escalated", "freeLock", "orphanLockHeld", "foreignReceiptRefused",
             "staleIdentityRefused", "missingIdentityRefused", "earlyStopReplayed", "readinessFailureCleaned",
-            "workAndLogPreserved", "cleaned" })
+            "workAndLogPreserved", "pidfdPreflightVerified", "cleaned" })
             if (!report.RootElement.GetProperty(name).GetBoolean())
                 throw new Exception("Disposable WSL runner check failed: " + name);
         Console.WriteLine("KERNEL_CONTROL " + result.StandardOutput.Trim());
@@ -31,6 +54,12 @@ static class CopilotControlProbe
             raise RuntimeError("Disposable cleanup requires Linux pidfd support; no helpers launched")
         if ctypes.CDLL(None,use_errno=True).prctl(36,1,0,0,0)!=0:
             raise RuntimeError("Disposable cleanup requires a child subreaper; no helpers launched")
+        try:
+            handle=os.pidfd_open(os.getpid(),0)
+            try: signal.pidfd_send_signal(handle,0)
+            finally: os.close(handle)
+        except OSError as error:
+            raise RuntimeError("Disposable cleanup requires available and permitted pidfd operations; no helpers launched") from error
         runner_script=sys.argv[1]
         root=pathlib.Path(tempfile.mkdtemp(prefix="ado-control-probe-"))
         owned=[]
@@ -156,7 +185,7 @@ static class CopilotControlProbe
             current=identity(child.pid)
             if current is not None: remember(current)
             return run,child,nonce,session
-        report={}
+        report={"pidfdPreflightVerified":True}
         try:
             # Exercise the verbatim production signal guards with stale/absent
             # captured identities, without trying to force real host PID reuse.

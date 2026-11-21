@@ -205,7 +205,11 @@ Remove-Item Env:\ADOPRVIEW_TEST_FILTER, Env:\ADOPRVIEW_TEST_WSL_CONTROL, Env:\AD
 ```
 
 It requires Bash, Python 3 with Linux pidfd support, `flock`, `setsid` and
-`timeout`, plus permission to become a child subreaper. A disposable sleeping
+`timeout`, plus permission to become a child subreaper. Before creating any
+fixture directory or helper, it opens a pidfd for itself and sends signal zero
+to check actual syscall availability and permission. Unavailable-open and
+denied-signal regressions prohibit directory/process creation and assert this
+preflight fails explicitly. A disposable sleeping
 CLI and its descendant ignore TERM so the runner must escalate only its owned
 group to KILL. The fixture checks the real exit receipt, free execution lock,
 preserved synthetic work/logs, a held orphan-descendant lock and refusal of a
