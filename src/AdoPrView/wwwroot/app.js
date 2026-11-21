@@ -296,12 +296,23 @@ function laneVisible(prs) {
 }
 
 function renderRows(whenIdle = false) {
+  const focused = document.activeElement;
   const players = new Map([...document.querySelectorAll('video[data-video-media]')].map(v => [v.dataset.videoMedia, v]));
   renderRowsContent(whenIdle);
   for (const placeholder of document.querySelectorAll('video[data-video-media]')) {
     const existing = players.get(placeholder.dataset.videoMedia);
     if (existing && existing !== placeholder) placeholder.replaceWith(existing);
   }
+  restoreExpansionFocus(focused);
+}
+
+function restoreExpansionFocus(control) {
+  if (!control?.matches?.('[role="button"][data-act][aria-expanded]') || control.isConnected) return;
+  const key = control.closest('.pr')?.dataset.key;
+  const row = [...document.querySelectorAll('.pr')].find(el => el.dataset.key === key);
+  const next = [...(row?.querySelectorAll('[role="button"][data-act][aria-expanded]') || [])]
+    .find(el => el.dataset.act === control.dataset.act && el.dataset.gate === control.dataset.gate);
+  next?.focus({ preventScroll: true });
 }
 
 function renderRowsContent(whenIdle = false) {
@@ -558,6 +569,7 @@ function earlierRunCards(key) {
 function renderRunShelf() {
   const shelf = $('#runShelf');
   if (!shelf) return;
+  const focused = shelf.contains?.(document.activeElement) ? document.activeElement : null;
   const unfiltered = !S.lane && !S.q.trim() && !S.repo && S.scope === 'all';
   const loaded = !!(S.snap.lastRefresh || S.snap.error);
   const present = new Set(S.snap.prs.filter(p => !ignoredDraft(p)).map(p => p.key));
@@ -570,11 +582,12 @@ function renderRunShelf() {
   shelf.innerHTML = keys.map(key => {
     const r = runForPr(key), open = S.expanded.has(key);
     return `<div class="pr run-only ${open ? 'open' : ''}" data-key="${esc(key)}">
-      <div class="run-heading" data-act="toggle">${svg('chev').replace('<svg', '<svg class="chev"')}
+      <div class="run-heading" data-act="toggle" role="button" tabindex="0" aria-expanded="${open}">${svg('chev').replace('<svg', '<svg class="chev"')}
         <div class="prmain"><div class="title">${esc(r.title)}</div><div class="meta small"><span class="id">!${esc(r.id)}</span><span class="sep"> · </span><span>${esc(r.repo)}</span><span class="sep"> · </span><span>${findPr(key) && ignoredDraft(findPr(key)) ? 'Ignored draft' : 'PR no longer in the active list'} · ${esc(runSummary(r))}</span></div></div></div>
       ${open ? `<div class="detail"><div class="full stack">${renderRunCard(key, r)}${earlierRunCards(key)}</div></div>` : ''}
     </div>`;
   }).join('');
+  restoreExpansionFocus(focused);
 }
 
 function updateCopilotRun(r) {
@@ -634,8 +647,9 @@ function gateCell(p, g) {
   if (g === 'autocomplete' && gate.state === 'human') clickable = true;
   if (g === 'reviews' && gate.state === 'human') clickable = true;
   if (['fail', 'warn', 'pending'].includes(gate.state) && ['build', 'merge', 'comments', 'agency', 'checks', 'reviews'].includes(g)) clickable = true;
+  const inspection = clickable && !['pop', 'autocomplete'].includes(g);
   const tip = [gate.label, gate.detail].filter(Boolean).join(' — ');
-  return `<div class="gate"><span class="pill ${gate.state} ${clickable ? 'click' : ''}" ${clickable ? `data-act="gate" data-gate="${g}"` : ''} title="${esc(tip)}"><i></i><span>${esc(gate.label)}</span></span></div>`;
+  return `<div class="gate"><span class="pill ${gate.state} ${clickable ? 'click' : ''}" ${clickable ? `data-act="gate" data-gate="${g}"` : ''} ${inspection ? `role="button" tabindex="0" aria-expanded="${S.expanded.has(p.key)}"` : ''} title="${esc(tip)}"><i></i><span>${esc(gate.label)}</span></span></div>`;
 }
 
 function isBusy(key, a) { return S.busy.has(`${key}:${a}`); }
@@ -792,7 +806,7 @@ function renderPr(p, meta) {
   if (p.error) tags.push(`<span class="tag err" title="${esc(p.error)}">load error</span>`);
   return `<div class="pr ${open ? 'open' : ''}" data-key="${esc(p.key)}" style="--c:${meta.c}">
     <div class="row" data-act="toggle">
-      <div class="c-pr">${svg('chev').replace('<svg', '<svg class="chev"')}
+      <div class="c-pr" data-act="toggle" role="button" tabindex="0" aria-expanded="${open}">${svg('chev').replace('<svg', '<svg class="chev"')}
         <div class="prmain">
           <div class="title" title="${esc(p.title)}">${esc(p.title)}</div>
           <div class="meta">${tags.join('')}${metaBits.join('<span class="sep">·</span>')}</div>
@@ -1657,6 +1671,13 @@ function wire() {
   });
   document.addEventListener('keydown', (e) => {
     if (e.key === 'Escape' && S.rowMenu) { e.preventDefault(); closeRowMenu(); flushRowUpdates(); return; }
+    const control = e.target.closest('[role="button"][data-act][aria-expanded]');
+    if (control && ['Enter', ' '].includes(e.key)) {
+      e.preventDefault();
+      if (e.repeat || control.getAttribute('aria-disabled') === 'true') return;
+      control.click();
+      return;
+    }
     const inInput = /INPUT|TEXTAREA|SELECT/.test(document.activeElement?.tagName) || document.activeElement?.isContentEditable;
     if (!inInput && e.ctrlKey && !e.shiftKey && !e.altKey && !e.metaKey && e.key.toLowerCase() === 'z' && S.hideUndo.length) {
       e.preventDefault();
