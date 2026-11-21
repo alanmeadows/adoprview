@@ -887,6 +887,10 @@ test('real row hit testing and action identity across refreshes', { timeout: 900
 
     await t.test('GUI settings drawer preserves rerender and theme focus without stealing later focus or leaving inert controls', async () => {
       await reset();
+      const settleTheme = () => evaluate(`new Promise((resolve,reject)=>{
+        const deadline=Date.now()+5000;
+        const check=()=>!S.themeBusy?resolve():Date.now()>deadline?reject(Error('Theme save did not settle')):requestAnimationFrame(check);check();
+      })`);
       await evaluate(`window.savedTriageInstructions=S.settings.triageInstructions;
         S.settings.triageInstructions='Synthetic saved instructions';
         window.settingsRpc=window.MockHost.rpc;
@@ -916,14 +920,16 @@ test('real row hit testing and action identity across refreshes', { timeout: 900
         for (const outcome of ['saved', 'failed', 'moved', 'closed']) {
           await evaluate(`document.querySelector('#theme').focus();
             window.previousTheme=S.settings.theme;window.failTheme=${outcome === 'failed'};
-            document.querySelector('#theme').value=S.settings.theme==='dark'?'light':'dark';
-            window.selectedTheme=document.querySelector('#theme').value;
-            window.changingTheme=changeTheme(document.querySelector('#theme'));renderDrawer();`);
+            window.selectedTheme=S.settings.theme==='dark'?'light':'dark';`);
+          const dark = await evaluate(`window.previousTheme==='dark'`);
+          await keyboard(dark ? 'ArrowUp' : 'ArrowDown', dark ? 38 : 40);
           assert.equal(await evaluate(`S.themeBusy && document.querySelector('#theme').disabled`), true);
           assert.equal(await evaluate(`document.documentElement.dataset.theme===window.selectedTheme`), true, 'Theme applies immediately');
+          await evaluate(`renderDrawer()`);
           if (outcome === 'moved') await evaluate(`document.querySelector('#repoUrl').focus()`);
           if (outcome === 'closed') await keyboard('Escape', 27);
-          await evaluate(`window.completeTheme();await window.changingTheme`);
+          await evaluate(`window.completeTheme()`);
+          await settleTheme();
           assert.equal(await evaluate(`document.activeElement.id`), outcome === 'moved' ? 'repoUrl' : outcome === 'closed' ? 'settingsBtn' : 'theme');
           assert.equal(await evaluate(`S.settings.theme===(window.failTheme?window.previousTheme:window.selectedTheme)
             && document.documentElement.dataset.theme===S.settings.theme && !document.querySelector('#theme').disabled`), true);
@@ -935,8 +941,9 @@ test('real row hit testing and action identity across refreshes', { timeout: 900
         assert.equal((await calls()).filter(c => c.method === 'setTheme').length, 4);
         assert.equal((await calls()).some(c => c.method === 'saveSettings'), false, 'Theme saves remain separate from all other Settings');
       } finally {
-        await evaluate(`if(S.themeBusy){window.completeTheme();await window.changingTheme}
-          if(S.drawer)closeDrawer();window.MockHost.rpc=window.settingsRpc;delete window.settingsRpc;
+        await evaluate(`if(S.themeBusy)window.completeTheme()`);
+        await settleTheme();
+        await evaluate(`if(S.drawer)closeDrawer();window.MockHost.rpc=window.settingsRpc;delete window.settingsRpc;
           S.settings.triageInstructions=window.savedTriageInstructions;delete window.savedTriageInstructions;`);
       }
     });
