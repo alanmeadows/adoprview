@@ -150,31 +150,40 @@ public sealed class MainWindow : Window, IApprovalUi
             try
             {
                 if (_copilotDelivery is not null) await _copilotDelivery.DisposeAsync();
-                // Detach Fix output first; other service teardown must not delay releasing its transport.
-                await _copilot.DisposeAsync();
-                _speechSetup?.Cancel();
-                if (_speechSetupWork is not null)
-                    try { await _speechSetupWork; } catch (Exception ex) { _diagnostics.Record("speech-setup-stopped", ex.Message); }
-                await _video.DisposeAsync();
-                _speechSetup?.Dispose();
-                _speechSetup = null;
-                _speech.Dispose();
-                await _explain.DisposeAsync();
-                await _investigation.DisposeAsync();
-                _pop.Dispose();
+                // Browser output detaches early; exact-run controls survive blocked or failed teardown.
+                await DisposeCopilotAfterAsync(_copilot, async () =>
+                {
+                    _speechSetup?.Cancel();
+                    if (_speechSetupWork is not null)
+                        try { await _speechSetupWork; } catch (Exception ex) { _diagnostics.Record("speech-setup-stopped", ex.Message); }
+                    await _video.DisposeAsync();
+                    _speechSetup?.Dispose();
+                    _speechSetup = null;
+                    _speech.Dispose();
+                    await _explain.DisposeAsync();
+                    await _investigation.DisposeAsync();
+                    _pop.Dispose();
+                    _attentionSound.Dispose();
+                });
                 _shutdownComplete = true;
                 _tray.Visible = false;
                 _tray.Dispose();
-                _attentionSound.Dispose();
                 _diagnostics.Record("shutdown-teardown-completed", _shutdownReason);
                 _ = Dispatcher.BeginInvoke(new Action(Close));
             }
             catch (Exception ex)
             {
+                if (_shutdownComplete)
+                {
+                    _diagnostics.Record("shutdown-finalization-failed", _shutdownReason, ex);
+                    _ = Dispatcher.BeginInvoke(new Action(Close));
+                    return;
+                }
                 _shutdownInProgress = false;
                 _quitting = false;
                 _diagnostics.Record("shutdown-blocked", _shutdownReason, ex);
                 _shutdownReason = "window-close";
+                ResetCopilotDelivery(waitForReady: false);
                 ShowFromTray();
                 MessageBox.Show(this, "The app cannot exit safely: " + ex.Message, "Copilot task still needs attention", MessageBoxButton.OK, MessageBoxImage.Warning);
             }
@@ -184,6 +193,23 @@ public sealed class MainWindow : Window, IApprovalUi
             _diagnostics.Record("window-closed", _shutdownReason);
             Application.Current.Shutdown();
         };
+    }
+
+    internal static async Task DisposeCopilotAfterAsync(CopilotRunService copilot, Func<Task> teardown)
+    {
+        await teardown();
+        await copilot.DisposeAsync();
+    }
+
+    void ResetCopilotDelivery(bool waitForReady)
+    {
+        if (_bridge is not { } bridge) return;
+        if (_copilotDelivery is not null) _copilot.Changed -= _copilotDelivery.Offer;
+        _copilotDelivery = new((run, id) => bridge.PushCopilotRunAsync(RunForUi(run), id),
+            ex => ReportNativeActionFailure("copilot-state-delivery", ex), waitForReady);
+        _copilot.Changed += _copilotDelivery.Offer;
+        if (!waitForReady)
+            foreach (var run in _copilot.Runs) _copilotDelivery.Offer(run);
     }
 
     void ShowFromTray()
@@ -216,9 +242,7 @@ public sealed class MainWindow : Window, IApprovalUi
         _bridge = new Bridge(_prs, _store, PostAsync, Kick, _approval, this, HandleCopilotAsync, HandlePopAsync,
             HandleExplainAsync, themeChanged: ApplyTheme, videoAction: HandleVideoAsync, investigationAction: HandleInvestigationAsync,
             copilotAcknowledged: id => _copilotDelivery?.Acknowledge(id));
-        _copilotDelivery = new((run, id) => _bridge.PushCopilotRunAsync(RunForUi(run), id),
-            ex => ReportNativeActionFailure("copilot-state-delivery", ex), waitForReady: true);
-        _copilot.Changed += _copilotDelivery.Offer;
+        ResetCopilotDelivery(waitForReady: true);
         _explain.Changed += state => _ = RunNativeActionAsync("explanation-state-delivery", () => _bridge.PushExplanationAsync(state));
         _investigation.Changed += state => _ = RunNativeActionAsync("investigation-state-delivery", () => _bridge.PushInvestigationAsync(state));
         _video.Changed += state => _ = RunNativeActionAsync("video-state-delivery", () => _bridge.PushVideoAsync(state));
@@ -228,7 +252,12 @@ public sealed class MainWindow : Window, IApprovalUi
             _ = RunNativeActionAsync("dashboard-action", async () =>
             {
                 var msg = e.TryGetWebMessageAsString();
-                if (msg == "ready") { _uiReady = true; _copilotDelivery.Ready(); return; }
+                if (msg == "ready")
+                {
+                    _uiReady = true;
+                    (_copilotDelivery ?? throw new InvalidOperationException("Copilot delivery is not initialized.")).Ready();
+                    return;
+                }
                 await _bridge.HandleAsync(msg);
             });
         };

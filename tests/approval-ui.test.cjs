@@ -70,6 +70,12 @@ test('a delayed pre-navigation Fix snapshot cannot overwrite newer initial outpu
   hooks.updateCopilotRun({ ...current, status: 'cancelled', mayBeRunning: false });
   hooks.updateCopilotRun(current);
   assert.equal(hooks.S.runs.get(current.runId).status, 'cancelled');
+  const removed = { ...current, status: 'completed', worktreeStatus: 'removed-clean', revision: 12 };
+  hooks.updateCopilotRun(removed);
+  hooks.updateCopilotRun({ ...removed, worktreeStatus: 'retained-changes', revision: 11 });
+  assert.equal(hooks.S.runs.get(current.runId).worktreeStatus, 'removed-clean');
+  hooks.updateCopilotRun({ ...removed, error: 'newer cleanup diagnostic', revision: 13 });
+  assert.equal(hooks.S.runs.get(current.runId).error, 'newer cleanup diagnostic');
 });
 
 test('first video requires explicit Azure setup and missing az stays an actionable setup error without starting generation', async () => {

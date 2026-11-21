@@ -42,6 +42,7 @@ public sealed record CopilotRunState(
     public int ResumeAttempts { get; init; }
     public string? LogPath { get; init; }
     public long OutputOffset { get; init; }
+    public long Revision { get; init; }
     public bool MayBeRunning { get; init; }
     public string? PreparationLogPath { get; init; }
 }
@@ -104,6 +105,7 @@ public sealed partial class CopilotRunService : IAsyncDisposable
     readonly Timer notifications;
     bool disposed, stopping;
     Task? disposal;
+    internal Action? BeforeRunRegistration { get; set; }
 
     public CopilotRunService(ICopilotRunTransport? transport = null, string? stateDirectory = null)
     {
@@ -136,6 +138,7 @@ public sealed partial class CopilotRunService : IAsyncDisposable
         try
         {
             if (store is not null) entry.DriverLease = store.Reserve(Save(entry), PrIdentity);
+            BeforeRunRegistration?.Invoke();
             lock (gate)
             {
                 ObjectDisposedException.ThrowIf(disposed || stopping, this);
@@ -147,8 +150,21 @@ public sealed partial class CopilotRunService : IAsyncDisposable
         }
         catch
         {
-            entry.DriverLease?.Dispose();
-            lock (gate) activePrs.Remove(PrIdentity(request));
+            try
+            {
+                if (entry.DriverLease is not null)
+                {
+                    var abandoned = entry.State with { Status = "cancelled", MayBeRunning = false,
+                        FinishedAt = DateTimeOffset.UtcNow, Error = "Startup was abandoned before a task was launched." };
+                    store!.Write(Save(entry, abandoned));
+                    lock (gate) entry.State = abandoned;
+                }
+            }
+            finally
+            {
+                entry.DriverLease?.Dispose();
+                lock (gate) activePrs.Remove(PrIdentity(request));
+            }
             throw;
         }
         return initial;
@@ -193,7 +209,7 @@ public sealed partial class CopilotRunService : IAsyncDisposable
         }
         // Signal first: neither durable IO nor output/notification locks may delay transport cancellation.
         var wasActive = entry.State.IsActive;
-        if (wasActive) SignalCancellation(entry, entry.Cancellation);
+        if (wasActive || entry.State.MayBeRunning) SignalCancellation(entry, entry.Cancellation);
         Update(entry, s => s.IsActive ? s with { Status = "cancelling" } : s);
         if (store is not null) store.RequestCancel(runId);
         await entry.Completion.ConfigureAwait(false);
@@ -260,7 +276,7 @@ public sealed partial class CopilotRunService : IAsyncDisposable
             if (disposed) return runs.Values.Select(e => e.State).ToArray();
             pending = runs.Values.Where(e => e.State.IsActive || e.UncertainStop || e.State.MayBeRunning).ToArray();
         }
-        foreach (var e in pending.Where(e => e.State.IsActive)) SignalCancellation(e, e.Cancellation);
+        foreach (var e in pending.Where(e => e.State.IsActive || e.State.MayBeRunning)) SignalCancellation(e, e.Cancellation);
         await Task.WhenAll(pending.Select(e => e.Completion)).ConfigureAwait(false);
         foreach (var e in pending.Where(e => e.UncertainStop || e.State.MayBeRunning))
         {
@@ -286,7 +302,7 @@ public sealed partial class CopilotRunService : IAsyncDisposable
                     e.State = e.State with
                     {
                         Status = "cancelled", ExitCode = code, Error = "Owned task stopped after retry. Its worktree is retained.",
-                        FinishedAt = DateTimeOffset.UtcNow, MayBeRunning = false
+                        FinishedAt = DateTimeOffset.UtcNow, MayBeRunning = false, Revision = e.State.Revision + 1
                     };
                     activePrs.Remove(PrIdentity(e.State.Request));
                     e.Dirty = true;
@@ -788,7 +804,7 @@ public sealed partial class CopilotRunService : IAsyncDisposable
         {
             CopilotRunState next;
             SavedRun saved;
-            lock (gate) { next = update(e.State); saved = Save(e, next); }
+            lock (gate) { next = update(e.State) with { Revision = e.State.Revision + 1 }; saved = Save(e, next); }
             if (store is not null && e.DriverLease is not null) store.Write(saved);
             lock (gate)
             {

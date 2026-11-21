@@ -585,6 +585,7 @@ function updateCopilotRun(r) {
   if (!r || typeof r.key !== 'string' || typeof r.runId !== 'string' || typeof r.status !== 'string' || typeof r.output !== 'string')
     throw new Error('Copilot returned an invalid run state.');
   const old = S.runs.get(r.runId);
+  if (Number.isSafeInteger(old?.revision) && Number.isSafeInteger(r.revision) && r.revision < old.revision) return;
   if (old?.runId === r.runId && ((old.status !== 'preparing' && r.status === 'preparing') ||
     (['completed', 'failed', 'cancelled'].includes(old.status) && !old.mayBeRunning && runActive(r)))) return;
   if (old?.runId === r.runId && old.updatedAt && r.updatedAt && Date.parse(r.updatedAt) < Date.parse(old.updatedAt)) return;

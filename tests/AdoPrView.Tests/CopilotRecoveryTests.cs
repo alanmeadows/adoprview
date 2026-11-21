@@ -325,29 +325,55 @@ static class CopilotRecoveryTests
                 f.Transport.Stops == 1 && f.Transport.Cleanups == 0,
                 "Startup ignored explicit cancellation or resumed/cleaned its work");
         });
-        await test("Copilot cancellation before recovered follow preserves intentional history replay", async () =>
+        await test("Copilot recovered cancellation preserves replayed output offsets while reconciling terminal saved state", async () =>
         {
             using var f = new Fixture();
             var first = f.Service();
             var run = await first.StartAsync(Request());
-            await Wait(first, run.RunId, state => state.Output.Contains("FAKE-READY"));
-            f.Transport.Emit("SUPERVISED HISTORY\n");
+            await Wait(first, run.RunId, s => s.Output.Contains("FAKE-READY"));
             await first.DisposeAsync();
-            f.Transport.BlockPreflight = true;
-            await using var recovered = f.Service();
-            var recovery = recovered.RecoverAsync();
-            try
+            f.Transport.End(143, outcome: false);
+            await using var resumed = f.Service();
+            await resumed.RecoverAsync();
+            f.Transport.Emit("Synthetic continuation failed.\n");
+            f.Transport.End(1);
+            var rendered = await Wait(resumed, run.RunId, s => s.Status == "needs-attention" &&
+                s.OutputOffset > f.Store.Load().Single().Saved!.State.OutputOffset);
+            var saved = f.Store.Load().Single().Saved!;
+            f.Store.Write(saved with { State = saved.State with { Status = "cancelled", FinishedAt = DateTimeOffset.UtcNow } });
+            var cancelled = await resumed.CancelAsync(run.Key, run.RunId);
+            Check(cancelled!.Status == "cancelled" && cancelled.Output == rendered.Output &&
+                cancelled.OutputOffset == rendered.OutputOffset && cancelled.WorktreeRetained,
+                "Saved-state reconciliation regressed the rendered UTF-16 offset and would discard a valid cancellation in the UI");
+        });
+        await test("Copilot cancellation before recovered follow preserves intentional history replay", async () =>
+        {
+            foreach (var status in new[] { "running", "needs-attention" })
             {
-                await f.Transport.RecoveryEntered.Task.WaitAsync(TimeSpan.FromSeconds(3));
-                var stopped = await recovered.CancelAsync(run.Key, run.RunId).WaitAsync(TimeSpan.FromSeconds(3));
-                Check(stopped is { Status: "cancelled", MayBeRunning: false, WorktreeRetained: true } &&
-                    stopped.Output.Contains("SUPERVISED HISTORY") && f.Transport.Launches == 1 && f.Transport.Stops == 1,
-                    "Cancelling before follow attachment discarded owned supervised history or relaunched");
-            }
-            finally
-            {
-                f.Transport.ReleasePreflight.TrySetResult();
-                await recovery.WaitAsync(TimeSpan.FromSeconds(3));
+                using var f = new Fixture();
+                var first = f.Service();
+                var run = await first.StartAsync(Request());
+                await Wait(first, run.RunId, state => state.Output.Contains("FAKE-READY"));
+                f.Transport.Emit("SUPERVISED HISTORY\n");
+                await first.DisposeAsync();
+                var saved = f.Store.Load().Single().Saved!;
+                f.Store.Write(saved with { State = saved.State with { Status = status, MayBeRunning = true } });
+                f.Transport.BlockPreflight = true;
+                await using var recovered = f.Service();
+                var recovery = recovered.RecoverAsync();
+                try
+                {
+                    await f.Transport.RecoveryEntered.Task.WaitAsync(TimeSpan.FromSeconds(3));
+                    var stopped = await recovered.CancelAsync(run.Key, run.RunId).WaitAsync(TimeSpan.FromSeconds(3));
+                    Check(stopped is { Status: "cancelled", MayBeRunning: false, WorktreeRetained: true } &&
+                        stopped.Output.Contains("SUPERVISED HISTORY") && f.Transport.Launches == 1 && f.Transport.Stops == 1,
+                        "Cancelling before follow attachment discarded owned supervised history or relaunched");
+                }
+                finally
+                {
+                    f.Transport.ReleasePreflight.TrySetResult();
+                    await recovery.WaitAsync(TimeSpan.FromSeconds(3));
+                }
             }
         });
 

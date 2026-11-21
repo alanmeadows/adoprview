@@ -11,6 +11,7 @@ internal sealed class CopilotRunDelivery(Func<CopilotRunState, long, Task> post,
     Task worker = Task.CompletedTask;
     TaskCompletionSource? received;
     CopilotRunState? inFlight;
+    static long nextId;
     long sequence;
     bool working, disposed;
     bool ready = !waitForReady;
@@ -70,11 +71,14 @@ internal sealed class CopilotRunDelivery(Func<CopilotRunState, long, Task> post,
                     state = pending[key];
                     pending.Remove(key);
                     inFlight = state;
-                    id = ++sequence;
+                    id = sequence = Interlocked.Increment(ref nextId);
                     received = new(TaskCreationOptions.RunContinuationsAsynchronously);
                     acknowledgement = received.Task;
                 }
-                await post(state, id).WaitAsync(lifetime.Token).ConfigureAwait(false);
+                var posting = Task.Run(() => post(state, id));
+                _ = posting.ContinueWith(t => _ = t.Exception, CancellationToken.None,
+                    TaskContinuationOptions.OnlyOnFaulted | TaskContinuationOptions.ExecuteSynchronously, TaskScheduler.Default);
+                await posting.WaitAsync(lifetime.Token).ConfigureAwait(false);
                 await acknowledgement.WaitAsync(lifetime.Token).ConfigureAwait(false);
                 lock (gate) inFlight = null;
             }

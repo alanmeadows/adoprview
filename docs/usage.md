@@ -620,13 +620,16 @@ termination are used. Already-running runners retain their original scripts.
 If descendants or ownership cannot be proven stopped (including a held
 execution lock), the app keeps the reservation and reports uncertainty rather
 than claiming success. Worktrees and supervised logs remain available.
+During blocked or failed shutdown, exact-run controls stay available until
+other service teardown succeeds. A failed exit restores browser output delivery.
 
 Output uses a fixed-size tail buffer, and native delivery keeps at most one
 unacknowledged browser message plus the latest pending snapshot per run. A busy
 browser cannot accumulate an unlimited output/dispatcher queue. Updates
 retain the latest terminal/status update while acknowledgements are missing;
 pending runs are served fairly even while another run keeps streaming.
-Dashboard ready/init resynchronizes after navigation or reload. The initial
+Dashboard ready/init resynchronizes after navigation or reload. Monotonic
+lifecycle revisions reject old same-output status/worktree snapshots. The initial
 dashboard response also reads authoritative run states.
 These changes do not cap CPU/RAM or automatically kill tasks; whole-system resource exhaustion
 can still affect the app and Windows.

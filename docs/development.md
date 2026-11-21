@@ -176,10 +176,14 @@ They cover bounded per-chunk allocations, a follower that ignores
 cancellation, stop/detach with retained output, uncertain owned liveness and
 browser acknowledgement/coalescing/disposal, fair delivery between runs,
 independent response deadlines with blocking/throwing cancellation callbacks,
-and intentional recovered-history replay after cancellation. The existing
+and intentional recovered-history replay after cancellation, including a
+potentially live needs-attention run blocked in preflight. They also cover
+startup/shutdown reservation races, controls surviving failed teardown,
+synchronous posting hangs and same-output lifecycle revisions. The existing
 `ADOPRVIEW_TEST_NATIVE_ACTION=1` opt-in also enables `Native Copilot`: a real
 disposable WPF/WebView2 window with withheld output acknowledgements, a fake
-hung follower and an actual unrelated recovery blocked at its fake preflight.
+hung follower, an actual unrelated recovery blocked at its fake preflight, and
+the production shutdown sequence held before final control disposal.
 The native button stops the selected run while those sentinels remain blocked,
 asserts a three-second control deadline and prints the measured milliseconds.
 It also verifies retained output/work and durable exact-task stop proof.
