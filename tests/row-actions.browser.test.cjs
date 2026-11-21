@@ -830,15 +830,17 @@ test('real row hit testing and action identity across refreshes', { timeout: 900
     await t.test('GUI settings drawer contains keyboard focus, blocks background actions and returns to its opener', async () => {
       const key = 'sample-service-id:101';
       for (const provider of [false, true]) {
+        const surface = provider ? 'detail' : 'row';
         await reset();
         try {
           await evaluate(`(()=>{
             const snap=structuredClone(S.snap),pr=snap.prs.find(p=>p.key==='${key}');
             pr.approval=${provider ? "{title:'Synthetic optional provider'}" : 'null'};
             snap.approvalProvider=${provider ? "{name:'Synthetic optional provider'}" : 'null'};
+            ${provider ? `S.expanded.add('${key}');` : ''}
             setSnapshot(snap);render();window.calls=[];
           })()`);
-          assert.equal(await evaluate(`!!document.querySelector('[data-key="${key}"] .row [data-act="approve"]:not([disabled])')`), true);
+          assert.equal(await evaluate(`!!document.querySelector('[data-key="${key}"] .${surface} [data-act="approve"]:not([disabled])')`), true);
           assert.equal(await evaluate(`!!document.querySelector('[data-key="${key}"] .row [data-act="generateApproval"]')`), provider);
           for (const dismissal of ['close', 'escape', 'scrim']) {
             await evaluate(`document.querySelector('#settingsBtn').focus()`);
@@ -855,7 +857,7 @@ test('real row hit testing and action identity across refreshes', { timeout: 900
               assert.equal(await evaluate(`document.activeElement.id`), 'closeDrawer', 'Traversal wraps to its starting control');
             }
             for (const action of ['approve', ...(provider ? ['generateApproval'] : [])]) {
-              await evaluate(`document.querySelector('[data-key="${key}"] .row [data-act="${action}"]').focus()`);
+              await evaluate(`document.querySelector('[data-key="${key}"] .${action === 'approve' ? surface : 'row'} [data-act="${action}"]').focus()`);
               assert.equal(await evaluate(`document.activeElement.id`), 'closeDrawer', 'Inert review buttons cannot take focus');
             }
             await keyboard('Tab', 9);
@@ -875,7 +877,7 @@ test('real row hit testing and action identity across refreshes', { timeout: 900
           }
           assert.ok((await calls()).every(c => !['approve', 'generateApproval', 'startCopilot', 'autoComplete'].includes(c.method)));
           assert.deepEqual(await evaluate(`window.confirmations`), [], 'Focus containment adds no approval confirmation');
-          await click(await point(key, '.row [data-act="approve"]')); await frame();
+          await click(await point(key, `.${surface} [data-act="approve"]`)); await frame();
           assert.equal((await calls()).filter(c => c.method === 'approve').length, 1, 'Visible ordinary approval still dispatches once');
           if (provider) {
             await click(await point(key, '.row [data-act="generateApproval"]')); await frame();
