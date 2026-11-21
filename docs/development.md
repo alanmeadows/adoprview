@@ -179,14 +179,16 @@ independent response deadlines with blocking/throwing cancellation callbacks,
 and intentional recovered-history replay after cancellation, including a
 potentially live needs-attention run blocked in preflight. They also cover
 startup/shutdown reservation races, controls surviving failed teardown,
-synchronous posting hangs and same-output lifecycle revisions. The existing
+synchronous posting hangs and same-output lifecycle revisions, including the
+serialized native init/action/delivery projection. The existing
 `ADOPRVIEW_TEST_NATIVE_ACTION=1` opt-in also enables `Native Copilot`: a real
 disposable WPF/WebView2 window with withheld output acknowledgements, a fake
 hung follower, an actual unrelated recovery blocked at its fake preflight, and
 the production shutdown sequence held before final control disposal.
 The native button stops the selected run while those sentinels remain blocked,
 asserts a three-second control deadline and prints the measured milliseconds.
-It also verifies retained output/work and durable exact-task stop proof.
+It also verifies retained output/work, durable exact-task stop proof, and that
+the actual WebView message carries the projected lifecycle revision.
 This bounded synthetic check is
 not an installed-app or live WSL/model end-to-end test. Do not run browser or WSL
 opt-ins during unresolved shared-machine overload.

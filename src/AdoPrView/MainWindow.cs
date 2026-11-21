@@ -277,11 +277,11 @@ public sealed class MainWindow : Window, IApprovalUi
         if (_opts.ScreenshotPath != null) _ = CaptureAsync();
     }
 
-    static object RunForUi(CopilotRunState run) => new
+    internal static object RunForUi(CopilotRunState run) => new
     {
         run.Key, run.Id, run.Title, run.Repo, run.RunId, run.Status, run.Message, run.Output, run.ExitCode,
         run.WorktreePath, run.WorktreeStatus, run.WorktreeRetained, run.Distro, run.SourceDirectory, run.StartedAt, run.FinishedAt,
-        run.SessionId, run.ResumeAttempts, run.LogPath, run.OutputOffset, run.MayBeRunning, run.PreparationLogPath,
+        run.SessionId, run.ResumeAttempts, run.LogPath, run.OutputOffset, run.Revision, run.MayBeRunning, run.PreparationLogPath,
     };
 
     async Task<object> HandleExplainAsync(string action, JsonObject parameters)

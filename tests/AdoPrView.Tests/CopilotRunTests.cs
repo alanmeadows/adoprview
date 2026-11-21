@@ -220,6 +220,10 @@ static class CopilotRunTests
                 Check(retained.Status == "completed" && retained.WorktreeRetained &&
                     removed.OutputOffset == retained.OutputOffset && removed.Revision > retained.Revision,
                     "Same-output cleanup lacked a strictly newer lifecycle revision");
+                var projected = JsonSerializer.SerializeToElement(MainWindow.RunForUi(removed), Bridge.Json);
+                Check(projected.TryGetProperty("revision", out var revision) && revision.GetInt64() == removed.Revision &&
+                    projected.GetProperty("outputOffset").GetInt64() == removed.OutputOffset,
+                    "Serialized native init/action/delivery projection dropped the lifecycle revision or output offset");
             }
             finally { fake.CleanupReleased.TrySetResult(); }
         });
@@ -699,13 +703,16 @@ static class CopilotRunTests
                     await browser.EnsureCoreWebView2Async(environment).WaitAsync(TimeSpan.FromSeconds(15));
                     var navigated = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
                     browser.CoreWebView2.NavigationCompleted += (_, _) => navigated.TrySetResult();
-                    browser.NavigateToString("<!doctype html><title>Bounded synthetic task control</title><p>No live model or ADO.</p>");
+                    browser.NavigateToString("<!doctype html><title>Bounded synthetic task control</title><p>No live model or ADO.</p><script>window.chrome.webview.addEventListener('message', e => { window.nativeLast = e.data; });</script>");
                     await navigated.Task.WaitAsync(TimeSpan.FromSeconds(15));
                     var posts = 0;
+                    long postedRevision = -1;
                     delivery = new(async (state, id) => await window.Dispatcher.InvokeAsync(() =>
                     {
                         posts++;
-                        browser.CoreWebView2.PostWebMessageAsJson(JsonSerializer.Serialize(new { state.Output, id }));
+                        postedRevision = state.Revision;
+                        browser.CoreWebView2.PostWebMessageAsJson(JsonSerializer.Serialize(
+                            new { @event = "copilotRun", data = MainWindow.RunForUi(state), deliveryId = id }, Bridge.Json));
                     }), ex => failure ??= ex);
                     service.Changed += delivery.Offer;
                     var run = await service.StartAsync(Request());
@@ -751,6 +758,9 @@ static class CopilotRunTests
                     Console.WriteLine($"NATIVE_CONTROL stopMs={timing.Elapsed.TotalMilliseconds:F1} deadlineMs=3000 recoveryBlocked=true followerBlocked=true teardownBlocked=true unacknowledgedPosts={posts}");
                     Check((await browser.CoreWebView2.ExecuteScriptAsync("document.title").WaitAsync(TimeSpan.FromSeconds(3))).Contains("Bounded synthetic task control"),
                         "Synthetic dashboard is not responsive");
+                    var browserRevision = await browser.CoreWebView2.ExecuteScriptAsync("window.nativeLast?.data?.revision").WaitAsync(TimeSpan.FromSeconds(3));
+                    Check(long.TryParse(browserRevision, out var actualRevision) && actualRevision == postedRevision && actualRevision >= 0,
+                        "Actual WebView message omitted the projected native lifecycle revision");
                     await delivery.DisposeAsync().AsTask().WaitAsync(TimeSpan.FromSeconds(2));
                     releaseShutdown.TrySetResult();
                     await shutdown.WaitAsync(TimeSpan.FromSeconds(2));
