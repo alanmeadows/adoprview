@@ -643,6 +643,9 @@ Stop also interrupts pending recovery for a needs-attention record whose task
 is already confirmed stopped. It rechecks owned identity and the free execution
 lock without sending another Stop to an exited task, and preserves its real
 exit code rather than replacing it with a synthetic cancellation code.
+Recovery log replay observes Stop cancellation. Once Stop is verified, replay
+has an independent two-second limit; unavailable history reports a warning
+without changing verified stopped state or removing retained logs/work.
 
 Output uses a grow-on-demand tail buffer with the same retained-output limit,
 so empty or short saved histories do not each reserve the maximum buffer.

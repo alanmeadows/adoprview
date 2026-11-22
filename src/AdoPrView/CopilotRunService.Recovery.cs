@@ -238,7 +238,19 @@ public sealed partial class CopilotRunService
             else activePrs.Remove(PrIdentity(e.State.Request));
         }
         if (e.State.Output.StartsWith("[Recovered run history", StringComparison.Ordinal))
-            await ReadHistoryAsync(e, e.DetachCancellation.Token).ConfigureAwait(false);
+        {
+            var cancelling = status == "cancelled" || e.Cancellation.IsCancellationRequested;
+            using var history = CancellationTokenSource.CreateLinkedTokenSource(e.DetachCancellation.Token,
+                cancelling ? CancellationToken.None : e.Cancellation.Token);
+            if (cancelling) history.CancelAfter(TimeSpan.FromSeconds(2));
+            try { await ReadHistoryAsync(e, history.Token).ConfigureAwait(false); }
+            catch (Exception ex) when (cancelling && !e.Detaching &&
+                ex is OperationCanceledException or RunSetupException or IOException or System.ComponentModel.Win32Exception)
+            {
+                Update(e, s => s with { Error = (s.Error is null ? "" : s.Error + "\n") +
+                    "Saved task logs could not be fully replayed after Stop. Verified stopped state, retained logs and work are preserved." });
+            }
+        }
         if (status == "completed" && e.DriverLease is not null)
         {
             try

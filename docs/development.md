@@ -244,6 +244,11 @@ proof checks default-registry legacy log access with the same failing sentinel.
 needs-attention record. Exact-run cancellation must complete within three
 seconds, retain work/output and the real exit code, persist stop proof and send
 no redundant task Stop or resume. The fake preflight is released in `finally`.
+`Copilot recovery history cannot` holds a fake log reader that ignores
+cancellation, both before and during Stop finalization, plus a returned-error
+case. Stop and disposal remain bounded, partial output/real exit/logs/work and
+durable stop proof survive, and abandoned callbacks cannot append late output.
+Both fake history and preflight sentinels are released in `finally`.
 
 The smaller kernel-control opt-in executes the exact production runner in an
 explicitly selected, already-responsive WSL distribution:

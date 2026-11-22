@@ -23,6 +23,51 @@ static class CopilotRecoveryTests
 
     public static async Task Run(Func<string, Func<Task>, Task> test)
     {
+        await test("Copilot recovery history cannot delay verified Stop or change inactive state", async () =>
+        {
+            foreach (var (historyFirst, failure) in new[] { (false, false), (true, false), (false, true) })
+            {
+                using var f = new Fixture();
+                await using var first = f.Service();
+                var run = await first.StartAsync(Request());
+                await Wait(first, run.RunId, s => s.Output.Contains("FAKE-READY"));
+                f.Transport.End(1);
+                await Wait(first, run.RunId, s => s.Status == "failed");
+                await first.DisposeAsync();
+                var saved = f.Store.Load().Single().Saved!;
+                f.Store.Write(saved with { State = saved.State with { Status = "needs-attention", ResumeAttempts = 1 } });
+                f.Transport.BlockPreflight = !historyFirst;
+                f.Transport.BlockHistory = !failure;
+                if (failure) f.Transport.Failure = "history";
+                await using var recovered = f.Service();
+                var recovery = recovered.RecoverAsync();
+                await (historyFirst ? f.Transport.HistoryEntered.Task : f.Transport.RecoveryEntered.Task)
+                    .WaitAsync(TimeSpan.FromSeconds(3));
+                var stop = recovered.CancelAsync(run.Key, run.RunId);
+                try
+                {
+                    var final = await stop.WaitAsync(TimeSpan.FromSeconds(3))
+                        ?? throw new Exception("Stop returned no matching recovered run");
+                    Check(final is { Status: "cancelled", MayBeRunning: false, ExitCode: 1, WorktreeRetained: true } &&
+                        final.Error?.Contains("logs") == true && f.Transport.Launches == 1 && f.Transport.Stops == 0 &&
+                        f.Transport.Cleanups == 0 && f.Transport.RecordedOutput.Contains("FAKE-READY") &&
+                        f.Store.Load().Single().Saved!.TaskConfirmedStopped,
+                        "Unavailable recovery history lost verified stop, real exit, logs/work or explicit warning");
+                    if (!failure) Check(final.Output.Contains("FAKE-READY"), "Partial replay output was discarded");
+                    var output = final.Output;
+                    foreach (var reader in f.Transport.HistoryReaders) reader("LATE-HISTORY-REPLY\n");
+                    Check(recovered.Get(run.RunId)!.Output == output, "Abandoned history changed stopped output");
+                    await recovered.DisposeAsync().AsTask().WaitAsync(TimeSpan.FromSeconds(3));
+                }
+                finally
+                {
+                    f.Transport.ReleasePreflight.TrySetResult();
+                    f.Transport.ReleaseHistory.TrySetResult();
+                    await recovery.WaitAsync(TimeSpan.FromSeconds(3));
+                    await stop.WaitAsync(TimeSpan.FromSeconds(3));
+                }
+            }
+        });
         await test("Copilot confirmed-stopped needs-attention cancels blocked recovery without another task Stop", async () =>
         {
             using var f = new Fixture();
@@ -539,6 +584,7 @@ static class CopilotRecoveryTests
     {
         readonly object gate = new();
         public readonly ConcurrentQueue<CopilotProcessRequest> Calls = new();
+        public readonly ConcurrentQueue<Action<string>> HistoryReaders = new();
         readonly List<Action<string>> readers = [];
         TaskCompletionSource<int> ended = NewEnd();
         string[] launch = [];
@@ -549,7 +595,8 @@ static class CopilotRecoveryTests
         public string? Failure;
         public string Cleanup = "REMOVED";
         public bool SessionAvailable = true, LockHeld, WorkspaceRemoved;
-        public bool BlockPreflight, BlockFollowers, BlockDiscard;
+        public bool BlockPreflight, BlockFollowers, BlockDiscard, BlockHistory;
+        public string RecordedOutput { get { lock (gate) return log; } }
         public string? RegistryConfig;
         public string RegistryOverride = "";
         public readonly TaskCompletionSource RecoveryEntered = new(TaskCreationOptions.RunContinuationsAsynchronously);
@@ -557,6 +604,8 @@ static class CopilotRecoveryTests
         public readonly TaskCompletionSource ReleaseFollowers = new(TaskCreationOptions.RunContinuationsAsynchronously);
         public readonly TaskCompletionSource DiscardEntered = new(TaskCreationOptions.RunContinuationsAsynchronously);
         public readonly TaskCompletionSource ReleaseDiscard = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        public readonly TaskCompletionSource HistoryEntered = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        public readonly TaskCompletionSource ReleaseHistory = new(TaskCreationOptions.RunContinuationsAsynchronously);
         static TaskCompletionSource<int> NewEnd() => new(TaskCreationOptions.RunContinuationsAsynchronously);
         public void Emit(string value) { lock (gate) { log += value; foreach (var read in readers.ToArray()) read(value); } }
         public void End(int code, bool outcome = true)
@@ -623,7 +672,15 @@ static class CopilotRecoveryTests
                         return new(0, "", "");
                     }
                     finally { lock (gate) { if (stdout is not null) readers.Remove(stdout); } }
-                case "history": stdout?.Invoke(log); return new(0, log, "");
+                case "history":
+                    if (stdout is not null) HistoryReaders.Enqueue(stdout);
+                    stdout?.Invoke(log);
+                    if (BlockHistory)
+                    {
+                        HistoryEntered.TrySetResult();
+                        await ReleaseHistory.Task;
+                    }
+                    return new(0, log, "");
                 case "stop": Stops++; End(143); return new(0, "", "");
                 case "cleanup":
                     Check(ended.Task.IsCompleted, "Cleanup attempted on a live fake session");
