@@ -1261,10 +1261,6 @@ test('real row hit testing and action identity across refreshes', { timeout: 900
       await frame();
       assert.deepEqual(await place(), { lead: '1', ids: ['lc-old', 'lc-new:earlier'], beforeContext: true, adjacent: true, label: 'Show run' },
         'Promoted earlier run leads with its sibling and no manual render');
-      // Uncertain but not maybe-running: still cancelable, so the in-place label must stay Show run.
-      await evaluate(`updateCopilotRun({...S.runs.get('lc-old'),status:'needs-attention',mayBeRunning:false,id:7})`);
-      await frame();
-      assert.equal((await place()).label, 'Show run');
       const inRow = await point(key, '.detail .copilot-run:not(.run-earlier) .run-output');
       await move(inRow.x, inRow.y);
       await evaluate(`window.lcCard=document.querySelector('#rows [data-key="${key}"] .copilot-run:not(.run-earlier)');
@@ -1278,6 +1274,10 @@ test('real row hit testing and action identity across refreshes', { timeout: 900
         'Finished run group moves behind PR context once rows are idle');
       for (let i = 0; i < 3; i++) await evaluate(`updateCopilotRun({...S.runs.get('lc-new'),output:S.runs.get('lc-new').output+'tick\\n',outputOffset:S.runs.get('lc-new').outputOffset+5,revision:${i + 1}})`);
       assert.equal(await evaluate(`document.querySelector('#rows [data-key="${key}"] .copilot-run').isConnected && !S.rowsPending`), true);
+      // Latest run uncertain but not maybe-running is still cancelable: it leads and the label is Show run.
+      await evaluate(`updateCopilotRun({...S.runs.get('lc-new'),status:'needs-attention',mayBeRunning:false,id:7,revision:9})`);
+      await frame();
+      assert.deepEqual(await place(), { lead: '1', ids: ['lc-new', 'lc-old:earlier'], beforeContext: true, adjacent: true, label: 'Show run' });
     });
 
     await t.test('layout a leading run never buries conflicts or required reviews that no leading card conveys', async () => {
