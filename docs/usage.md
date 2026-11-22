@@ -633,7 +633,9 @@ resume if the captured registry changed; explicit Stop still checks the original
 task identity. Older records without registry context retain ownership checks
 and report missing/ambiguous tasks as unconfirmed rather than guessing a registry.
 
-Output uses a fixed-size tail buffer, and native delivery keeps at most one
+Output uses a grow-on-demand tail buffer with the same retained-output limit,
+so empty or short saved histories do not each reserve the maximum buffer.
+Native delivery keeps at most one
 unacknowledged browser message plus the latest pending snapshot per run. A busy
 browser cannot accumulate an unlimited output/dispatcher queue. Updates
 retain the latest terminal/status update while acknowledgements are missing;

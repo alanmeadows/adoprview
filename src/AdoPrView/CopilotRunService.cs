@@ -919,15 +919,26 @@ public sealed partial class CopilotRunService : IAsyncDisposable
         string? XdgConfigHome = null, string? BgtaskStateDirectory = null);
     sealed class RunSetupException(string message) : Exception(message);
 
-    sealed class OutputTail
+    internal sealed class OutputTail
     {
-        readonly char[] buffer = new char[MaxOutputCharacters];
+        char[] buffer = [];
         int start, count;
         public bool Truncated { get; private set; }
         public OutputTail(string initial) => Append(initial);
         public void Append(string text)
         {
-            Truncated |= text.Length > buffer.Length - count;
+            if (text.Length == 0) return;
+            Truncated |= text.Length > MaxOutputCharacters - count;
+            var required = Math.Min(MaxOutputCharacters, count + Math.Min(text.Length, MaxOutputCharacters));
+            if (required > buffer.Length)
+            {
+                var next = new char[Math.Min(MaxOutputCharacters, Math.Max(required, Math.Max(256, buffer.Length * 2)))];
+                var retained = Math.Min(count, buffer.Length - start);
+                buffer.AsSpan(start, retained).CopyTo(next);
+                buffer.AsSpan(0, count - retained).CopyTo(next.AsSpan(retained));
+                buffer = next;
+                start = 0;
+            }
             if (text.Length >= buffer.Length)
             {
                 text.AsSpan(text.Length - buffer.Length).CopyTo(buffer);

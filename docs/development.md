@@ -192,6 +192,10 @@ the actual WebView message carries the projected lifecycle revision.
 This bounded synthetic check is
 not an installed-app or live WSL/model end-to-end test. Do not run browser or WSL
 opt-ins during unresolved shared-machine overload.
+`Copilot short saved output` measures an eight-tail empty/short-history fixture
+against a 64 KiB allocation limit, then checks growth, wrap and unchanged
+maximum retention. This is a small deterministic allocation regression, not a
+system stress test or a quota on task memory.
 
 `Copilot native menu` uses actual generated menu items and click callbacks to
 check full run identity, duplicate PR labels and unreadable-history eligibility.
@@ -204,7 +208,8 @@ Publication revision is separate from `OrderRevision`; row ordering is unchanged
 lifecycle/worktree state or same-revision output when restoration offers old data.
 `Copilot restored delivery reports` uses the production delivery factory to
 check failure/repeated-failure/success/later-failure notification recovery and
-prove an abandoned post cannot clear the current failure marker. The actual
+prove an abandoned late success or failure cannot clear the current marker
+or report after completed disposal. The actual
 WPF control fixture uses that same factory.
 `Copilot task registry context` verifies durable registry capture and exact
 cancellation while recovery preflight is blocked or its registry changed.

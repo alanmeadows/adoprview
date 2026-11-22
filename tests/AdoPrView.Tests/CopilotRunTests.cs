@@ -80,6 +80,28 @@ static class CopilotRunTests
             finally { foreach (var item in empty) item.Dispose(); }
             return Task.CompletedTask;
         });
+        await test("Copilot short saved output allocates proportional tail storage without losing growth or wrap", () =>
+        {
+            _ = new CopilotRunService.OutputTail("");
+            var tails = new CopilotRunService.OutputTail[8];
+            var before = GC.GetAllocatedBytesForCurrentThread();
+            for (var i = 0; i < tails.Length; i++)
+            {
+                tails[i] = new(i % 2 == 0 ? "" : "saved-log\n");
+                tails[i].Append("retained-tail\n");
+            }
+            var allocated = GC.GetAllocatedBytesForCurrentThread() - before;
+            Console.WriteLine($"TAIL-MEMORY savedRuns={tails.Length} allocatedBytes={allocated} limitBytes={64 * 1024}");
+            Check(allocated < 64 * 1024, $"Eight empty/short saved runs allocated {allocated} bytes of tail storage");
+            for (var i = 0; i < tails.Length; i++)
+                Check(tails[i].ToString() == (i % 2 == 0 ? "" : "saved-log\n") + "retained-tail\n" &&
+                    !tails[i].Truncated, "Small tail growth truncated or changed saved output");
+            tails[0].Append(new string('x', CopilotRunService.MaxOutputCharacters));
+            tails[0].Append("WRAPPED-END");
+            Check(tails[0].Truncated && tails[0].ToString().Length == CopilotRunService.MaxOutputCharacters &&
+                tails[0].ToString().EndsWith("WRAPPED-END"), "Adaptive storage did not preserve the bounded ring tail");
+            return Task.CompletedTask;
+        });
         await test("Copilot bounded output avoids snapshot allocation per chunk and hung follow cannot block exact cancel or detach", async () =>
         {
             foreach (var detach in new[] { false, true })
@@ -186,20 +208,26 @@ static class CopilotRunTests
             delivery.Offer(state with { Revision = 2, Status = "completed" });
             await later.Task.WaitAsync(TimeSpan.FromSeconds(3));
             Check(notifications == 2, "A successful resynchronization left later delivery failure silently suppressed");
-            var entered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
-            var release = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
-            await using var abandoned = MainWindow.CreateCopilotDelivery((_, _) =>
+            foreach (var failLate in new[] { false, true })
             {
-                entered.TrySetResult();
-                return release.Task;
-            }, ex => throw ex, failures);
-            abandoned.Offer(state);
-            await entered.Task.WaitAsync(TimeSpan.FromSeconds(3));
-            await abandoned.DisposeAsync().AsTask().WaitAsync(TimeSpan.FromSeconds(2));
-            release.TrySetResult();
-            await Task.Delay(50);
-            lock (failures)
-                Check(failures.Contains("copilot-state-delivery"), "An abandoned late post cleared the current failure marker");
+                var entered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+                var release = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+                var abandonedReports = 0;
+                await using var abandoned = MainWindow.CreateCopilotDelivery((_, _) =>
+                {
+                    entered.TrySetResult();
+                    return release.Task;
+                }, _ => Interlocked.Increment(ref abandonedReports), failures);
+                abandoned.Offer(state);
+                await entered.Task.WaitAsync(TimeSpan.FromSeconds(3));
+                await abandoned.DisposeAsync().AsTask().WaitAsync(TimeSpan.FromSeconds(2));
+                if (failLate) release.TrySetException(new InvalidOperationException("synthetic disposed post failure"));
+                else release.TrySetResult();
+                await Task.Delay(50);
+                lock (failures)
+                    Check(failures.Contains("copilot-state-delivery") && abandonedReports == 0,
+                        "An abandoned late post cleared the current marker or reported after completed disposal");
+            }
         });
         await test("Copilot restored replay cannot replace newer pending lifecycle or output snapshots", async () =>
         {
