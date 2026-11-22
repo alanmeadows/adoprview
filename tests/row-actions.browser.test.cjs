@@ -898,6 +898,114 @@ test('real row hit testing and action identity across refreshes', { timeout: 900
         [{key,enable:true},{key,enable:false},{key,enable:true}]);
     });
 
+    await t.test('Auto effects follow saved settings in both views without changing keyboard actions or pending labels', async t => {
+      await reset(true);
+      const key = 'sample-service-id:101';
+      const savedSettings = await evaluate('structuredClone(S.settings)');
+      const labels = () => evaluate(`([...document.querySelectorAll('[data-key="${key}"] button')]
+        .filter(b=>['autocomplete','cancelAuto'].includes(b.dataset.act))
+        .map(b=>({view:b.closest('.row')?'row':'expanded',title:b.title,aria:b.getAttribute('aria-label'),
+          act:b.dataset.act,disabled:b.disabled,busy:b.getAttribute('aria-busy')})))`);
+      const assertLabels = async (expected, act = 'autocomplete', busy = false) => {
+        assert.deepEqual(await labels(), ['row', 'expanded'].map(view => ({
+          view, title: expected, aria: expected, act, disabled: busy, busy: busy ? 'true' : null,
+        })));
+      };
+      const clickControl = async selector => {
+        await evaluate(`document.querySelector('#toasts').replaceChildren();
+          document.querySelector(${JSON.stringify(selector)}).scrollIntoView({block:'center'});`);
+        await frame();
+        const p = await evaluate(`(()=>{
+          const b=document.querySelector(${JSON.stringify(selector)}),r=b.getBoundingClientRect();
+          const x=r.x+r.width/2,y=r.y+r.height/2,hit=document.elementFromPoint(x,y);
+          if(!b.contains(hit))throw Error('Auto fixture control is covered: '+${JSON.stringify(selector)});
+          return {x,y};
+        })()`);
+        await click(p); await frame();
+      };
+      const evidence = [];
+      await evaluate(`S.snap.approvalProvider=null;S.approvalSettings=null;
+        S.expanded.add('${key}');renderRows();window.autoEffectsRpc=MockHost.rpc;
+        window.autoEffectsCalls=[];window.autoEffectsHold=false;
+        MockHost.rpc=async(method,p)=>{
+          if(!['saveSettings','autoComplete','refresh'].includes(method))throw Error('Unexpected host call '+method);
+          window.autoEffectsCalls.push({method,...structuredClone(p)});
+          if(method==='saveSettings')return structuredClone(p.settings);
+          if(method==='refresh')return null;
+          if(window.autoEffectsHold)await new Promise(resolve=>window.autoEffectsComplete=resolve);
+          return {...structuredClone(findPr(p.key)),autoCompleteBy:p.enable?'Offline Reviewer':null,
+            mergeStrategy:p.enable?S.settings.autoComplete.mergeStrategy:null};
+        };`);
+      try {
+        for (const mergeStrategy of ['squash', 'noFastForward', 'rebase', 'rebaseMerge']) {
+          for (const deleteSourceBranch of [false, true]) for (const transitionWorkItems of [false, true]) {
+            const previousLabels = await labels();
+            await clickControl('#settingsBtn');
+            await evaluate(`document.querySelector('#mergeStrategy').value=${JSON.stringify(mergeStrategy)};
+              document.querySelector('#deleteSourceBranch').checked=${deleteSourceBranch};
+              document.querySelector('#transitionWorkItems').checked=${transitionWorkItems};`);
+            assert.deepEqual(await labels(), previousLabels, 'Unsaved effects do not change action labels');
+            await clickControl('[data-dact="save"]');
+            assert.equal(await evaluate('window.autoEffectsCalls.at(-1)?.method'), 'saveSettings',
+              await evaluate("document.querySelector('#toasts').textContent"));
+            const expected = `Set auto-complete (${[mergeStrategy,
+              ...(deleteSourceBranch ? ['delete branch'] : []),
+              ...(transitionWorkItems ? ['complete work items'] : [])].join(', ')})`;
+            const committed = await evaluate('S.settings.autoComplete');
+            assert.deepEqual(committed, { ...savedSettings.autoComplete, mergeStrategy, deleteSourceBranch, transitionWorkItems });
+            await assertLabels(expected);
+            evidence.push({ mergeStrategy, deleteSourceBranch, transitionWorkItems, saved: await labels() });
+            await keyboard('Escape', 27);
+            assert.equal(await evaluate('document.activeElement.id'), 'settingsBtn');
+            await click(await point(key, '.row .title')); await frame();
+            assert.deepEqual(await labels(), [{
+              view: 'row', title: expected, aria: expected, act: 'autocomplete', disabled: false, busy: null,
+            }]);
+            await click(await point(key, '.row .title')); await frame();
+            await assertLabels(expected);
+            if (mergeStrategy === 'squash' && !deleteSourceBranch && !transitionWorkItems &&
+              process.env.ADOPRVIEW_LAYOUT_SCREENSHOTS) {
+              const shot = await send('Page.captureScreenshot', { format: 'png' });
+              await writeFile(path.join(process.env.ADOPRVIEW_LAYOUT_SCREENSHOTS, 'auto-effects-disabled.png'),
+                Buffer.from(shot.data, 'base64'));
+            }
+          }
+        }
+        assert.equal(await evaluate(`window.autoEffectsCalls.filter(c=>c.method==='saveSettings').length`), 16);
+        assert.equal(await evaluate(`window.autoEffectsCalls.some(c=>c.method==='autoComplete')`), false);
+        assert.deepEqual(await evaluate('window.confirmations'), []);
+        await evaluate(`S.settings.autoComplete={mergeStrategy:'squash',deleteSourceBranch:false,transitionWorkItems:false};
+          renderRows();window.autoEffectsHold=true;
+          document.querySelector('[data-key="${key}"] .row [data-act="autocomplete"]').focus();`);
+        assert.equal(await evaluate(`document.activeElement===document.querySelector('[data-key="${key}"] .row [data-act="autocomplete"]')`), true);
+        await keyboard('Enter', 13);
+        await assertLabels('Setting auto-complete; waiting for ADO confirmation', 'autocomplete', true);
+        evidence.push({ state: 'setting', labels: await labels() });
+        await evaluate('window.autoEffectsComplete()'); await frame();
+        const confirmed = 'Auto-complete confirmed by ADO, set by Offline Reviewer — click to cancel';
+        await assertLabels(confirmed, 'cancelAuto');
+        evidence.push({ state: 'confirmed', labels: await labels() });
+        assert.deepEqual(await evaluate('window.confirmations'), [], 'Setting Auto still has no confirmation');
+        await evaluate(`document.querySelector('[data-key="${key}"] .detail [data-act="cancelAuto"]').focus();`);
+        assert.equal(await evaluate(`document.activeElement===document.querySelector('[data-key="${key}"] .detail [data-act="cancelAuto"]')`), true);
+        await keyboard(' ', 32);
+        await assertLabels('Cancelling auto-complete; waiting for ADO confirmation', 'cancelAuto', true);
+        evidence.push({ state: 'cancelling', labels: await labels() });
+        await evaluate('window.autoEffectsComplete()'); await frame();
+        await assertLabels('Set auto-complete (squash)');
+        evidence.push({ state: 'cancelled', labels: await labels() });
+        assert.deepEqual(await evaluate(`window.autoEffectsCalls.filter(c=>c.method==='autoComplete')`),
+          [{ method: 'autoComplete', key, enable: true }, { method: 'autoComplete', key, enable: false }]);
+        assert.deepEqual(await evaluate('window.confirmations'), ['Cancel auto-complete on !101?']);
+      } finally {
+        t.diagnostic(JSON.stringify({ scenarios: evidence, rpc: await evaluate(`window.autoEffectsCalls.filter(c=>c.method==='autoComplete')`),
+          confirmations: await evaluate('window.confirmations') }));
+        await evaluate(`MockHost.rpc=window.autoEffectsRpc;delete window.autoEffectsRpc;
+          if(S.drawer)closeDrawer();S.settings=${JSON.stringify(savedSettings)};`);
+        await reset();
+      }
+    });
+
     await t.test('visible PR ID/repo match Open and PoP destinations at multiple sizes and scales', async () => {
       let checked = 0;
       for (const [width, scale] of [[1000, 1], [1280, 1.25], [1600, 1.5], [1920, 1]]) {

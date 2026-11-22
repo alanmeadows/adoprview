@@ -339,6 +339,9 @@ human verification.
 not approve the PR or bypass checks. Amber **Auto** means auto-complete is not
 set and is one of your remaining actions; the expanded Merge card offers the same
 **Set auto-complete**. The merge options (for example squash) come from Settings.
+Both controls' tooltips and accessible labels show the saved merge strategy and
+include source-branch deletion or linked-work-item completion only when enabled.
+Saving settings updates both descriptions; unsaved edits do not change them.
 
 After ADO read-back confirms auto-complete, **Auto** becomes a muted grey check
 in its existing action slot, including while the pointer remains over the row.

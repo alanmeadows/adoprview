@@ -795,6 +795,26 @@ test('row and expanded action disable together and rapid duplicate sends once', 
   assert.match(hooks.renderDetail(pr), /denied/);
 });
 
+test('Auto effects match saved options in row and expanded title/aria for every strategy', async t => {
+  for (const mergeStrategy of ['squash', 'noFastForward', 'rebase', 'rebaseMerge']) {
+    for (const deleteSourceBranch of [false, true]) for (const transitionWorkItems of [false, true]) {
+      await t.test(`${mergeStrategy}: delete=${deleteSourceBranch}, complete=${transitionWorkItems}`, () => {
+        const { hooks, pr } = setup();
+        hooks.S.settings.autoComplete = { mergeStrategy, deleteSourceBranch, transitionWorkItems };
+        const expected = `Set auto-complete (${[mergeStrategy,
+          ...(deleteSourceBranch ? ['delete branch'] : []),
+          ...(transitionWorkItems ? ['complete work items'] : [])].join(', ')})`;
+        const rendered = [hooks.actionButtons(pr), hooks.renderDetail(pr)].map((html, i) => {
+          const button = html.match(/<button\b[^>]*data-act="autocomplete"[^>]*>/)[0];
+          return { view: i ? 'expanded' : 'row',
+            title: button.match(/title="([^"]*)"/)[1], aria: button.match(/aria-label="([^"]*)"/)[1] };
+        });
+        assert.deepEqual(rendered, ['row', 'expanded'].map(view => ({ view, title: expected, aria: expected })));
+      });
+    }
+  }
+});
+
 test('confirmed Auto result updates captured PR immediately despite deferred snapshot and remains muted through refresh/collapse', async () => {
   const { hooks, pr, window } = setup();
   const neighbor = { ...pr, key: 'other:456', id: 456 };

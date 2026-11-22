@@ -1125,8 +1125,11 @@ const autoCompleteBusy = key => isBusy(key, 'autocomplete') || isBusy(key, 'canc
 function autoCompleteTitle(p) {
   const pending = isBusy(p.key, 'cancelAuto') ? 'Cancelling auto-complete; waiting for ADO confirmation'
     : isBusy(p.key, 'autocomplete') ? 'Setting auto-complete; waiting for ADO confirmation' : '';
+  const options = S.settings?.autoComplete;
+  const effects = [options?.mergeStrategy || 'squash', options?.deleteSourceBranch && 'delete branch',
+    options?.transitionWorkItems && 'complete work items'].filter(Boolean).join(', ');
   const state = p.autoCompleteBy ? `Auto-complete confirmed by ADO, set by ${p.autoCompleteBy} — click to cancel`
-    : `Set auto-complete (${S.settings?.autoComplete?.mergeStrategy || 'squash'}, delete branch, complete work items)`;
+    : `Set auto-complete (${effects})`;
   const error = S.autoCompleteErrors.get(p.key);
   return pending || state + (error ? ` — Last attempt: ${error}` : '');
 }
