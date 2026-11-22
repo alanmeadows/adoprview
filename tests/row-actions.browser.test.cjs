@@ -1408,6 +1408,46 @@ test('real row hit testing and action identity across refreshes', { timeout: 900
       }
     });
 
+    await t.test('Fix output preserves bottom selection resume across idle new-run retargeting', async () => {
+      for (const shelf of [false, true]) {
+        await reset(true);
+        await evaluate(`{const key='sample-service-id:101',pr=S.snap.prs.find(p=>p.key===key);
+          const output='Idle selected synthetic output\\n'.repeat(160);
+          S.runs.set('idle-selected-run',{...pr,runId:'idle-selected-run',status:'needs-attention',mayBeRunning:false,
+            startedAt:'2026-01-01T00:00:00Z',output,outputOffset:output.length});
+          S.expanded.add(key);render();}`);
+        if (shelf) {
+          await evaluate(`setSnapshot({...S.snap,orderRevision:(S.snap.orderRevision||0)+1,prs:[]})`);
+          await frame();
+          await click(await point('sample-service-id:101', '.run-heading'));
+        }
+        await move(10,10); await evaluate('document.activeElement?.blur()'); await frame();
+        await evaluate(`{window.idleOutput=document.querySelector('[data-run-id="idle-selected-run"] .run-output');
+          window.idleNode=window.idleOutput.firstChild;window.idleOutput.scrollTop=window.idleOutput.scrollHeight;
+          window.getSelection().setBaseAndExtent(window.idleNode,window.idleNode.length-25,window.idleNode,window.idleNode.length-1);
+          window.idleSelected=window.getSelection().toString();}`);
+        await frame();
+        assert.equal(await evaluate('rowsInUse()'), false, 'Exercise retargeting without pointer/focus deferral');
+        await evaluate(`{const old=S.runs.get('idle-selected-run'),output='A different idle run output\\n'.repeat(160);
+          updateCopilotRun({...old,runId:'idle-replacement-run',status:'recovering',
+            startedAt:'2026-01-02T00:00:00Z',output,outputOffset:output.length});}`);
+        await frame();
+        assert.equal(await evaluate('document.querySelector(".run-earlier .run-output")===window.idleOutput'), true);
+        assert.equal(await evaluate('window.idleOutput.firstChild===window.idleNode'), true);
+        assert.equal(await evaluate('window.getSelection().toString()'), await evaluate('window.idleSelected'));
+        assert.ok(await evaluate('window.idleOutput.scrollHeight-window.idleOutput.clientHeight-window.idleOutput.scrollTop') <= 2);
+        assert.ok(await evaluate(`(()=>{const output=document.querySelector('[data-run-id="idle-replacement-run"] .run-output');
+          return output!==window.idleOutput && output.scrollHeight-output.clientHeight-output.scrollTop<=2;})()`),
+        'The different run gets its own output node and default following intent');
+        await evaluate(`{window.getSelection().removeAllRanges();
+          const old=S.runs.get('idle-selected-run'),extra='After idle bottom selection cleared\\n'.repeat(160);
+          updateCopilotRun({...old,output:old.output+extra,outputOffset:old.outputOffset+extra.length});}`);
+        await frame();
+        assert.ok(await evaluate('window.idleOutput.scrollHeight-window.idleOutput.clientHeight-window.idleOutput.scrollTop') <= 2,
+          'Clearing the surviving bottom selection resumes the earlier run on its next append');
+      }
+    });
+
     await t.test('Fix output shelf defers background card changes while hovering or pressing captured cancellation', async () => {
       for (const pressed of [false, true]) {
         await reset(true);

@@ -755,6 +755,10 @@ function updateCopilotRun(r) {
   const runCards = [...document.querySelectorAll('.copilot-run')].filter(el => el.dataset.runKey === r.key);
   const main = runCards.find(el => !el.classList.contains('run-earlier'));
   const promoted = runCards.find(el => el.dataset.runId === latestId);
+  if (latest && !promoted && main?.dataset.runId) {
+    renderRows(true);
+    return;
+  }
   const deferMain = !!main?.dataset.runId && main.dataset.runId !== latestId && rowsInUse();
   if (deferMain) { S.rowsPending = true; renderStatus(); }
   else if (main && promoted && main !== promoted) {
