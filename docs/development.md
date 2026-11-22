@@ -249,6 +249,9 @@ cancellation, both before and during Stop finalization, plus a returned-error
 case. Stop and disposal remain bounded, partial output/real exit/logs/work and
 durable stop proof survive, and abandoned callbacks cannot append late output.
 Both fake history and preflight sentinels are released in `finally`.
+The same `historyFirst` case asserts one reader, one occurrence of each received
+segment and the exact saved offset plus received-character count. Replay
+progress is entry-local, not a persisted schema change or output reset.
 
 The smaller kernel-control opt-in executes the exact production runner in an
 explicitly selected, already-responsive WSL distribution:

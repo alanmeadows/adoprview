@@ -25,7 +25,8 @@ static class CopilotRecoveryTests
     {
         await test("Copilot recovery history cannot delay verified Stop or change inactive state", async () =>
         {
-            foreach (var (historyFirst, failure) in new[] { (false, false), (true, false), (false, true) })
+            foreach (var (historyFirst, failure, complete) in new[]
+                { (false, false, false), (true, false, false), (false, true, false), (true, false, true) })
             {
                 using var f = new Fixture();
                 await using var first = f.Service();
@@ -37,23 +38,30 @@ static class CopilotRecoveryTests
                 var saved = f.Store.Load().Single().Saved!;
                 f.Store.Write(saved with { State = saved.State with { Status = "needs-attention", ResumeAttempts = 1 } });
                 f.Transport.BlockPreflight = !historyFirst;
-                f.Transport.BlockHistory = !failure;
+                f.Transport.BlockHistory = !(failure || complete);
                 if (failure) f.Transport.Failure = "history";
                 await using var recovered = f.Service();
                 var recovery = recovered.RecoverAsync();
-                await (historyFirst ? f.Transport.HistoryEntered.Task : f.Transport.RecoveryEntered.Task)
-                    .WaitAsync(TimeSpan.FromSeconds(3));
+                if (complete) await recovery.WaitAsync(TimeSpan.FromSeconds(3));
+                else await (historyFirst ? f.Transport.HistoryEntered.Task : f.Transport.RecoveryEntered.Task)
+                        .WaitAsync(TimeSpan.FromSeconds(3));
                 var stop = recovered.CancelAsync(run.Key, run.RunId);
                 try
                 {
                     var final = await stop.WaitAsync(TimeSpan.FromSeconds(3))
                         ?? throw new Exception("Stop returned no matching recovered run");
                     Check(final is { Status: "cancelled", MayBeRunning: false, ExitCode: 1, WorktreeRetained: true } &&
-                        final.Error?.Contains("logs") == true && f.Transport.Launches == 1 && f.Transport.Stops == 0 &&
+                        (complete ? final.Error is null : final.Error?.Contains("logs") == true) &&
+                        f.Transport.Launches == 1 && f.Transport.Stops == 0 &&
                         f.Transport.Cleanups == 0 && f.Transport.RecordedOutput.Contains("FAKE-READY") &&
                         f.Store.Load().Single().Saved!.TaskConfirmedStopped,
                         "Unavailable recovery history lost verified stop, real exit, logs/work or explicit warning");
-                    if (!failure) Check(final.Output.Contains("FAKE-READY"), "Partial replay output was discarded");
+                    if (!failure)
+                        Check(final.Output.Contains("FAKE-READY") && f.Transport.HistoryReaders.Count == 1 &&
+                            final.Output.IndexOf("FAKE-READY", StringComparison.Ordinal) ==
+                                final.Output.LastIndexOf("FAKE-READY", StringComparison.Ordinal) &&
+                            final.OutputOffset == saved.State.OutputOffset + f.Transport.RecordedOutput.Length,
+                            "Recovery history was replayed twice or its preserved output offset changed");
                     var output = final.Output;
                     foreach (var reader in f.Transport.HistoryReaders) reader("LATE-HISTORY-REPLY\n");
                     Check(recovered.Get(run.RunId)!.Output == output, "Abandoned history changed stopped output");

@@ -914,6 +914,7 @@ public sealed partial class CopilotRunService : IAsyncDisposable
         public EnvironmentInfo? Environment;
         public bool TaskConfirmedStopped, UncertainStop, Dirty = true;
         public bool Detaching, LaunchIntent;
+        public bool HistoryReplayStarted, HistoryReplayCompleted;
         public string OwnershipToken = Convert.ToHexString(RandomNumberGenerator.GetBytes(32)).ToLowerInvariant();
         public FileStream? DriverLease;
         public string? TaskIdentity;

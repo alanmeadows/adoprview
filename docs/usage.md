@@ -646,6 +646,9 @@ exit code rather than replacing it with a synthetic cancellation code.
 Recovery log replay observes Stop cancellation. Once Stop is verified, replay
 has an independent two-second limit; unavailable history reports a warning
 without changing verified stopped state or removing retained logs/work.
+An interrupted replay retains received output and its offsets instead of
+restarting the same log from the beginning. A new dashboard can replay the
+retained log again; Stop does not duplicate history in the current run.
 
 Output uses a grow-on-demand tail buffer with the same retained-output limit,
 so empty or short saved histories do not each reserve the maximum buffer.

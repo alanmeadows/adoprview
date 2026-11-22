@@ -240,12 +240,18 @@ public sealed partial class CopilotRunService
         if (e.State.Output.StartsWith("[Recovered run history", StringComparison.Ordinal))
         {
             var cancelling = status == "cancelled" || e.Cancellation.IsCancellationRequested;
-            using var history = CancellationTokenSource.CreateLinkedTokenSource(e.DetachCancellation.Token,
-                cancelling ? CancellationToken.None : e.Cancellation.Token);
-            if (cancelling) history.CancelAfter(TimeSpan.FromSeconds(2));
-            try { await ReadHistoryAsync(e, history.Token).ConfigureAwait(false); }
-            catch (Exception ex) when (cancelling && !e.Detaching &&
-                ex is OperationCanceledException or RunSetupException or IOException or System.ComponentModel.Win32Exception)
+            var unavailable = e.HistoryReplayStarted && !e.HistoryReplayCompleted;
+            if (!e.HistoryReplayStarted)
+            {
+                using var history = CancellationTokenSource.CreateLinkedTokenSource(e.DetachCancellation.Token,
+                    cancelling ? CancellationToken.None : e.Cancellation.Token);
+                if (cancelling) history.CancelAfter(TimeSpan.FromSeconds(2));
+                try { await ReadHistoryAsync(e, history.Token).ConfigureAwait(false); }
+                catch (Exception ex) when (cancelling && !e.Detaching &&
+                    ex is OperationCanceledException or RunSetupException or IOException or System.ComponentModel.Win32Exception)
+                { unavailable = true; }
+            }
+            if (unavailable)
             {
                 Update(e, s => s with { Error = (s.Error is null ? "" : s.Error + "\n") +
                     "Saved task logs could not be fully replayed after Stop. Verified stopped state, retained logs and work are preserved." });
@@ -270,9 +276,11 @@ public sealed partial class CopilotRunService
         if (e.Environment is null) return;
         var env = e.Environment;
         ReadOwnedTask(e, await InvokeRun("status", env, StatusScript, [env.Bgtask, e.TaskName], token: token).ConfigureAwait(false));
+        e.HistoryReplayStarted = true;
         var logs = await InvokeRun("history", env, "\"$1\" logs \"$2\" --tail 2000", [env.Bgtask, e.TaskName],
             stdout: s => Append(e, s, false, history: true), stderr: s => Append(e, s, true, history: true), token: token).ConfigureAwait(false);
         RequireSuccess(logs, "Saved task logs could not be read; terminal history and retained work remain recorded.");
+        e.HistoryReplayCompleted = true;
     }
 
     Task<CopilotProcessResult> ProbeRunAsync(Entry e, CancellationToken token = default) =>
