@@ -240,6 +240,10 @@ fake is deliberately released in `finally`; no live process is involved.
 The existing pre-follow cancellation case also asserts that legacy records'
 ownership/history commands do not re-source environment files. Actual transport
 proof checks default-registry legacy log access with the same failing sentinel.
+`Copilot confirmed-stopped` holds recovery preflight for an already-exited
+needs-attention record. Exact-run cancellation must complete within three
+seconds, retain work/output and the real exit code, persist stop proof and send
+no redundant task Stop or resume. The fake preflight is released in `finally`.
 
 The smaller kernel-control opt-in executes the exact production runner in an
 explicitly selected, already-responsive WSL distribution:

@@ -133,8 +133,8 @@ public sealed partial class CopilotRunService
                     throw new RunSetupException("A terminal record unexpectedly has a live task. No resume or cleanup was attempted; inspect the retained worktree.");
                 if (store!.IsCancelled(e.State.RunId) && e.DriverLease is not null)
                 {
-                    await StopRecoveredAsync(e).ConfigureAwait(false);
-                    await FinishRecoveredAsync(e, "cancelled", 143).ConfigureAwait(false);
+                    var code = await StopRecoveredAsync(e).ConfigureAwait(false);
+                    await FinishRecoveredAsync(e, "cancelled", code).ConfigureAwait(false);
                     return;
                 }
                 Update(e, s => s with { Status = "running", Error = null, FinishedAt = null, MayBeRunning = true });
@@ -185,8 +185,8 @@ public sealed partial class CopilotRunService
         {
             try
             {
-                await StopRecoveredAsync(e).ConfigureAwait(false);
-                await FinishRecoveredAsync(e, "cancelled", 143).ConfigureAwait(false);
+                var code = await StopRecoveredAsync(e).ConfigureAwait(false);
+                await FinishRecoveredAsync(e, "cancelled", code).ConfigureAwait(false);
             }
             catch { RecoveryBlocked(e, "Could not verify cancellation of the exact owned task. Work and its reservation are retained."); }
         }
@@ -304,17 +304,19 @@ public sealed partial class CopilotRunService
         { throw new RunSetupException("Managed task returned incomplete/ambiguous identity or status. Work is preserved."); }
     }
 
-    async Task StopRecoveredAsync(Entry e)
+    async Task<int?> StopRecoveredAsync(Entry e)
     {
         await VerifyRunAsync(e).ConfigureAwait(false);
         var env = e.Environment!;
-        ReadOwnedTask(e, await InvokeRun("status", env, StatusScript, [env.Bgtask, e.TaskName]).ConfigureAwait(false));
-        RequireSuccess(await InvokeRun("stop", env, StopScript, [env.Bgtask, e.TaskName]).ConfigureAwait(false),
-            "The exact recovered task could not be stopped.");
+        var before = ReadOwnedTask(e, await InvokeRun("status", env, StatusScript, [env.Bgtask, e.TaskName]).ConfigureAwait(false));
+        if (before.Status != "exited")
+            RequireSuccess(await InvokeRun("stop", env, StopScript, [env.Bgtask, e.TaskName]).ConfigureAwait(false),
+                "The exact recovered task could not be stopped.");
         var after = ReadOwnedTask(e, await InvokeRun("status", env, StatusScript, [env.Bgtask, e.TaskName]).ConfigureAwait(false));
         var ownership = await VerifyRunAsync(e).ConfigureAwait(false);
         if (after.Status != "exited" || ownership[1] != "FREE")
             throw new RunSetupException("The recovered task or its CLI process group is still active; cancellation could not be confirmed.");
+        return after.ExitCode;
     }
 
     internal sealed class DurableStore(string directory)

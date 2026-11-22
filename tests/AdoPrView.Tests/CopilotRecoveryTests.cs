@@ -23,6 +23,38 @@ static class CopilotRecoveryTests
 
     public static async Task Run(Func<string, Func<Task>, Task> test)
     {
+        await test("Copilot confirmed-stopped needs-attention cancels blocked recovery without another task Stop", async () =>
+        {
+            using var f = new Fixture();
+            await using var first = f.Service();
+            var run = await first.StartAsync(Request());
+            await Wait(first, run.RunId, s => s.Output.Contains("FAKE-READY"));
+            f.Transport.End(1);
+            await Wait(first, run.RunId, s => s.Status == "failed");
+            await first.DisposeAsync();
+            var saved = f.Store.Load().Single().Saved!;
+            Check(saved.TaskConfirmedStopped && !saved.State.MayBeRunning, "Fixture did not persist a confirmed-stopped run");
+            f.Store.Write(saved with { State = saved.State with { Status = "needs-attention" } });
+            f.Transport.BlockPreflight = true;
+            await using var recovered = f.Service();
+            var recovery = recovered.RecoverAsync();
+            await f.Transport.RecoveryEntered.Task.WaitAsync(TimeSpan.FromSeconds(3));
+            var stop = recovered.CancelAsync(run.Key, run.RunId);
+            try
+            {
+                var final = await stop.WaitAsync(TimeSpan.FromSeconds(3));
+                Check(final is { Status: "cancelled", MayBeRunning: false, WorktreeRetained: true, ExitCode: 1 } &&
+                    final.Output.Contains("FAKE-READY") && f.Transport.Launches == 1 && f.Transport.Stops == 0 &&
+                    f.Store.Load().Single().Saved!.TaskConfirmedStopped,
+                    "Cancelling stopped recovery changed real exit history, stopped another task or lost durable ownership");
+            }
+            finally
+            {
+                f.Transport.ReleasePreflight.TrySetResult();
+                await recovery.WaitAsync(TimeSpan.FromSeconds(3));
+                await stop.WaitAsync(TimeSpan.FromSeconds(3));
+            }
+        });
         await test("Copilot private prompt cleanup cannot hold verified Stop behind a hung transport", async () =>
         {
             foreach (var hung in new[] { true, false })

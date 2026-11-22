@@ -209,7 +209,8 @@ public sealed partial class CopilotRunService : IAsyncDisposable
         }
         // Signal first: neither durable IO nor output/notification locks may delay transport cancellation.
         var wasActive = entry.State.IsActive;
-        if (wasActive || entry.State.MayBeRunning) SignalCancellation(entry, entry.Cancellation);
+        if (wasActive || entry.State.MayBeRunning || entry.State.Status == "needs-attention")
+            SignalCancellation(entry, entry.Cancellation);
         Update(entry, s => s.IsActive ? s with { Status = "cancelling" } : s);
         if (store is not null) store.RequestCancel(runId);
         await entry.Completion.ConfigureAwait(false);
@@ -241,10 +242,11 @@ public sealed partial class CopilotRunService : IAsyncDisposable
                     var ownership = await VerifyRunAsync(entry).ConfigureAwait(false);
                     var task = ReadOwnedTask(entry, await InvokeRun("status", entry.Environment, StatusScript,
                         [entry.Environment.Bgtask, entry.TaskName]).ConfigureAwait(false));
-                    if (task.Status == "running") await StopRecoveredAsync(entry).ConfigureAwait(false);
+                    var code = task.ExitCode;
+                    if (task.Status == "running") code = await StopRecoveredAsync(entry).ConfigureAwait(false);
                     else if (task.Status is not ("exited" or "dead") || ownership[1] != "FREE")
                         throw new RunSetupException("Run liveness is uncertain; cancellation cannot safely release its reservation.");
-                    await FinishRecoveredAsync(entry, "cancelled", task.ExitCode).ConfigureAwait(false);
+                    await FinishRecoveredAsync(entry, "cancelled", code).ConfigureAwait(false);
                 }
                 if (!entry.State.MayBeRunning && (!entry.LaunchIntent || entry.TaskConfirmedStopped))
                     lock (gate) entry.UncertainStop = false;

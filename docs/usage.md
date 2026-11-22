@@ -639,6 +639,10 @@ private-prompt cleanup warning; cleanup cannot keep Stop waiting for setup.
 Ownership/history commands likewise bypass initialization for older records,
 using the same environment as their identity-checked status command rather
 than sourcing a potentially different registry after Stop.
+Stop also interrupts pending recovery for a needs-attention record whose task
+is already confirmed stopped. It rechecks owned identity and the free execution
+lock without sending another Stop to an exited task, and preserves its real
+exit code rather than replacing it with a synthetic cancellation code.
 
 Output uses a grow-on-demand tail buffer with the same retained-output limit,
 so empty or short saved histories do not each reserve the maximum buffer.
