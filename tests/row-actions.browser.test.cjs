@@ -1,7 +1,8 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const { spawn } = require('node:child_process');
-const { mkdtemp, rm, mkdir, writeFile } = require('node:fs/promises');
+const { mkdtemp, rm, mkdir, writeFile, readdir, rmdir } = require('node:fs/promises');
+const { existsSync } = require('node:fs');
 const { once } = require('node:events');
 const path = require('node:path');
 const os = require('node:os');
@@ -154,7 +155,12 @@ test('real row hit testing and action identity across refreshes', { timeout: 900
     const run = t.test.bind(t), names = process.env.ROW_TEST_FILTER.split('|');
     t.test = (name, ...args) => names.some(part => name.includes(part)) ? run(name, ...args) : Promise.resolve();
   }
-  const profile = await mkdtemp(path.join(os.tmpdir(), 'ado-row-tests-'));
+  const proofDir = process.env.ADOPRVIEW_EXPLAIN_PROOF_DIR;
+  const profile = proofDir ? path.join(proofDir, 'edge-profile') : await mkdtemp(path.join(os.tmpdir(), 'ado-row-tests-'));
+  if (proofDir) {
+    assert.equal(existsSync(profile), false, 'Proof profile must not preexist');
+    await mkdir(profile);
+  }
   const browser = process.env.ROW_TEST_BROWSER || 'C:\\Program Files (x86)\\Microsoft\\Edge\\Application\\msedge.exe';
   const child = spawn(browser, [
     '--headless=new', '--remote-debugging-port=0', '--no-first-run', '--disable-extensions',
@@ -206,6 +212,11 @@ test('real row hit testing and action identity across refreshes', { timeout: 900
       await frame();
     };
     await send('Page.enable');
+    if (proofDir) {
+      await send('Network.enable');
+      await send('Network.setBlockedURLs', { urls: ['http://*', 'https://*'] });
+      await writeFile(path.join(proofDir, 'browser.json'), JSON.stringify({ pid: child.pid, browser, profile, profilePreabsent: true }));
+    }
     await send('Page.bringToFront');
     await send('Emulation.setEmulatedMedia', { features: [{ name: 'prefers-reduced-motion', value: 'no-preference' }] });
     await send('Page.addScriptToEvaluateOnNewDocument', { source: `
@@ -214,7 +225,7 @@ test('real row hit testing and action identity across refreshes', { timeout: 900
       window.setInterval=(fn,ms)=>{window.rowIntervals.push({fn,ms});return interval(fn,ms);};
     ` });
     await send('Emulation.setDeviceMetricsOverride', { width: 1600, height: 1000, deviceScaleFactor: 1, mobile: false });
-    const root = path.resolve(__dirname, '..', 'src', 'AdoPrView', 'wwwroot', 'index.html');
+    const root = process.env.ROW_TEST_GUI_ROOT || path.resolve(__dirname, '..', 'src', 'AdoPrView', 'wwwroot', 'index.html');
     await send('Page.navigate', { url: pathToFileURL(root).href + '?mock=1' });
     await evaluate(`new Promise((resolve,reject)=>{
       const deadline=Date.now()+10000;
@@ -327,7 +338,7 @@ test('real row hit testing and action identity across refreshes', { timeout: 900
         S.rowOrder=[];S.orderRevision=null;S.laneRetained.clear();S.runs.clear();S.busy.clear();closeRowMenu();
         window.holdLog=false;S.settings.hidden=['sample-deploy-id:1001'];S.settings.ignoreDrafts=false;S.hideUndo=[];
         window.confirmations=[];window.confirmResult=true;window.autoFailure=false;S.autoCompleteErrors.clear();
-        window.explainSequence=0;S.explanations.clear();window.videoSequence=0;S.videos.clear();
+        window.explainSequence=0;S.explanations.clear();S.explanationPrs?.clear();window.videoSequence=0;S.videos.clear();
         S.settings.videoSpeech={voice:'offline-configured-voice'};
         window.speechMissingAz=false;window.speechDenied=false;window.speechListDenied=false;window.holdSpeechSelection=false;
         window.holdApproval=false;window.approvalFailure=false;S.reviewVotes.clear();
@@ -406,6 +417,188 @@ test('real row hit testing and action identity across refreshes', { timeout: 900
         assert.deepEqual((await calls()).map(c=>c.method),['explainPr','cancelExplanation','explainPr']);
       }
       await send('Emulation.setDeviceMetricsOverride', {width:1600,height:1000,deviceScaleFactor:1,mobile:false});
+    });
+
+    await t.test('Explain retained activity meets missing, filtered, hidden, cancellation, replacement and return contracts', async t => {
+      const key = 'sample-service-id:101', other = 'sample-api-id:104';
+      const metrics = [];
+      await evaluate('window.explainRpc=window.MockHost.rpc;');
+      const setup = async () => {
+        await reset(true);
+        await evaluate(`S.expanded.add('${key}');renderRows();
+          window.explainSlot=null;window.explainNext=0;window.explainCancelHeld=false;
+          window.MockHost.rpc=async(method,p)=>{
+            window.calls.push({method,...p});
+            if(method==='explainPr'){
+              if(!S.snap.prs.some(pr=>pr.key===p.key))throw Error('Removed PR cannot launch');
+              if(window.explainSlot)throw Error('Another PR explanation is running. Cancel it or wait for it to finish.');
+              return window.explainSlot={key:p.key,requestId:'synthetic-explain-'+(++window.explainNext),
+                sequence:++window.explainSequence,status:'running',message:'Reading synthetic pinned context',
+                output:'Synthetic partial explanation',coverage:[]};
+            }
+            if(method==='cancelExplanation'){
+              if(!window.explainSlot || window.explainSlot.key!==p.key || window.explainSlot.requestId!==p.requestId)
+                throw Error('This explanation is no longer current.');
+              const owned=window.explainSlot;
+              updateExplanation({...owned,sequence:++window.explainSequence,status:'cancelling',message:'Cancelling synthetic explanation'});
+              if(window.explainCancelHeld)await new Promise(resolve=>window.explainCancelDone=resolve);
+              if(window.explainSlot!==owned)throw Error('Replacement operation must not be cancelled');
+              window.explainSlot=null;
+              return {...owned,sequence:++window.explainSequence,status:'cancelled',message:'Synthetic cancellation confirmed'};
+            }
+            throw Error('Unexpected host call '+method);
+          };`);
+        await click(await point(key, '.detail [data-act="explainPr"]'));
+        await frame();
+        await move(10, 10);
+        await evaluate('document.activeElement?.blur();');
+        await frame();
+      };
+      const measure = async scene => {
+        const result = await evaluate(`(()=>{
+          const cards=[...document.querySelectorAll('.explanation')].filter(c=>c.dataset.explainKey==='${key}');
+          cards[0]?.querySelector('h3').scrollIntoView({block:'center'});
+          const cancels=cards.flatMap(c=>[...c.querySelectorAll('[data-act="cancelExplanation"]')]).filter(b=>!b.hidden);
+          return {cards:cards.length,visibleCancel:cancels.length,
+            status:cards.map(c=>c.querySelector('.explain-status').textContent),
+            currentKeys:S.snap.prs.map(p=>p.key),
+            pendingKeys:S.pendingSnapshot?.prs.map(p=>p.key)||null,
+            caption:document.querySelector('#explanationShelf')?.textContent||'',
+            slot:window.explainSlot?.requestId||null,
+            cancelCalls:window.calls.filter(c=>c.method==='cancelExplanation')};
+        })()`);
+        metrics.push({ scene, ...result });
+        if (proofDir) {
+          await writeFile(path.join(proofDir, 'scenes.json'), JSON.stringify(metrics, null, 2));
+          const data = (await send('Page.captureScreenshot', { format: 'png' })).data;
+          await writeFile(path.join(proofDir, scene + '.png'), Buffer.from(data, 'base64'));
+        }
+        return result;
+      };
+      try {
+        await t.test('AC1 and AC2: departed identity, status and keyboard Cancel release the exact slot', async () => {
+          await setup();
+          const before = await measure('active');
+          assert.equal(before.cards, 1);
+          assert.equal(before.visibleCancel, 1);
+          await evaluate(`window.departedCancel=document.querySelector('[data-key="${key}"] [data-act="cancelExplanation"]');
+            setSnapshot({...S.snap,prs:S.snap.prs.filter(p=>p.key!=='${key}')});renderRows();`);
+          const departed = await measure('departed');
+          assert.equal(departed.currentKeys.includes(key), false, 'Departure must be in the accepted current snapshot');
+          if (process.env.ADOPRVIEW_EXPLAIN_BASELINE === '1') {
+            await evaluate(`onAction('cancelExplanation',window.departedCancel,'${key}')`);
+            await evaluate(`onAction('explainPr',{dataset:{}},'${other}')`);
+            const failure = await measure('departed-no-rpc');
+            assert.equal(failure.visibleCancel, 1, 'Baseline loses reachable Cancel and cannot release the single slot');
+            return;
+          }
+          assert.equal(departed.cards, 1);
+          assert.equal(departed.visibleCancel, 1);
+          assert.match(departed.caption, /sample-service.*!101.*Add per-cluster health probe/);
+          assert.deepEqual(departed.status, ['Reading synthetic pinned context']);
+          await evaluate(`window.explainCancelHeld=true;document.querySelector('#search').focus();`);
+          for (let i = 0; i < 40 && await evaluate('document.activeElement.dataset.act') !== 'cancelExplanation'; i++)
+            await keyboard('Tab', 9);
+          assert.equal(await evaluate('document.activeElement.dataset.act'), 'cancelExplanation');
+          await keyboard('Enter', 13);
+          assert.equal(await evaluate('window.explainSlot.requestId'), 'synthetic-explain-1');
+          assert.equal(await evaluate("document.querySelector('#explanationShelf [data-act=\"cancelExplanation\"]').disabled"), true);
+          await measure('cancelling');
+          assert.deepEqual((await calls()).filter(c => c.method === 'cancelExplanation'),
+            [{ method: 'cancelExplanation', key, requestId: 'synthetic-explain-1' }]);
+          await evaluate('window.explainCancelDone()'); await frame();
+          assert.equal(await evaluate('window.explainSlot'), null);
+          assert.equal(await evaluate("document.querySelectorAll('#explanationShelf .explanation').length"), 0);
+        });
+        if (process.env.ADOPRVIEW_EXPLAIN_BASELINE === '1') return;
+        await t.test('AC1: search, repository, scope, lane, hidden and collapsed targets retain one accessible card', async () => {
+          for (const [scene, mutation] of [
+            ['search', "const e=document.querySelector('#search');e.value='Different repository';e.dispatchEvent(new Event('input',{bubbles:true}));"],
+            ['repository', "const e=document.querySelector('#repoFilter');e.value='sample-api';e.dispatchEvent(new Event('change',{bubbles:true}));"],
+            ['scope', "document.querySelector('[data-scope=\"watched\"]').click();"],
+            ['lane', "document.querySelector('[data-lane=\"completed\"]').click();"],
+            ['hidden', `S.settings.hidden.push('${key}');S.expanded.delete('${key}');render();`],
+            ['collapsed', `onAction('toggle',{dataset:{}},'${key}');`],
+          ]) {
+            await setup();
+            await evaluate(`{${mutation}}`); await frame();
+            const state = await measure(scene);
+            assert.equal(state.cards, 1, scene);
+            assert.equal(state.visibleCancel, 1, scene);
+            assert.match(state.caption, /sample-service.*!101/, scene);
+            await evaluate("document.querySelector('#explanationShelf [data-act=\"cancelExplanation\"]').focus()");
+            await keyboard('Enter', 13);
+            assert.equal(await evaluate('window.explainSlot'), null, scene);
+          }
+        });
+        await t.test('AC2 and AC3: removed launch blocked, confirmed cancel permits another PR, obsolete events/actions cannot cancel replacement', async () => {
+          await setup();
+          await evaluate(`window.oldExplain=structuredClone(window.explainSlot);
+            window.oldCancel=document.querySelector('[data-key="${key}"] [data-act="cancelExplanation"]');
+            setSnapshot({...S.snap,prs:S.snap.prs.filter(p=>p.key!=='${key}')});renderRows();
+            onAction('explainPr',{dataset:{}},'${key}');`);
+          assert.equal((await calls()).filter(c => c.method === 'explainPr' && c.key === key).length, 1);
+          await evaluate("document.querySelector('#explanationShelf [data-act=\"cancelExplanation\"]').focus()");
+          await keyboard('Enter', 13);
+          await evaluate(`onAction('explainPr',{dataset:{}},'${other}')`);
+          assert.equal(await evaluate('window.explainSlot.key'), other);
+          await evaluate(`(async()=>{
+            updateExplanation({...window.oldExplain,status:'running',output:'Obsolete text'});
+            await onAction('cancelExplanation',window.oldCancel,'${key}');
+          })()`);
+          assert.equal(await evaluate('window.explainSlot.key'), other);
+          assert.equal((await calls()).filter(c => c.method === 'cancelExplanation').length, 1);
+          await evaluate(`(async()=>{
+            await onAction('cancelExplanation',{dataset:{requestId:window.explainSlot.requestId}},'${other}');
+            setSnapshot(structuredClone(window.baseline));renderRows();
+            await onAction('explainPr',{dataset:{}},'${key}');
+            updateExplanation({...window.oldExplain,status:'completed',output:'Obsolete terminal text'});
+            await onAction('cancelExplanation',window.oldCancel,'${key}');
+          })()`);
+          assert.equal(await evaluate(`S.explanations.get('${key}').requestId`), 'synthetic-explain-3');
+          assert.equal(await evaluate('window.explainSlot.requestId'), 'synthetic-explain-3');
+          assert.equal((await calls()).filter(c => c.method === 'cancelExplanation').length, 2);
+          await measure('replacement');
+        });
+        await t.test('AC4: return has no duplicate, exact Cancel focus transfers, terminal cleanup preserves inline output', async () => {
+          for (const status of ['completed', 'cancelled', 'failed']) {
+            await setup();
+            await evaluate(`document.querySelector('[data-explain-key="${key}"] [data-act="cancelExplanation"]').focus();
+              S.expanded.delete('${key}');renderRows();`);
+            assert.equal(await evaluate("document.activeElement.closest('.explanation-only')?.dataset.key"), key);
+            await evaluate(`S.expanded.add('${key}');renderRows();`);
+            assert.equal(await evaluate("document.activeElement.dataset.act"), 'cancelExplanation');
+            await move(10, 10); await frame();
+            await evaluate(`document.activeElement.blur();window.returnSnap=structuredClone(S.snap);
+              setSnapshot({...S.snap,prs:S.snap.prs.filter(p=>p.key!=='${key}')});renderRows();`);
+            await frame();
+            await evaluate('setSnapshot(window.returnSnap);renderRows();');
+            await measure('return-' + status);
+            assert.equal(await evaluate(`document.querySelectorAll('[data-explain-key="${key}"]').length`), 1);
+            await click(await point(key, '.row .title')); await frame();
+            assert.equal(await evaluate(`document.querySelectorAll('[data-explain-key="${key}"]').length`), 1);
+            assert.equal(await evaluate("document.querySelectorAll('#explanationShelf .explanation').length"), 0);
+            await move(10, 10);
+            await evaluate('document.activeElement?.blur();');
+            await frame();
+            await evaluate(`document.activeElement.blur();
+              setSnapshot({...S.snap,prs:S.snap.prs.filter(p=>p.key!=='${key}')});renderRows();
+              updateExplanation({...S.explanations.get('${key}'),sequence:++window.explainSequence,
+                status:'${status}',message:'Synthetic ${status}',output:'Retained synthetic ${status} output'});
+              window.explainSlot=null;`);
+            assert.equal(await evaluate(`S.snap.prs.some(p=>p.key==='${key}')`), false);
+            assert.equal(await evaluate("document.querySelectorAll('#explanationShelf .explanation').length"), 0);
+            await evaluate('setSnapshot(window.returnSnap);renderRows();');
+            await click(await point(key, '.row .title')); await frame();
+            assert.equal(await evaluate(`document.querySelector('[data-explain-key="${key}"] .explain-output').textContent.trimEnd()`),
+              'Retained synthetic ' + status + ' output');
+            assert.equal(await evaluate(`document.querySelector('[data-explain-key="${key}"] [data-act="cancelExplanation"]').hidden`), true);
+          }
+          await measure('returned-terminal');
+        });
+      } finally {
+        await evaluate('if(window.explainRpc)window.MockHost.rpc=window.explainRpc;');
+      }
     });
 
     await t.test('first video selects an Azure resource and voice explicitly, missing az and denied synthesis cannot generate', async () => {
@@ -3249,6 +3442,24 @@ test('real row hit testing and action identity across refreshes', { timeout: 900
     socket?.close();
     if (child.exitCode === null) await Promise.race([exited, new Promise(resolve => setTimeout(resolve, 3000))]);
     if (child.exitCode === null) { child.kill(); await exited; }
-    await rm(profile, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
+    if (proofDir) {
+      const removeOwnedProfile = async directory => {
+        for (const entry of await readdir(directory, { withFileTypes: true })) {
+          const owned = path.join(directory, entry.name);
+          if (entry.isDirectory()) await removeOwnedProfile(owned);
+          else await rm(owned);
+        }
+        await rmdir(directory);
+      };
+      try {
+        await removeOwnedProfile(profile);
+        await writeFile(path.join(proofDir, 'cleanup.json'), JSON.stringify({ browserPid: child.pid,
+          exitCode: child.exitCode, signal: child.signalCode, profileRemoved: !existsSync(profile) }));
+      } catch (error) {
+        await writeFile(path.join(proofDir, 'cleanup.json'), JSON.stringify({ browserPid: child.pid,
+          exitCode: child.exitCode, signal: child.signalCode, cleanupError: error.message }));
+        throw error;
+      }
+    } else await rm(profile, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
   }
 });

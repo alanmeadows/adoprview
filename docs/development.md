@@ -42,6 +42,13 @@ starting Copilot or authenticating. To check a published folder, set
 `ADOPRVIEW_TEST_PUBLISH_DIRECTORY` to its absolute path and run the native suite
 with `ADOPRVIEW_TEST_FILTER` set to `Explain runtime`.
 
+For retained Explain activity, set `ROW_TEST_FILTER=Explain retained activity|Explain preserves row targets`
+and run `node --test --test-name-pattern='real row hit testing' tests\row-actions.browser.test.cjs`.
+The focused scenarios use a fail-closed, single-slot fake Explain host for missing,
+filtered, hidden, cancelled, replaced and returning PRs. No model or ADO calls
+are made. `node --test --test-name-pattern=Explain tests\approval-ui.test.cjs`
+also checks exact-request cancellation without current PR membership.
+
 PR investigation tests use fake models and synthetic ADO responses, including
 follow-up identity, cancellation, stale revisions, lens preview validation,
 explicit selection/confirmation, idempotency and partial/uncertain posting.
