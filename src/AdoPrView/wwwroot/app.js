@@ -311,7 +311,7 @@ function renderRowsContent(whenIdle = false) {
   if (S.rowPointerDown || (whenIdle && rowsInUse())) { S.rowsPending = true; renderStatus(); return; }
   S.rowsPending = false;
   const vis = baseVisible();
-  renderRunShelf();
+  renderRunShelfContent();
   renderVideoShelf();
   const rows = $('#rows');
   const empty = $('#empty');
@@ -715,10 +715,16 @@ function earlierRunCards(key) {
 // Runs stay inside their PR row. Departed PRs and ignored drafts keep collapsible
 // run entries here (unless hidden), only in the unfiltered view.
 function renderRunShelf(whenIdle = false) {
-  const shelf = $('#runShelf');
-  if (!shelf) return;
+  if (!$('#runShelf')) return;
   if (whenIdle && rowsInUse()) { S.rowsPending = true; renderStatus(); return; }
   const selection = captureRunOutputs();
+  renderRunShelfContent();
+  restoreRunOutputs(selection);
+}
+
+function renderRunShelfContent() {
+  const shelf = $('#runShelf');
+  if (!shelf) return;
   const unfiltered = !S.lane && !S.q.trim() && !S.repo && S.scope === 'all';
   const loaded = !!(S.snap.lastRefresh || S.snap.error);
   const present = new Set(S.snap.prs.filter(p => !ignoredDraft(p)).map(p => p.key));
@@ -736,7 +742,6 @@ function renderRunShelf(whenIdle = false) {
       ${open ? `<div class="detail"><div class="full stack">${renderRunCard(key, r)}${earlierRunCards(key)}</div></div>` : ''}
     </div>`;
   }).join('');
-  restoreRunOutputs(selection);
 }
 
 function updateCopilotRun(r) {

@@ -1408,6 +1408,42 @@ test('real row hit testing and action identity across refreshes', { timeout: 900
       }
     });
 
+    await t.test('Fix output preserves selected reading and bottom resume when a shelf run returns to the table', async () => {
+      for (const bottom of [true, false]) {
+        await reset(true);
+        await evaluate(`{const key='sample-service-id:101';window.returningPr=S.snap.prs.find(p=>p.key===key);
+          const output=Array.from({length:160},(_,n)=>'Returning synthetic line '+n+'\\n').join('');
+          S.runs.set('returning-run',{...window.returningPr,runId:'returning-run',status:'needs-attention',mayBeRunning:false,
+            startedAt:'2026-01-01T00:00:00Z',output,outputOffset:output.length});
+          render();setSnapshot({...S.snap,orderRevision:(S.snap.orderRevision||0)+1,prs:[]});}`);
+        await frame();
+        await click(await point('sample-service-id:101', '.run-heading'));
+        await move(10,10); await evaluate('document.activeElement?.blur()'); await frame();
+        await evaluate(`{window.returningOutput=document.querySelector('#runShelf [data-run-id="returning-run"] .run-output');
+          window.returningNode=window.returningOutput.firstChild;
+          window.returningOutput.scrollTop=${bottom ? 'window.returningOutput.scrollHeight' : '400'};
+          const start=${bottom ? 'window.returningNode.length-26' : 'window.returningNode.data.indexOf("Returning synthetic line 30\\n")'};
+          window.getSelection().setBaseAndExtent(window.returningNode,start,window.returningNode,start+25);
+          window.returningSelected=window.getSelection().toString();window.returningTop=window.returningOutput.scrollTop;}`);
+        await frame();
+        assert.equal(await evaluate('rowsInUse()'), false, 'Refresh returns the shelf run without interaction deferral');
+        await evaluate(`setSnapshot({...S.snap,orderRevision:(S.snap.orderRevision||0)+1,prs:[window.returningPr]})`);
+        await frame();
+        assert.equal(await evaluate('document.querySelector("#rows [data-run-id=\\"returning-run\\"] .run-output")===window.returningOutput'), true);
+        assert.equal(await evaluate('document.querySelector("#runShelf [data-run-id=\\"returning-run\\"]")'), null);
+        assert.equal(await evaluate('window.returningOutput.firstChild===window.returningNode'), true);
+        assert.equal(await evaluate('window.getSelection().toString()'), await evaluate('window.returningSelected'));
+        assert.equal(await evaluate('window.returningOutput.scrollTop'), await evaluate('window.returningTop'));
+        await evaluate(`{window.getSelection().removeAllRanges();const run=S.runs.get('returning-run'),extra='After shelf return\\n'.repeat(160);
+          updateCopilotRun({...run,output:run.output+extra,outputOffset:run.outputOffset+extra.length});}`);
+        await frame();
+        if (bottom) assert.ok(await evaluate('window.returningOutput.scrollHeight-window.returningOutput.clientHeight-window.returningOutput.scrollTop') <= 2,
+          'Clearing a retained bottom selection resumes after returning from the shelf');
+        else assert.equal(await evaluate('window.returningOutput.scrollTop'), await evaluate('window.returningTop'),
+          'A paused reader stays paused after returning from the shelf');
+      }
+    });
+
     await t.test('Fix output preserves bottom selection resume across idle new-run retargeting', async () => {
       for (const shelf of [false, true]) {
         await reset(true);
