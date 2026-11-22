@@ -1341,9 +1341,15 @@ test('real row hit testing and action identity across refreshes', { timeout: 900
       }
       // A selection spanning into a moving card defers the move until the selection clears.
       await select(`#rows [data-key="${key}"] .explain-output`, `#rows [data-key="${key}"] .copilot-run .run-output`);
+      assert.equal(await intact(), true, 'The crossing selection baseline is intact before the lifecycle event');
       await evaluate(`updateCopilotRun({...S.runs.get('sel-new'),status:'needs-attention',mayBeRunning:false,id:7,revision:3})`);
       await frame();
-      assert.deepEqual([await intact(), await lead(), await evaluate(`S.runRelocations.has('${key}')`)], [true, '0', true],
+      // The truthful status label and Cancel inside this range update in place; assert range identity, not exact selected text.
+      const attached = () => evaluate(`{const s=window.getSelection(),r=s.rangeCount&&s.getRangeAt(0);
+        !!r && r.startContainer===window.selNodes[0] && r.endContainer===window.selNodes[1] && window.selNodes.every(n=>n.isConnected) &&
+        window.selRow===document.querySelector('#rows [data-key="${key}"]') &&
+        s.toString().startsWith('Synthetic selectable prose for ${key}') && s.toString().trimEnd().endsWith('New')}`);
+      assert.deepEqual([await attached(), await lead(), await evaluate(`S.runRelocations.has('${key}')`)], [true, '0', true],
         'A selection crossing a run card keeps the group in place');
       await evaluate('window.getSelection().removeAllRanges()');
       await frame(); await frame();
