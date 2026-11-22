@@ -330,6 +330,11 @@ Focused browser checks can set `ROW_TEST_FILTER` to a `|`-separated list of
 subtest-name substrings, for example `Fix output` or `GUI `. Then run
 `node --test tests\row-actions.browser.test.cjs` and clear the variable.
 The harness uses disposable Edge profiles and intercepted service calls.
+Use `ROW_TEST_FILTER='Auto effects|Auto turns grey'` with
+`node --test --test-name-pattern='real row hit testing' tests\row-actions.browser.test.cjs`
+for saved Auto effects across all cleanup flags and merge strategies, both views,
+settings saves, keyboard set/cancel and pending/confirmed labels. The lightweight
+counterpart is `node --test --test-name-pattern='Auto' tests\approval-ui.test.cjs`.
 Use `GUI settings drawer|ordinary Approve preserves` for Settings focus,
 provider coexistence, dismissal, rerender/theme focus and approval busy checks.
 
