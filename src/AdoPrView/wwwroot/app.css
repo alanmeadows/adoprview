@@ -121,7 +121,7 @@ select {
 
 /* ------------------------------------------------------------------ table */
 main { flex: 1; overflow: auto; padding: 0 20px 28px; }
-.table { min-width: 1198px; }
+.table { min-width: 1238px; } /* 4px row inset + --cols; narrower cards clip the rightmost action slot. */
 .thead {
   position: sticky; top: 0; z-index: 5;
   display: grid; grid-template-columns: var(--cols); align-items: center;
