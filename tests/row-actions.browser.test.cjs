@@ -742,28 +742,27 @@ test('real row hit testing and action identity across refreshes', { timeout: 900
         await evaluate(`S.settings.autoComplete={mergeStrategy:'squash',deleteSourceBranch:false,transitionWorkItems:false};
           renderRows();window.autoEffectsHold=true;
           document.querySelector('[data-key="${key}"] .row [data-act="autocomplete"]').focus();`);
+        assert.equal(await evaluate(`document.activeElement===document.querySelector('[data-key="${key}"] .row [data-act="autocomplete"]')`), true);
         await keyboard('Enter', 13);
         await assertLabels('Setting auto-complete; waiting for ADO confirmation', 'autocomplete', true);
         evidence.push({ state: 'setting', labels: await labels() });
-        assert.equal(await evaluate(`document.activeElement===document.querySelector('[data-key="${key}"] .row [data-act="autocomplete"]')`), true);
         await evaluate('window.autoEffectsComplete()'); await frame();
         const confirmed = 'Auto-complete confirmed by ADO, set by Offline Reviewer — click to cancel';
         await assertLabels(confirmed, 'cancelAuto');
         evidence.push({ state: 'confirmed', labels: await labels() });
-        assert.equal(await evaluate(`document.activeElement===document.querySelector('[data-key="${key}"] .row [data-act="cancelAuto"]')`), true);
         await evaluate(`document.querySelector('[data-key="${key}"] .detail [data-act="cancelAuto"]').focus();`);
+        assert.equal(await evaluate(`document.activeElement===document.querySelector('[data-key="${key}"] .detail [data-act="cancelAuto"]')`), true);
         await keyboard(' ', 32);
         await assertLabels('Cancelling auto-complete; waiting for ADO confirmation', 'cancelAuto', true);
         evidence.push({ state: 'cancelling', labels: await labels() });
         await evaluate('window.autoEffectsComplete()'); await frame();
         await assertLabels('Set auto-complete (squash)');
         evidence.push({ state: 'cancelled', labels: await labels() });
-        assert.equal(await evaluate(`document.activeElement===document.querySelector('[data-key="${key}"] .detail [data-act="autocomplete"]')`), true);
         assert.deepEqual(await evaluate(`window.autoEffectsCalls.filter(c=>c.method==='autoComplete')`),
           [{ method: 'autoComplete', key, enable: true }, { method: 'autoComplete', key, enable: false }]);
         assert.deepEqual(await evaluate('window.confirmations'), []);
-        t.diagnostic(JSON.stringify({ scenarios: evidence, rpc: await evaluate(`window.autoEffectsCalls.filter(c=>c.method==='autoComplete')`) }));
       } finally {
+        t.diagnostic(JSON.stringify({ scenarios: evidence, rpc: await evaluate(`window.autoEffectsCalls.filter(c=>c.method==='autoComplete')`) }));
         await evaluate(`MockHost.rpc=window.autoEffectsRpc;delete window.autoEffectsRpc;
           if(S.drawer)closeDrawer();S.settings=${JSON.stringify(savedSettings)};`);
         await reset();
