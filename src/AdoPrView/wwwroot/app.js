@@ -67,6 +67,7 @@ const S = {
   pointerInRows: false,
   rowPointerDown: false,
   rowsPending: false,
+  runRelocations: new Set(),
   rowOrder: [],
   orderRevision: null,
   hideUndo: [],
@@ -224,6 +225,7 @@ function rowsInUse() {
 function flushRowUpdates() {
   if (rowsInUse() || crossRunOutputSelection()) return;
   if (S.pendingSnapshot) setSnapshot(S.pendingSnapshot);
+  for (const key of [...S.runRelocations]) relocateRunGroup(key);
   if (S.rowsPending) renderRows();
   renderStatus();
 }
@@ -313,7 +315,7 @@ function renderStatus() {
   if (S.settings) parts.push(`<span>auto-refresh ${Math.round(S.settings.refreshSeconds / 60 * 10) / 10}m · merge re-check ${S.settings.mergeCheckMinutes}m</span>`);
   parts.push('<span>Row order stays fixed until Refresh (R)</span>');
   if (s.mergeCheckStatus) parts.push(`<span>${esc(s.mergeCheckStatus)}</span>`);
-  if (S.pendingSnapshot || S.rowsPending) parts.push('<span>Table updates paused while interacting with rows</span>');
+  if (S.pendingSnapshot || S.rowsPending || S.runRelocations.size) parts.push('<span>Table updates paused while interacting with rows</span>');
   if (S.lane && vis.some(p => S.laneRetained.has(p.key) && p.lane !== S.lane))
     parts.push('<span>Rows that changed lane stay here until Refresh or a filter change</span>');
   if (s.error) parts.push(`<span class="err">⚠ ${esc(s.error)}</span>`);
@@ -357,6 +359,7 @@ function restoreExpansionFocus(control) {
 function renderRowsContent(whenIdle = false) {
   if (S.rowPointerDown || (whenIdle && (rowsInUse() || crossRunOutputSelection()))) { S.rowsPending = true; renderStatus(); return; }
   S.rowsPending = false;
+  S.runRelocations.clear();
   const vis = baseVisible();
   renderRunShelfContent();
   renderVideoShelf();
@@ -941,11 +944,18 @@ function updateCopilotRun(r) {
 function relocateRunGroup(key) {
   const detail = [...document.querySelectorAll('#rows > .pr')].find(el => el.dataset.key === key)?.querySelector(':scope > .detail[data-run-lead]');
   const p = S.snap.prs.find(x => x.key === key), lead = runLeads(key);
-  if (!detail || !p || detail.dataset.runLead === String(+lead)) return;
-  if (rowsInUse() || crossRunOutputSelection()) { S.rowsPending = true; renderStatus(); return; }
+  if (!detail || !p || detail.dataset.runLead === String(+lead)) { S.runRelocations.delete(key); return; }
   const cards = [...detail.querySelectorAll('.copilot-run')];
-  if (!cards.length) { renderRows(true); return; }
-  const selection = captureRunOutputs();
+  if (!cards.length) { S.runRelocations.delete(key); renderRows(true); return; }
+  // Only the run cards move. Defer while rows are in use or a non-output text selection touches a moving card;
+  // selections elsewhere (failed logs, Explain, other PRs) are left attached.
+  const selection = window.getSelection(), range = selection?.isCollapsed === false ? selection.getRangeAt(0) : null;
+  const outputOnly = range && cards.some(card => $('.run-output', card)?.contains(range.startContainer) && $('.run-output', card).contains(range.endContainer));
+  if (rowsInUse() || crossRunOutputSelection() || (range && !outputOnly && cards.some(card => range.intersectsNode(card)))) {
+    S.runRelocations.add(key); renderStatus(); return;
+  }
+  S.runRelocations.delete(key);
+  const outputSelection = captureRunOutputs();
   detail.querySelector('.lead-blockers')?.remove();
   let leading = detail.firstElementChild.classList.contains('full') ? detail.firstElementChild : null;
   if (lead) {
@@ -960,8 +970,9 @@ function relocateRunGroup(key) {
     const view = S.runOutputs.get(card.dataset.runId);
     if (view) { view.element.scrollTop = view.top; view.element.scrollLeft = view.left; view.top = view.element.scrollTop; }
   }
-  restoreRunOutputSelection(selection);
+  restoreRunOutputSelection(outputSelection);
   detail.dataset.runLead = String(+lead);
+  renderStatus();
 }
 
 const humanText = a => ({ reviews: 'Human reviewer approval needed (+1)', pop: 'Proof of Presence — tap your security key', autocomplete: 'Auto-complete not set', publish: 'Draft — publish when ready' }[a] || a);
@@ -969,8 +980,10 @@ const humanText = a => ({ reviews: 'Human reviewer approval needed (+1)', pop: '
 // A leading run must not bury blockers that no leading card above already conveys (e.g. conflicts, required reviews).
 function leadBlockersCard(p) {
   const approvalCard = !!(p.approval || S.approvals.has(p.key));
-  const reasons = p.error || (p.failedBuilds || []).length ? [] : [
-    ...(p.blockers || []).map(x => ['fail', x]),
+  // Exclude only reasons a leading card already shows: each failed-gate card conveys its "Build failed" blocker.
+  const shown = new Set((p.failedBuilds || []).map(fb => `Build failed: ${fb.name}`));
+  const reasons = [
+    ...(p.blockers || []).filter(x => !shown.has(x)).map(x => ['fail', x]),
     ...(p.humanActions || []).filter(a => a !== 'reviews' || !approvalCard).map(a => ['human', humanText(a)]),
   ];
   return reasons.length ? `<div class="card lead-blockers"><h3>Blocking</h3><div class="body"><ul class="list blockers">${reasons.map(([c, t]) => `<li><span class="dot ${c}"></span><span class="k">${esc(t)}</span></li>`).join('')}</ul></div></div>` : '';

@@ -1266,14 +1266,14 @@ test('real row hit testing and action identity across refreshes', { timeout: 900
       await evaluate(`window.lcCard=document.querySelector('#rows [data-key="${key}"] .copilot-run:not(.run-earlier)');
         updateCopilotRun({...S.runs.get('lc-old'),status:'completed',mayBeRunning:false,id:0})`);
       await frame();
-      assert.deepEqual([(await place()).lead, await evaluate('window.lcCard.isConnected && S.rowsPending')], ['1', true], 'Placement waits while rows are in use');
+      assert.deepEqual([(await place()).lead, await evaluate(`window.lcCard.isConnected && S.runRelocations.has('${key}') && !S.rowsPending`)], ['1', true], 'Placement waits while rows are in use');
       assert.equal((await place()).label, 'Fix PR', 'Label still updates in place while deferred');
       await move(10, 10);
       await frame();
       assert.deepEqual(await place(), { lead: '0', ids: ['lc-new', 'lc-old:earlier'], beforeContext: false, adjacent: true, label: 'Fix PR' },
         'Finished run group moves behind PR context once rows are idle');
       for (let i = 0; i < 3; i++) await evaluate(`updateCopilotRun({...S.runs.get('lc-new'),output:S.runs.get('lc-new').output+'tick\\n',outputOffset:S.runs.get('lc-new').outputOffset+5,revision:${i + 1}})`);
-      assert.equal(await evaluate(`document.querySelector('#rows [data-key="${key}"] .copilot-run').isConnected && !S.rowsPending`), true);
+      assert.equal(await evaluate(`document.querySelector('#rows [data-key="${key}"] .copilot-run').isConnected && !S.rowsPending && !S.runRelocations.size`), true);
       // Latest run uncertain but not maybe-running is still cancelable: it leads and the label is Show run.
       await evaluate(`updateCopilotRun({...S.runs.get('lc-new'),status:'needs-attention',mayBeRunning:false,id:7,revision:9})`);
       await frame();
@@ -1282,12 +1282,16 @@ test('real row hit testing and action identity across refreshes', { timeout: 900
 
     await t.test('layout a leading run never buries conflicts or required reviews that no leading card conveys', async () => {
       await send('Emulation.setDeviceMetricsOverride', { width: 1600, height: 1000, deviceScaleFactor: 1, mobile: false });
-      for (const c of [{ blockers: ['Merge conflicts'], humanActions: [], expect: 'Merge conflicts' },
-        { blockers: [], humanActions: ['reviews'], expect: 'Human reviewer approval needed (+1)' }]) {
+      for (const c of [{ blockers: ['Merge conflicts'], humanActions: [], expect: ['Merge conflicts'] },
+        { blockers: [], humanActions: ['reviews'], expect: ['Human reviewer approval needed (+1)'] },
+        { mixed: true, blockers: ['Merge conflicts with main'], humanActions: ['reviews'],
+          expect: ['Merge conflicts with main', 'Human reviewer approval needed (+1)'] }]) {
         await reset();
         const key = 'sample-service-id:105';
         await evaluate(`{const key='${key}',pr=S.snap.prs.find(p=>p.key===key);
-          Object.assign(pr,{failedBuilds:[],error:null,approval:null,blockers:${JSON.stringify(c.blockers)},humanActions:${JSON.stringify(c.humanActions)}});
+          const fbs=${!!c.mixed}?[{buildId:9105,name:'Synthetic mixed build',tasks:[{logId:105,name:'Synthetic mixed task',issues:[]}]}]:[];
+          Object.assign(pr,{failedBuilds:fbs,error:null,approval:null,humanActions:${JSON.stringify(c.humanActions)},
+            blockers:[...fbs.map(f=>'Build failed: '+f.name),...${JSON.stringify(c.blockers)}]});
           S.approvals.delete(key);
           S.runs.set('lead-live',{...pr,runId:'lead-live',status:'running',mayBeRunning:true,startedAt:'2026-01-02T00:00:00Z',output:'Live\\n'.repeat(200),outputOffset:1000});
           S.expanded.add(key);renderRows();}`);
@@ -1295,9 +1299,56 @@ test('real row hit testing and action identity across refreshes', { timeout: 900
         const layout = await layoutCards(key);
         const blocking = cardIndex(layout, 'Blocking'), run = layout.cards.findIndex(x => x.run);
         assert.ok(blocking < run && run < cardIndex(layout, 'Description'), layout.cards.map(x => x.head).join(' | '));
-        assert.equal(await evaluate(`document.querySelector('#rows [data-key="${key}"] .lead-blockers').textContent.includes(${JSON.stringify(c.expect)})`), true);
+        const blockingText = await evaluate(`document.querySelector('#rows [data-key="${key}"] .lead-blockers').textContent`);
+        for (const reason of c.expect) assert.ok(blockingText.includes(reason), `Blocking card misses ${reason}: ${blockingText}`);
+        if (c.mixed) {
+          assert.ok(cardIndex(layout, '✕ Failed gate') < run, 'The failed gate still leads the live run');
+          assert.ok(!blockingText.includes('Build failed'), 'The failed-gate card already conveys its own build blocker');
+        }
         assertOneStatusScope(layout);
       }
+    });
+
+    await t.test('layout run relocation leaves native text selections in failed logs and Explain prose attached', async () => {
+      await send('Emulation.setDeviceMetricsOverride', { width: 1600, height: 1000, deviceScaleFactor: 1, mobile: false });
+      await reset();
+      const key = 'sample-service-id:105', other = 'sample-service-id:101';
+      await evaluate(`{const key='${key}',pr=S.snap.prs.find(p=>p.key===key);
+        for(const k of [key,'${other}'])S.explanations.set(k,{key:k,requestId:'sel-'+k,sequence:1,status:'completed',output:'Synthetic selectable prose for '+k});
+        S.runs.set('sel-new',{...pr,runId:'sel-new',id:0,status:'completed',mayBeRunning:false,startedAt:'2026-01-02T00:00:00Z',output:'New\\n',outputOffset:4});
+        S.runs.set('sel-old',{...pr,runId:'sel-old',id:0,status:'completed',mayBeRunning:false,startedAt:'2026-01-01T00:00:00Z',output:'Old\\n',outputOffset:4});
+        S.expanded.add(key);S.expanded.add('${other}');renderRows();}`);
+      await evaluate(`new Promise((resolve,reject)=>{const deadline=Date.now()+3000;
+        const check=()=>document.querySelector('#rows [data-key="${key}"] pre.log[data-log]')?resolve():
+          Date.now()>deadline?reject(Error('Failed log tail did not load')):setTimeout(check,20);check();})`);
+      await move(10, 10);
+      const lead = () => evaluate(`document.querySelector('#rows [data-key="${key}"] .detail').dataset.runLead`);
+      const runs = () => evaluate(`[...document.querySelectorAll('#rows [data-key="${key}"] .copilot-run')].map(c=>c.dataset.runId)`);
+      const select = (from, to) => evaluate(`{const a=document.querySelector(${JSON.stringify(from)}),b=document.querySelector(${JSON.stringify(to)}),r=document.createRange();
+        const w=e=>document.createTreeWalker(e,NodeFilter.SHOW_TEXT),s=w(a).nextNode(),bw=w(b);let t=null,n;while((n=bw.nextNode()))t=n;r.setStart(s,0);r.setEnd(t,t.length);
+        window.getSelection().removeAllRanges();window.getSelection().addRange(r);
+        window.selNodes=[r.startContainer,r.endContainer];window.selText=window.getSelection().toString();window.selRow=document.querySelector('#rows [data-key="${key}"]');}`);
+      const intact = () => evaluate(`window.selNodes.every(n=>n.isConnected) && window.getSelection().toString()===window.selText &&
+        window.selRow===document.querySelector('#rows [data-key="${key}"]')`);
+      for (const [name, from, status] of [['failed log', `#rows [data-key="${key}"] pre.log[data-log]`, 'running'],
+        ['another PR Explain prose', `#rows [data-key="${other}"] .explain-output`, 'completed']]) {
+        await select(from, from);
+        await evaluate(`updateCopilotRun({...S.runs.get('sel-old'),status:'${status}',mayBeRunning:${status === 'running'},revision:${status === 'running' ? 1 : 2}})`);
+        await frame();
+        assert.equal(await intact(), true, `${name} selection stays attached across run relocation`);
+        assert.deepEqual([await lead(), await runs()], status === 'running' ? ['1', ['sel-old', 'sel-new']] : ['0', ['sel-new', 'sel-old']],
+          `${name} selection outside the run cards does not delay relocation`);
+      }
+      // A selection spanning into a moving card defers the move until the selection clears.
+      await select(`#rows [data-key="${key}"] .explain-output`, `#rows [data-key="${key}"] .copilot-run .run-output`);
+      await evaluate(`updateCopilotRun({...S.runs.get('sel-old'),status:'running',mayBeRunning:true,revision:3})`);
+      await frame();
+      assert.deepEqual([await intact(), await lead(), await evaluate(`S.runRelocations.has('${key}') && !S.rowsPending`)], [true, '0', true],
+        'A selection crossing a run card keeps the group in place');
+      await evaluate('window.getSelection().removeAllRanges()');
+      await frame(); await frame();
+      assert.deepEqual([await lead(), await runs(), await evaluate('S.runRelocations.size')], ['1', ['sel-old', 'sel-new'], 0],
+        'The group moves once the selection clears');
     });
 
     await t.test('layout narrow-window identity cue names the panned row without covering gates or actions', async () => {

@@ -800,6 +800,26 @@ static class MergeChecksTests
             Check(result is not null && f.Service.Current.Completed.Count == 0, "Unwatched author or repository was reinserted into history");
         });
 
+        await test("completed history: completions closed during a refresh are kept against the projection-time clock; later dates are not", async () =>
+        {
+            using var f = new Fixture();
+            var a = f.Add(); var b = f.Add(id: 2);
+            var listed = f.Add(id: 3); listed.Status = "completed"; listed.Closed = "2026-11-01T00:30:00Z";
+            var future = f.Add(id: 4); future.Status = "completed"; future.Closed = "2026-11-01T05:00:00Z";
+            f.BeforeCompletedList = () => f.Clock.Advance(TimeSpan.FromHours(1));
+            f.BeforePrRead = (pr, _) =>
+            {
+                if (pr == a) { f.Clock.Advance(TimeSpan.FromHours(1)); a.Status = "completed"; a.Closed = "2026-11-01T01:30:00Z"; }
+                if (pr == b) { b.Status = "completed"; b.Closed = "2026-11-01T05:00:00Z"; }
+            };
+            await f.Service.RefreshAsync();
+            var s = f.Service.Current;
+            var keys = s.Completed.Select(x => x.Key).ToList();
+            Check(keys.Count(k => k == a.Key) == 1 && keys.Count(k => k == listed.Key) == 1 && !keys.Contains(future.Key) && !keys.Contains(b.Key),
+                "Projection used a stale or missing upper bound: " + string.Join(",", keys));
+            Check(s.Prs.All(x => x.Key != a.Key && x.Key != b.Key), "A terminal detail stayed active");
+        });
+
         await test("completed history: wire cutoff is invariant under a non-Gregorian culture and future closed dates are rejected", async () =>
         {
             var culture = System.Globalization.CultureInfo.CurrentCulture;
@@ -881,6 +901,7 @@ static class MergeChecksTests
         public (string Body, HttpStatusCode Status)? CompletedResponse;
         public readonly List<string> CompletedQueries = [];
         public Action<PullRequest, int>? BeforePrRead;
+        public Action? BeforeCompletedList;
         public TaskCompletionSource? HoldPatch;
         public TaskCompletionSource PatchEntered = new(TaskCreationOptions.RunContinuationsAsynchronously);
         readonly List<PullRequest> _prs = [];
@@ -937,6 +958,7 @@ static class MergeChecksTests
                 else if (tail.Length == 2 && uri.Query.Contains("searchCriteria.status=completed"))
                 {
                     CompletedQueries.Add(Uri.UnescapeDataString(uri.Query));
+                    BeforeCompletedList?.Invoke();
                     if (CompletedResponse is { } r) return Response(r.Body, r.Status);
                     // Unwatched completions fill the raw page so a cap can be reached with no watched match.
                     var noise = Enumerable.Range(9000, CompletedNoise).Select(n => { var x = new PullRequest(repo, n) { Status = "completed", Author = "stranger", Closed = "2026-10-31T00:00:00Z" }; return x.Json(); });

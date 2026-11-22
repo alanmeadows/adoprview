@@ -145,8 +145,8 @@ public sealed partial class PrService
             var repoErrors = new ConcurrentBag<string>();
             var completed = new ConcurrentBag<CompletedPr>();
             var completedWarnings = new ConcurrentBag<string>();
-            var now = _time.GetUtcNow();
-            var since = now - CompletedWindow;
+            // The lower bound is fixed at refresh start; each projection compares against the clock when it runs.
+            var since = _time.GetUtcNow() - CompletedWindow;
             if (ReviewBotUnscoped(settings.ReviewBot))
                 repoErrors.Add("Review bot is configured without reviewBot.organization; its gate is off until the organization is set.");
             string? meName = null;
@@ -158,7 +158,7 @@ public sealed partial class PrService
                 {
                     var me = await GetMeAsync(repo.Org);
                     meName = me.Name;
-                    history = CompletedHistoryAsync(repo, me.Id, whitelist, hidden, since, now, completed, completedWarnings);
+                    history = CompletedHistoryAsync(repo, me.Id, whitelist, hidden, since, completed, completedWarnings);
                     var list = await _ado.GetAsync($"{Api(repo.Org, repo.Project)}git/repositories/{Esc(repo.Repo)}/pullrequests?searchCriteria.status=active&$top=1000&api-version=7.1");
                     var work = new List<Task>();
                     foreach (var pr in Arr(list["value"]))
@@ -206,7 +206,8 @@ public sealed partial class PrService
             var mergeStatus = await RecheckMergesAsync(prs, heads, repoErrors, Interlocked.Exchange(ref _forceMergeRequested, 0) != 0);
             var active = Sort(prs.Where(p => p.IsActive));
             // Only an obtained detail/re-check that says completed moves a watched PR into history.
-            var moved = prs.Where(p => !p.IsActive).Select(p => ToCompleted(p, since, now)).OfType<CompletedPr>();
+            var now = _time.GetUtcNow();
+            var moved = prs.Where(p => !p.IsActive).Select(p => ToCompleted(p, since, now)).OfType<CompletedPr>().ToList();
 
             Publish(new Snapshot { Prs = active, LastRefresh = _time.GetUtcNow(), Me = meName ?? prev.Me,
                 RepoErrors = repoErrors.ToList(), MergeCheckStatus = mergeStatus,
@@ -223,7 +224,7 @@ public sealed partial class PrService
     }
 
     async Task CompletedHistoryAsync(RepoRef repo, string meId, IReadOnlyList<string> whitelist, HashSet<string> hidden,
-        DateTimeOffset since, DateTimeOffset now, ConcurrentBag<CompletedPr> completed, ConcurrentBag<string> warnings)
+        DateTimeOffset since, ConcurrentBag<CompletedPr> completed, ConcurrentBag<string> warnings)
     {
         try
         {
@@ -233,6 +234,7 @@ public sealed partial class PrService
                 $"&$top={CompletedTop}&api-version=7.1");
             if (list["value"] is not JsonArray values)
                 throw new AdoException("ADO did not return a completed pull request list.");
+            var now = _time.GetUtcNow();
             if (values.Count >= CompletedTop)
                 warnings.Add($"{repo.Repo}: Checked {CompletedTop} completions in this repository; watched PRs may be missing.");
             foreach (var pr in values.OfType<JsonNode>())
