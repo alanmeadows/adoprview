@@ -9,6 +9,10 @@ const { pathToFileURL } = require('node:url');
 
 // No browser packages required: Node 22+ and a local Chromium browser.
 test('real row hit testing and action identity across refreshes', { timeout: 90000 }, async t => {
+  if (process.env.ROW_TEST_FILTER) {
+    const run = t.test.bind(t), names = process.env.ROW_TEST_FILTER.split('|');
+    t.test = (name, ...args) => names.some(part => name.includes(part)) ? run(name, ...args) : Promise.resolve();
+  }
   const profile = await mkdtemp(path.join(os.tmpdir(), 'ado-row-tests-'));
   const browser = process.env.ROW_TEST_BROWSER || 'C:\\Program Files (x86)\\Microsoft\\Edge\\Application\\msedge.exe';
   const child = spawn(browser, [
@@ -53,6 +57,13 @@ test('real row hit testing and action identity across refreshes', { timeout: 900
     const press = p => send('Input.dispatchMouseEvent', { type: 'mousePressed', button: 'left', clickCount: 1, x: p.x, y: p.y });
     const release = p => send('Input.dispatchMouseEvent', { type: 'mouseReleased', button: 'left', clickCount: 1, x: p.x, y: p.y });
     const click = async p => { await move(p.x, p.y); await press(p); await release(p); };
+    const keyboard = async (key, windowsVirtualKeyCode, modifiers = 0) => {
+      const code = key === ' ' ? 'Space' : key;
+      await send('Input.dispatchKeyEvent', { type: 'keyDown', key, code, windowsVirtualKeyCode, modifiers,
+        ...(key === 'Enter' ? { text: '\r' } : {}) });
+      await send('Input.dispatchKeyEvent', { type: 'keyUp', key, code, windowsVirtualKeyCode, modifiers });
+      await frame();
+    };
     await send('Page.enable');
     await send('Page.bringToFront');
     await send('Emulation.setEmulatedMedia', { features: [{ name: 'prefers-reduced-motion', value: 'no-preference' }] });
@@ -569,6 +580,126 @@ test('real row hit testing and action identity across refreshes', { timeout: 900
       assert.deepEqual((await calls()).at(-1), { method: 'openUrl', url: expectedUrl(p) });
     });
 
+    await t.test('GUI keyboard expands rows, build gates and retained run headings without launching an action', async () => {
+      await reset(true);
+      const key = 'sample-service-id:101';
+      await evaluate(`S.logs.clear();S.snap.prs=S.snap.prs.map(p=>p.key==='${key}'?{...p,gates:{...p.gates,
+        build:{state:'fail',label:'Synthetic build'},comments:{state:'fail',label:'Open thread'}},
+        failedBuilds:[{buildId:9001,name:'Synthetic build',tasks:[{logId:101,name:'Synthetic failed task',issues:[]}]}]}:p);render();
+        window.inspectionClicks=[];window.inspectionClick=e=>{
+          const c=e.target.closest('[role="button"][data-act][aria-expanded]');
+          if(c)window.inspectionClicks.push({key:c.closest('.pr').dataset.key,act:c.dataset.act,gate:c.dataset.gate||null});
+        };document.addEventListener('click',window.inspectionClick,true);`);
+      const tabTo = async selector => {
+        await evaluate(`document.querySelector('#settingsBtn').focus()`);
+        for (let n = 0; n < 65; n++) {
+          await keyboard('Tab', 9);
+          if (await evaluate(`document.activeElement.matches(${JSON.stringify(selector)})`)) return;
+        }
+        assert.fail(`Tab never reached ${selector}`);
+      };
+      const state = () => evaluate(`({key:document.activeElement.closest('.pr')?.dataset.key,
+        expanded:document.activeElement.getAttribute('aria-expanded'),open:S.expanded.has('${key}')})`);
+      const row = `[data-key="${key}"] .c-pr`;
+      await tabTo(row);
+      assert.equal(await evaluate(`getComputedStyle(document.activeElement).outlineStyle`), 'solid');
+      assert.equal(await evaluate(`document.querySelector('[data-key="${key}"] .detail')`), null);
+      assert.equal(await evaluate(`!!document.querySelector('button button,[role="button"] button')`), false);
+      for (const [keyName, code] of [['Enter', 13], [' ', 32]]) {
+        const scroll = await evaluate(`({page:scrollY,main:document.querySelector('main').scrollTop})`);
+        const clicks = await evaluate('window.inspectionClicks.length');
+        await keyboard(keyName, code);
+        assert.deepEqual(await state(), {key,expanded:'true',open:true});
+        assert.equal(await evaluate('window.inspectionClicks.length'), clicks + 1, 'One activation per key press');
+        if (keyName === ' ') assert.deepEqual(await evaluate(`({page:scrollY,main:document.querySelector('main').scrollTop})`), scroll);
+        await send('Input.dispatchKeyEvent', {type:'keyDown',key:keyName,code:keyName===' '?'Space':keyName,
+          windowsVirtualKeyCode:code,autoRepeat:true});
+        await send('Input.dispatchKeyEvent', {type:'keyUp',key:keyName,windowsVirtualKeyCode:code});
+        assert.deepEqual(await state(), {key,expanded:'true',open:true});
+        assert.equal(await evaluate('window.inspectionClicks.length'), clicks + 1, 'Held keys must not toggle again');
+        await keyboard(keyName, code);
+        assert.deepEqual(await state(), {key,expanded:'false',open:false});
+      }
+      for (const gate of ['build', 'comments']) {
+        for (const [keyName, code] of [['Enter', 13], [' ', 32]]) {
+          await tabTo(`[data-key="${key}"] [data-act="gate"][data-gate="${gate}"]`);
+          assert.deepEqual(await state(), {key,expanded:'false',open:false});
+          await keyboard(keyName, code);
+          assert.deepEqual(await state(), {key,expanded:'true',open:true});
+          assert.equal(await evaluate('document.activeElement.dataset.gate'), gate);
+          await keyboard('Escape', 27);
+          assert.deepEqual(await state(), {key,expanded:'false',open:false});
+        }
+      }
+      const inactiveGates = await evaluate(`[...document.querySelectorAll('[data-key="${key}"] .pill:not([data-act])')].map(c=>({
+        role:c.getAttribute('role'),tab:c.getAttribute('tabindex'),expanded:c.getAttribute('aria-expanded')}))`);
+      assert.ok(inactiveGates.length > 0);
+      assert.ok(inactiveGates.every(c => c.role === null && c.tab === null && c.expanded === null));
+      await evaluate(`document.querySelector('#search').focus();
+        {const pr=S.snap.prs.find(p=>p.key==='${key}');
+        S.runs.set('keyboard-shelf',{...pr,runId:'keyboard-shelf',status:'running',output:'Synthetic retained output'});
+        setSnapshot({...S.snap,prs:S.snap.prs.filter(p=>p.key!=='${key}')});renderRows();}`);
+      for (const [keyName, code] of [['Enter', 13], [' ', 32]]) {
+        await tabTo('#runShelf .run-heading');
+        assert.deepEqual(await state(), {key,expanded:'false',open:false});
+        const scroll = await evaluate(`({page:scrollY,main:document.querySelector('main').scrollTop})`);
+        await keyboard(keyName, code);
+        assert.deepEqual(await state(), {key,expanded:'true',open:true});
+        assert.equal(await evaluate(`document.querySelector('#runShelf .run-output').textContent`), 'Synthetic retained output');
+        if (keyName === ' ') assert.deepEqual(await evaluate(`({page:scrollY,main:document.querySelector('main').scrollTop})`), scroll);
+        await keyboard(keyName, code);
+        assert.deepEqual(await state(), {key,expanded:'false',open:false});
+        assert.equal(await evaluate(`document.querySelector('#runShelf .run-output')`), null);
+      }
+      const requests = await calls();
+      assert.ok(requests.every(c => c.method === 'logTail'), JSON.stringify(requests));
+      assert.ok(requests.every(c => c.key === key && c.buildId === 9001 && c.logId === 101));
+      assert.deepEqual(await evaluate('window.confirmations'), []);
+      await evaluate('document.removeEventListener("click",window.inspectionClick,true)');
+    });
+
+    await t.test('GUI keyboard inspection focus survives refresh, Escape and collapsed shelf streaming without hidden targets', async () => {
+      await reset(true);
+      const key = 'sample-service-id:101';
+      await keyboard('Tab', 9);
+      await evaluate(`document.querySelector('[data-key="${key}"] .c-pr').focus();window.swapRows()`);
+      assert.equal(await evaluate('!!S.pendingSnapshot'), true);
+      await keyboard('Enter', 13);
+      assert.equal(await evaluate(`document.activeElement.closest('.pr').dataset.key`), key);
+      assert.equal(await evaluate(`document.activeElement.getAttribute('aria-expanded')`), 'true');
+      await evaluate('renderRows()');
+      assert.equal(await evaluate(`document.activeElement.closest('.pr').dataset.key`), key);
+      await keyboard('Escape', 27);
+      assert.equal(await evaluate(`document.activeElement.getAttribute('aria-expanded')`), 'false');
+      await keyboard(' ', 32);
+      assert.equal(await evaluate(`document.activeElement.getAttribute('aria-expanded')`), 'true');
+      await evaluate(`document.querySelector('#search').focus()`); await frame();
+      assert.equal(await evaluate(`document.querySelector('.pr').dataset.key`), 'sample-api-id:104');
+      await evaluate(`{const pr=S.snap.prs.find(p=>p.key==='${key}');
+        S.runs.set('keyboard-stream',{...pr,runId:'keyboard-stream',status:'running',output:'Initial output'});
+        setSnapshot({...S.snap,prs:S.snap.prs.filter(p=>p.key!=='${key}')});renderRows();
+        document.querySelector('#runShelf .run-heading').focus();
+        updateCopilotRun({...S.runs.get('keyboard-stream'),output:'Streamed output'});}`);
+      assert.equal(await evaluate(`document.activeElement.matches('#runShelf .run-heading')`), true);
+      await keyboard(' ', 32);
+      assert.equal(await evaluate(`document.querySelector('#runShelf .run-output').textContent`), 'Streamed output');
+      await keyboard('Escape', 27);
+      assert.equal(await evaluate(`document.activeElement.getAttribute('aria-expanded')`), 'false');
+      await evaluate(`setSnapshot({...S.snap,prs:S.snap.prs.map(p=>({...p,title:'Updated after shelf focus'}))})`);
+      assert.equal(await evaluate('!!S.pendingSnapshot'), true);
+      await keyboard('Tab', 9);
+      if (!await evaluate(`!!document.activeElement.closest('header')`)) await keyboard('Tab', 9);
+      assert.equal(await evaluate(`!!document.activeElement.closest('header')`), true);
+      assert.equal(await evaluate('S.pendingSnapshot'), null);
+      assert.equal(await evaluate(`document.querySelector('#rows .title').textContent`), 'Updated after shelf focus');
+      await evaluate(`S.q='no matching inspection target';render()`);
+      assert.equal(await evaluate(`document.querySelector('[data-key="${key}"]')`), null);
+      assert.equal(await evaluate(`document.activeElement.closest('.pr')`), null);
+      await evaluate(`S.q='';S.settings.hidden.push('${key}');render()`);
+      assert.equal(await evaluate(`document.querySelector('[data-key="${key}"]')`), null);
+      assert.deepEqual(await calls(), []);
+    });
+
     await t.test('keyboard-focused controls retain their PR until focus leaves rows', async () => {
       await reset(true);
       await send('Input.dispatchKeyEvent', { type: 'keyDown', key: 'Tab', code: 'Tab', windowsVirtualKeyCode: 9 });
@@ -1029,7 +1160,7 @@ test('real row hit testing and action identity across refreshes', { timeout: 900
       assert.equal(await evaluate('S.scope'), 'drafts');
       assert.equal(await evaluate('S.lane'), null);
       assert.deepEqual(await evaluate(`[...document.querySelectorAll('#laneCounters .n')].map(e=>e.textContent)`), ['0', '0', '0', '0']);
-      assert.deepEqual(await evaluate(`[...document.querySelectorAll('#rows [data-key="${key}"] .row [data-act]')].map(e=>e.dataset.act)`), ['open']);
+      assert.deepEqual(await evaluate(`[...document.querySelectorAll('#rows [data-key="${key}"] .row [data-act]')].map(e=>e.dataset.act)`), ['toggle', 'open']);
       await click(await point(key, '.row [data-act="open"]')); await frame();
       assert.deepEqual((await calls()).filter(c => c.method === 'openUrl'),
         [{ method: 'openUrl', url: 'https://dev.azure.com/contoso/Sample/_git/sample-service/pullrequest/101' }]);
@@ -1060,6 +1191,9 @@ test('real row hit testing and action identity across refreshes', { timeout: 900
           `<a href="javascript:${mark}href')">raw js link</a>`,
           `[markdown js link](javascript:${mark}mdlink'))`,
           `<a href="data:text/html,<script>alert(1)</script>">data link</a>`,
+          `<span class="fake-inspection" role="button" tabindex="0" aria-expanded="false" data-act="open">Open trap</span>`,
+          `<div class="row"><div class="gate"><span class="pill fake-inspection" role="button" tabindex="0" aria-expanded="false" data-act="gate" data-gate="pop">PoP trap</span></div></div>`,
+          `<div class="row"><div class="c-pr fake-inspection" role="button" tabindex="0" aria-expanded="false" data-act="toggle">Toggle trap</div></div>`,
         ].join('\n\n');
       };
       const prepared = await evaluate(`(()=>{
@@ -1083,6 +1217,17 @@ test('real row hit testing and action identity across refreshes', { timeout: 900
       await frame();
       await evaluate('new Promise(resolve=>setTimeout(resolve,750))');
       await frame();
+      const traps = await evaluate(`document.querySelectorAll('[data-key="${key}"] .md .fake-inspection').length`);
+      assert.equal(traps, 6, 'Description and thread fixtures retain the hostile keyboard attributes');
+      for (let n = 0; n < traps; n++) {
+        await evaluate(`document.querySelectorAll('[data-key="${key}"] .md .fake-inspection')[${n}].focus()`);
+        for (const [keyName, code] of [['Enter', 13], [' ', 32]]) {
+          await keyboard(keyName, code);
+          assert.equal(await evaluate(`S.expanded.has('${key}')`), true, 'Markdown must not dispatch inspection or row actions');
+          assert.deepEqual(await calls(), [], 'Markdown keyboard attributes must not reach the host');
+          assert.deepEqual(await evaluate('window.bridge'), []);
+        }
+      }
       const result = await evaluate(`(()=>{
         const row=document.querySelector('[data-key="${key}"]');
         const bodies={desc:row.querySelector('.detail .body.md'),thread:row.querySelector('.detail .thread .md')};
@@ -1122,6 +1267,7 @@ test('real row hit testing and action identity across refreshes', { timeout: 900
           const deadline=Date.now()+10000;
           const check=()=>window.__ready?resolve():Date.now()>deadline?reject(Error('UI did not boot')):setTimeout(check,20);check();
         })`);
+        await send('Page.bringToFront');
         await frame();
       };
       for (const hint of ['', '&theme=github']) {

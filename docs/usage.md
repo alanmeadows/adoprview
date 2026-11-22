@@ -203,7 +203,9 @@ their normal undo behavior.
 
 ## Expanded details and diagnostics
 
-Click a row to expand it. The details show the PR description and unresolved
+Click a row to expand it, or Tab to its title and press Enter or Space. Gate-detail
+controls and retained-run headings support the same keyboard activation without
+requiring a Fix or approval action. The details show the PR description and unresolved
 threads, a **Status** card listing what remains (with **Fix PR** and **Copy
 prompt**), a **Merge** card (merge status, merge re-check, branches,
 auto-complete, review bot, author, created), the policies and the reviewers with
