@@ -346,7 +346,8 @@ public sealed class MainWindow : Window, IApprovalUi
             settings.WslRepoDirectories.TryGetValue($"{pr.Org}/{pr.Project}/{pr.Repo}".ToLowerInvariant(), out var directory);
             var prompt = source.Prompt + $"\nVerified source: {source.SourceRef} at {source.SourceCommit}. The isolated run branch is not the PR source branch; do not assume they have the same name.\n";
             var started = await _copilot.StartAsync(new(pr.Key, pr.Id, pr.Title, pr.Org, pr.Project, pr.Repo, pr.RepoId,
-                source.SourceRef, source.SourceCommit, prompt, settings.WslDistro, directory, PushToSource: true));
+                source.SourceRef, source.SourceCommit, prompt, settings.WslDistro, directory, PushToSource: true)
+                { AdditionalInstructions = source.AdditionalInstructions });
             return RunForUi(started);
         }
         finally { _copilotStarting.TryRemove(key, out _); }

@@ -31,6 +31,12 @@ calls used see [DESIGN.md](DESIGN.md); for building and tests see
   repositories. An unreadable or invalid settings file is reported at startup and
   left unchanged; it is never replaced with defaults. Fields the app does not
   recognize are preserved when it saves.
+- Failed saves and unrelated Settings actions retain unsaved form edits; only
+  **Save settings** commits those edits. Closing without saving discards them;
+  immediate theme changes retain their separate save behavior. Failed writes
+  leave the committed settings unchanged, so a later unrelated action cannot
+  silently save a failed draft. Pending Save/Add responses preserve independent
+  inputs, newer edits, and drafts in a reopened Settings drawer.
 - **My PRs** are those created by your authenticated ADO identity in each
   organization. Watched authors match display name, UPN or alias. The **All /
   Mine / Watched** switch filters the table by author; ownership is not a lane.
@@ -206,7 +212,9 @@ their normal undo behavior.
 
 ## Expanded details and diagnostics
 
-Click a row to expand it. The details show the PR description and unresolved
+Click a row to expand it, or Tab to its title and press Enter or Space. Gate-detail
+controls and retained-run headings support the same keyboard activation without
+requiring a Fix or approval action. The details show the PR description and unresolved
 threads, a **Status** card listing what remains (with **Fix PR** and **Copy
 prompt**), a **Merge** card (merge status, merge re-check, branches,
 auto-complete, review bot, author, created), the policies and the reviewers with
@@ -215,6 +223,10 @@ their votes. Build policies have **Re-queue** and a link to the build.
 For a failed build policy, a **Failed gate** card lists the failed tasks and
 their reported issues. The first failed task's log tail loads automatically;
 other tasks have **Load log tail**. Loaded logs offer **Timestamps** and **Copy**.
+A failed log read stays visible with **Retry log tail** for that exact task.
+During retry, its previous error remains visible and duplicate requests are
+blocked; another failure stays retryable. Refreshing or reopening does not
+start an automatic retry loop.
 **Re-queue** asks ADO to re-run that build policy evaluation, and **Open logs**
 opens the build in your browser.
 
@@ -506,6 +518,20 @@ Copilot or open a separate terminal. **Copy prompt** remains available as an
 alternative. Fix is optional: viewing PRs needs neither WSL nor Copilot.
 
 The generated Fix/Copy prompt is configurable in settings:
+
+- `additionalTriageInstructions` adds optional text at the **end** without
+  replacing the default/custom Ask. The drawer labels these separately as
+  **Custom Ask (override)** and **Additional instructions (append)**. Copy
+  prompt includes the suffix after its generated boundaries; a new inline launch
+  includes it once after the captured source and verified publish target.
+  Ask, additional guidance, skill and reviewer choices are captured together
+  before asynchronous source/log reads; later settings saves apply to future prompts.
+  Saving an unchanged drawer preserves the stored guidance's original line endings.
+  Copy prompt and Fix reject NUL or effective prompts over 1,048,576 characters.
+  Launch also checks the complete prompt after adding verified publication context;
+  instructions are never silently truncated.
+  Blank leaves existing behavior unchanged. Saving does not modify running or
+  recovered sessions, their prompts or history; all existing gates still apply.
 
 - `triageInstructions` replaces the default "Ask" text verbatim.
 - `fixSkill` names an optional local Copilot skill for the default Ask. It is not

@@ -22,9 +22,12 @@ static class BuildCacheScopeTests
             foreach (var (org, project, _) in Scopes)
             {
                 // Fetch scopes one after another so a cache keyed only by build id would be hit.
-                store.Current.Repos.Add(new RepoRef { Org = org, Project = project, Repo = "repo", RepoId = $"{org}-{project}-repo", ProjectId = project + "-id" });
+                store.Current.Repos.Add(new RepoRef { Org = org, Project = project, Repo = "repo" });
                 await service.RefreshAsync();
                 Check(service.Current.Error is null && service.Current.RepoErrors.Count == 0, "Refresh failed");
+                var savedRepo = store.Current.Repos.Single(r => r.Org == org && r.Project == project);
+                Check(savedRepo.RepoId == $"{org}-{project}-repo" && savedRepo.ProjectId == project + "-id",
+                    "Refresh did not persist discovered repository identity in the committed settings");
             }
             foreach (var (org, project, lines) in Scopes)
             {

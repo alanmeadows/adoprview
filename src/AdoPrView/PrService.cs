@@ -153,7 +153,12 @@ public sealed partial class PrService
                         {
                             var rid = S(pr["repository"]?["id"]);
                             var pid = S(pr["repository"]?["project"]?["id"]);
-                            _store.Update(_ => { repo.RepoId = rid; repo.ProjectId = pid; });
+                            _store.Update(s =>
+                            {
+                                var storedRepo = s.Repos.FirstOrDefault(r => r.Key == repo.Key);
+                                if (storedRepo is not null) { storedRepo.RepoId = rid; storedRepo.ProjectId = pid; }
+                            });
+                            repo.RepoId = rid; repo.ProjectId = pid;
                         }
                         var key = $"{S(pr["repository"]?["id"])}:{S(pr["pullRequestId"])}";
                         if (hidden.Contains(key) || settings.IgnoreDrafts && B(pr["isDraft"]))
@@ -871,9 +876,20 @@ public sealed partial class PrService
         catch { context.Dispose(); throw; }
     }
 
-    public async Task<(PrView Pr, string SourceRef, string SourceCommit, string Prompt)> GetCopilotSourceAsync(string key)
+    sealed record FixPromptSettings(string? TriageInstructions, string? AdditionalTriageInstructions,
+        string? FixSkill, string[] FixReviewerModels);
+
+    FixPromptSettings CaptureFixPromptSettings()
+    {
+        var settings = _store.Current;
+        return new(settings.TriageInstructions, settings.AdditionalTriageInstructions,
+            settings.FixSkill, (settings.FixReviewerModels ?? []).ToArray());
+    }
+
+    public async Task<(PrView Pr, string SourceRef, string SourceCommit, string Prompt, string? AdditionalInstructions)> GetCopilotSourceAsync(string key)
     {
         var pr = Find(key);
+        var settings = CaptureFixPromptSettings();
         void CheckAvailable()
         {
             if (!Monitored(pr) ||
@@ -904,12 +920,15 @@ public sealed partial class PrService
         var previewSource = S(fresh["lastMergeSourceCommit"]?["commitId"]);
         if (!string.IsNullOrEmpty(previewSource) && !commit.Equals(previewSource, StringComparison.OrdinalIgnoreCase))
             throw new InvalidOperationException("The PR source changed while its ADO preview was updating. Refresh and retry once ADO reports the current source.");
-        var prompt = await BuildTriagePromptAsync(key);
+        var prompt = await BuildTriagePromptAsync(key, settings, includeAdditionalInstructions: false);
         CheckAvailable();
-        return (pr, sourceRef, commit, prompt);
+        return (pr, sourceRef, commit, prompt, settings.AdditionalTriageInstructions);
     }
 
-    public async Task<string> BuildTriagePromptAsync(string key)
+    public Task<string> BuildTriagePromptAsync(string key, bool includeAdditionalInstructions = true) =>
+        BuildTriagePromptAsync(key, CaptureFixPromptSettings(), includeAdditionalInstructions);
+
+    async Task<string> BuildTriagePromptAsync(string key, FixPromptSettings settings, bool includeAdditionalInstructions)
     {
         var pr = Find(key);
         var sb = new StringBuilder();
@@ -967,7 +986,6 @@ public sealed partial class PrService
             }
             sb.AppendLine();
         }
-        var settings = _store.Current;
         var instructions = settings.TriageInstructions;
         var skill = settings.FixSkill?.Trim();
         sb.AppendLine("## Ask");
@@ -1032,7 +1050,10 @@ public sealed partial class PrService
             "Do not create a new PR, merge/complete a PR, approve it, set auto-complete, bypass policies, force-push, or push anything other than the source-branch update authorized above. " +
             "Do not resolve human-authored review threads. Preserve generated work and report what changed and what remains unverified. " +
             "Output is inline and noninteractive; no separate terminal or desktop session is available. If existing CLI permissions prevent required work, explain the blocked permission rather than bypassing it.");
-        return sb.ToString();
+        var prompt = sb.ToString();
+        var effective = CopilotRunService.AppendAdditionalInstructions(prompt, settings.AdditionalTriageInstructions);
+        CopilotRunService.ValidatePrompt(effective);
+        return includeAdditionalInstructions ? effective : prompt;
     }
 
     [GeneratedRegex(@"(?m)^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\.\d+Z ")]

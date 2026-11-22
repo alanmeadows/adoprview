@@ -50,6 +50,79 @@ static class CopilotRunTests
 
     public static async Task Run(Func<string, Func<Task>, Task> test)
     {
+        foreach (var (name, prompt, additional) in new[]
+        {
+            ("base NUL", "base\0prompt", "suffix"),
+            ("suffix NUL", "base prompt", "suffix\0"),
+            ("oversized suffix", "base prompt", new string('s', 1024 * 1024)),
+            ("combined effective size", new string('b', 1024 * 1024 - 32), new string('s', 32)),
+        })
+            await test("Copilot additional instructions reject invalid effective input before any transport: " + name, async () =>
+            {
+                var fake = new FakeTransport();
+                await using var service = new CopilotRunService(fake);
+                await ExpectError(async () => await service.StartAsync(Request(prompt: prompt) with
+                    { AdditionalInstructions = additional }), "contains NUL, or exceeds 1 MiB");
+                Check(fake.Calls.IsEmpty && service.Runs.Count == 0, "Invalid input staged, launched or reserved a run");
+            });
+        foreach (var overflow in new[] { 0, 1 })
+            await test($"Copilot additional instructions enforce complete staged boundary including publication context (overflow={overflow})", async () =>
+            {
+                var baseline = await CopilotSourceTests.CreatePrompt() +
+                    $"\nVerified source: refs/heads/fix-test at {Commit}. The isolated run branch is not the PR source branch.\n";
+                const string extra = "  FINAL GUIDANCE\r\nKeep newline.\n";
+                var request = Request(prompt: baseline) with { PushToSource = true, AdditionalInstructions = extra };
+                var publication = CopilotRunService.PublishInstructions(request, "origin", FakeTransport.PushHash);
+                var suffix = "\n## Additional instructions\n" + extra;
+                var padding = 1024 * 1024 - baseline.Length - publication.Length - suffix.Length + overflow;
+                request = request with { Prompt = baseline + new string('x', padding) };
+                var expected = request.Prompt + publication + suffix;
+                Check(expected.Length == 1024 * 1024 + overflow &&
+                    CopilotRunService.AppendAdditionalInstructions(request.Prompt, extra).Length <= 1024 * 1024,
+                    "Fixture does not isolate the complete-prompt boundary from effective-input validation");
+                var fake = new FakeTransport();
+                await using var service = new CopilotRunService(fake);
+                var run = await service.StartAsync(request);
+                if (overflow == 1)
+                {
+                    var rejected = await Wait(service, run.RunId, s => !s.IsActive);
+                    Check(rejected.Status == "failed" && rejected.Message.Contains("complete fix prompt exceeds 1 MiB") &&
+                        fake.Calls.Any(c => c.Operation == "prepare") &&
+                        !fake.Calls.Any(c => c.Operation is "stage-prompt" or "launch"),
+                        "Oversized complete prompt was truncated, staged, launched or silently refused");
+                }
+                else
+                {
+                    await fake.Started.Task.WaitAsync(TimeSpan.FromSeconds(5));
+                    var delivered = fake.Calls.Single(c => c.Operation == "stage-prompt").StandardInput!;
+                    Check(delivered == expected, "Exact-limit staged prompt was truncated, normalized or reordered");
+                    CopilotSourceTests.CheckReviewGate(delivered);
+                    fake.Finish(0);
+                    await Wait(service, run.RunId, s => !s.IsActive);
+                }
+            });
+        foreach (var custom in new[] { false, true })
+            await test($"Copilot additional instructions are captured once after exact launch publication boundaries (custom={custom})", async () =>
+            {
+                var fake = new FakeTransport();
+                await using var service = new CopilotRunService(fake);
+                const string extra = "  CAPTURED EXTRA\r\nlast line\n";
+                var prompt = await CopilotSourceTests.CreatePrompt(custom ? "CUSTOM ASK CAPTURED" : null) +
+                    $"\nVerified source: refs/heads/fix-test at {Commit}. The isolated run branch is not the PR source branch.\n";
+                var request = Request(prompt: prompt) with { PushToSource = true, AdditionalInstructions = extra };
+                var run = await service.StartAsync(request);
+                request = request with { AdditionalInstructions = "CHANGED" };
+                await fake.Started.Task.WaitAsync(TimeSpan.FromSeconds(5));
+                var delivered = fake.Calls.Single(c => c.Operation == "stage-prompt").StandardInput!;
+                Check(delivered == run.Request.Prompt + CopilotRunService.PublishInstructions(run.Request, "origin", FakeTransport.PushHash) +
+                    "\n## Additional instructions\n" + extra, "Suffix was changed, duplicated or placed before launch gates");
+                CopilotSourceTests.CheckReviewGate(delivered);
+                Check(custom ? delivered.Contains("## Ask\r\nCUSTOM ASK CAPTURED\r\n") :
+                    delivered.Contains("Work on this existing PR for the repo repository and drive it to green"),
+                    "Captured launch lost its built-in or Custom Ask");
+                fake.Finish(0);
+                await Wait(service, run.RunId, s => !s.IsActive);
+            });
         await test("Copilot returns preparing immediately, captures immutable identity/prompt and streams both channels", async () =>
         {
             var fake = new FakeTransport();
