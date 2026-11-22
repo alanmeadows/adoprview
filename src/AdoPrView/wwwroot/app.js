@@ -81,6 +81,8 @@ const S = {
   speechEpoch: 0,
   rowMenu: null,
   drawer: false,
+  drawerFocus: null,
+  drawerInert: new Map(),
   drawerDraft: new Map(),
   drawerDraftReset: false,
   drawerEpoch: 0,
@@ -161,6 +163,7 @@ function toast(text, kind = 'ok', action) {
     const b = document.createElement('button');
     b.textContent = action.label;
     b.onclick = () => { action.run(); el.remove(); };
+    if (S.drawer) { S.drawerInert.set(b, b.inert); b.inert = true; }
     el.appendChild(b);
   }
   $('#toasts').appendChild(el);
@@ -1386,12 +1389,30 @@ async function onSpeechAction(action) {
 }
 
 async function openDrawer() {
+  if (S.drawer) return;
+  S.drawerFocus = document.activeElement;
+  for (const el of document.body.children || []) {
+    if (['drawer', 'scrim', 'toasts'].includes(el.id)) continue;
+    S.drawerInert.set(el, el.inert); el.inert = true;
+  }
+  for (const el of $('#toasts').querySelectorAll('button')) {
+    S.drawerInert.set(el, el.inert); el.inert = true;
+  }
   ++S.drawerEpoch;
   S.drawerDraft.clear(); S.drawerDraftReset = true;
   S.drawer = true; $('#drawer').hidden = false; $('#scrim').hidden = false; renderDrawer();
+  $('#closeDrawer').focus?.({ preventScroll: true });
   await loadApprovalSettings();
 }
-function closeDrawer() { S.drawer = false; $('#drawer').hidden = true; $('#scrim').hidden = true; }
+function closeDrawer() {
+  S.drawer = false; $('#drawer').hidden = true; $('#scrim').hidden = true;
+  for (const [el, inert] of S.drawerInert) el.inert = inert;
+  S.drawerInert.clear();
+  const saved = S.drawerFocus;
+  const opener = saved && saved !== document.body && saved.isConnected && !saved.disabled && saved.getClientRects().length ? saved : $('#settingsBtn');
+  S.drawerFocus = null;
+  opener.focus?.({ preventScroll: true });
+}
 
 async function loadApprovalSettings() {
   if (!S.snap.approvalProvider) { S.approvalSettings = null; return; }
@@ -1420,6 +1441,12 @@ function clearSubmittedDrawerInput(id, value, epoch) {
 function renderDrawer() {
   const st = S.settings;
   if (!st) return;
+  const focusBody = $('#drawerBody');
+  const active = document.activeElement;
+  const focusFields = drawerFields();
+  const focused = focusFields.find(el => el === active);
+  const focusSelection = focused && { start: focused.selectionStart, end: focused.selectionEnd, direction: focused.selectionDirection };
+  const focusTop = focusBody.scrollTop;
   const titles = new Map(S.snap.prs.map((p) => [p.key.toLowerCase(), p]));
   const disc = S.discovered;
   const body = $('#drawerBody');
@@ -1512,6 +1539,13 @@ ${esc(st.additionalTriageInstructions || '')}</textarea></div>
     const draft = S.drawerDraft.get(drawerFieldKey(el));
     if (draft) { el.value = draft.value; if (el.type === 'checkbox') el.checked = draft.checked; }
   }
+  focusBody.scrollTop = focusTop;
+  const next = focused && current.find(el => drawerFieldKey(el) === drawerFieldKey(focused));
+  if (S.drawer && next && !next.disabled) {
+    next.focus({ preventScroll: true });
+    if (typeof focusSelection.start === 'number') next.setSelectionRange(focusSelection.start, focusSelection.end, focusSelection.direction);
+  } else if (S.drawer && !(S.themeBusy && (active === document.body || active?.id === 'theme')) &&
+      !document.activeElement?.closest('#drawer')) $('#closeDrawer').focus?.({ preventScroll: true });
 }
 
 async function saveSettings(patch, commitDraft = false) {
@@ -1755,6 +1789,21 @@ function wire() {
     if (e.target.id === 'theme') changeTheme(e.target);
   });
   document.addEventListener('keydown', (e) => {
+    if (S.drawer) {
+      if (e.key === 'Escape') { e.preventDefault(); closeDrawer(); }
+      else if (e.key === 'Tab') {
+        const drawer = $('#drawer');
+        const controls = [...drawer.querySelectorAll('button, input, select, textarea, a[href], [tabindex]')]
+          .filter(el => !el.disabled && el.tabIndex >= 0 && el.getClientRects().length);
+        const first = controls[0], last = controls.at(-1);
+        if (!drawer.contains(document.activeElement) || (e.shiftKey ? document.activeElement === first : document.activeElement === last)) {
+          e.preventDefault(); (e.shiftKey ? last : first)?.focus();
+        }
+      } else if (e.key === 'Enter' && ['wlInput', 'repoUrl'].includes(document.activeElement?.id)) {
+        e.preventDefault(); void onDrawerAction(document.activeElement.id === 'wlInput' ? 'addWl' : 'addRepo');
+      }
+      return;
+    }
     if (e.key === 'Escape' && S.rowMenu) { e.preventDefault(); closeRowMenu(); flushRowUpdates(); return; }
     const control = expansionControl(e.target);
     if (control && ['Enter', ' '].includes(e.key)) {

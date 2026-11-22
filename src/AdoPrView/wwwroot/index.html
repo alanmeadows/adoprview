@@ -61,9 +61,9 @@
     <div id="videoShelf" aria-label="PR videos outside the current table"></div>
   </main>
 
-  <aside class="drawer" id="drawer" hidden>
+  <aside class="drawer" id="drawer" role="dialog" aria-modal="true" aria-labelledby="settingsTitle" hidden>
     <div class="drawer-head">
-      <h2>Settings</h2>
+      <h2 id="settingsTitle">Settings</h2>
       <button class="iconbtn" id="closeDrawer" title="Close (Esc)"><svg viewBox="0 0 24 24"><path d="M18 6 6 18M6 6l12 12"/></svg></button>
     </div>
     <div class="drawer-body" id="drawerBody"></div>

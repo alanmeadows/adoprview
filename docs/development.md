@@ -330,6 +330,8 @@ Focused browser checks can set `ROW_TEST_FILTER` to a `|`-separated list of
 subtest-name substrings, for example `Fix output` or `GUI `. Then run
 `node --test tests\row-actions.browser.test.cjs` and clear the variable.
 The harness uses disposable Edge profiles and intercepted service calls.
+Use `GUI settings drawer|ordinary Approve preserves` for Settings focus,
+provider coexistence, dismissal, rerender/theme focus and approval busy checks.
 
 Direct reviewer approval has a focused offline native suite:
 
