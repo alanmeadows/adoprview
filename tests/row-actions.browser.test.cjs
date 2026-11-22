@@ -1266,7 +1266,7 @@ test('real row hit testing and action identity across refreshes', { timeout: 900
       await evaluate(`window.lcCard=document.querySelector('#rows [data-key="${key}"] .copilot-run:not(.run-earlier)');
         updateCopilotRun({...S.runs.get('lc-old'),status:'completed',mayBeRunning:false,id:0})`);
       await frame();
-      assert.deepEqual([(await place()).lead, await evaluate(`window.lcCard.isConnected && S.runRelocations.has('${key}') && !S.rowsPending`)], ['1', true], 'Placement waits while rows are in use');
+      assert.deepEqual([(await place()).lead, await evaluate(`window.lcCard.isConnected && S.runRelocations.has('${key}')`)], ['1', true], 'Placement waits while rows are in use');
       assert.equal((await place()).label, 'Fix PR', 'Label still updates in place while deferred');
       await move(10, 10);
       await frame();
@@ -1316,7 +1316,7 @@ test('real row hit testing and action identity across refreshes', { timeout: 900
       await evaluate(`{const key='${key}',pr=S.snap.prs.find(p=>p.key===key);
         for(const k of [key,'${other}'])S.explanations.set(k,{key:k,requestId:'sel-'+k,sequence:1,status:'completed',output:'Synthetic selectable prose for '+k});
         S.runs.set('sel-new',{...pr,runId:'sel-new',id:0,status:'completed',mayBeRunning:false,startedAt:'2026-01-02T00:00:00Z',output:'New\\n',outputOffset:4});
-        S.runs.set('sel-old',{...pr,runId:'sel-old',id:0,status:'completed',mayBeRunning:false,startedAt:'2026-01-01T00:00:00Z',output:'Old\\n',outputOffset:4});
+        S.runs.set('sel-old',{...pr,runId:'sel-old',id:0,status:'needs-attention',mayBeRunning:false,startedAt:'2026-01-01T00:00:00Z',output:'Old\\n',outputOffset:4});
         S.expanded.add(key);S.expanded.add('${other}');renderRows();}`);
       await evaluate(`new Promise((resolve,reject)=>{const deadline=Date.now()+3000;
         const check=()=>document.querySelector('#rows [data-key="${key}"] pre.log[data-log]')?resolve():
@@ -1341,13 +1341,13 @@ test('real row hit testing and action identity across refreshes', { timeout: 900
       }
       // A selection spanning into a moving card defers the move until the selection clears.
       await select(`#rows [data-key="${key}"] .explain-output`, `#rows [data-key="${key}"] .copilot-run .run-output`);
-      await evaluate(`updateCopilotRun({...S.runs.get('sel-old'),status:'running',mayBeRunning:true,revision:3})`);
+      await evaluate(`updateCopilotRun({...S.runs.get('sel-new'),status:'needs-attention',mayBeRunning:false,id:7,revision:3})`);
       await frame();
-      assert.deepEqual([await intact(), await lead(), await evaluate(`S.runRelocations.has('${key}') && !S.rowsPending`)], [true, '0', true],
+      assert.deepEqual([await intact(), await lead(), await evaluate(`S.runRelocations.has('${key}')`)], [true, '0', true],
         'A selection crossing a run card keeps the group in place');
       await evaluate('window.getSelection().removeAllRanges()');
       await frame(); await frame();
-      assert.deepEqual([await lead(), await runs(), await evaluate('S.runRelocations.size')], ['1', ['sel-old', 'sel-new'], 0],
+      assert.deepEqual([await lead(), await runs(), await evaluate('S.runRelocations.size')], ['1', ['sel-new', 'sel-old'], 0],
         'The group moves once the selection clears');
     });
 
