@@ -892,18 +892,10 @@ function updateCopilotRun(r) {
   const deferMain = !!main?.dataset.runId && main.dataset.runId !== latestId &&
     (rowsInUse() || crossSelection?.card.dataset.runKey === r.key);
   if (deferMain) { S.rowsPending = true; renderStatus(); }
-  else if (main && promoted && main !== promoted) {
+  // A selection reaching into a moving card leaves the swap to the queued relocation below.
+  else if (main && promoted && main !== promoted && !selectionBlocksMove(runCards)) {
     const selection = captureRunOutputs();
-    main.classList.add('run-earlier'); $('h3 .grow', main).textContent = runCardTitle(true);
-    promoted.classList.remove('run-earlier'); $('h3 .grow', promoted).textContent = runCardTitle(false);
-    main.before(promoted);
-    let previous = promoted;
-    for (const run of runsForPr(r.key).filter(run => run.runId !== latestId)) {
-      const card = runCards.find(card => card.dataset.runId === run.runId);
-      if (!card) continue;
-      if (previous.nextElementSibling !== card) previous.after(card);
-      previous = card;
-    }
+    reorderRunCards(r.key, runCards);
     for (const card of runCards) {
       const view = S.runOutputs.get(card.dataset.runId);
       if (view) {
@@ -944,32 +936,62 @@ function updateCopilotRun(r) {
   relocateRunGroup(r.key);
 }
 
-// Move the existing run group (same nodes, reading and selection) when its leading/trailing placement changes.
+// Make the preferred run the main card and keep the rest in chronological order (same nodes).
+function reorderRunCards(key, runCards) {
+  const latestId = runForPr(key)?.runId;
+  const main = runCards.find(el => !el.classList.contains('run-earlier'));
+  const promoted = runCards.find(el => el.dataset.runId === latestId);
+  if (!main || !promoted || main === promoted) return;
+  main.classList.add('run-earlier'); $('h3 .grow', main).textContent = runCardTitle(true);
+  promoted.classList.remove('run-earlier'); $('h3 .grow', promoted).textContent = runCardTitle(false);
+  main.before(promoted);
+  let previous = promoted;
+  for (const run of runsForPr(key).filter(run => run.runId !== latestId)) {
+    const card = runCards.find(card => card.dataset.runId === run.runId);
+    if (!card) continue;
+    if (previous.nextElementSibling !== card) previous.after(card);
+    previous = card;
+  }
+}
+
+// A non-output text selection touching nodes that would move (detaching its endpoints) holds the move.
+function selectionBlocksMove(elements) {
+  const selection = window.getSelection(), range = selection?.isCollapsed === false ? selection.getRangeAt(0) : null;
+  if (!range) return false;
+  const start = range.startContainer, output = (start?.nodeType === 1 ? start : start?.parentElement)?.closest('.run-output');
+  if (output?.contains(range.endContainer)) return false;
+  return elements.some(el => range.intersectsNode(el));
+}
+
+// Move the existing run group (same nodes, reading and selection) when its leading/trailing placement or main run changes.
 function relocateRunGroup(key) {
   const detail = [...document.querySelectorAll('#rows > .pr')].find(el => el.dataset.key === key)?.querySelector(':scope > .detail[data-run-lead]');
   const p = S.snap.prs.find(x => x.key === key), lead = runLeads(key);
-  if (!detail || !p || detail.dataset.runLead === String(+lead)) { S.runRelocations.delete(key); return; }
-  const cards = [...detail.querySelectorAll('.copilot-run')];
+  const cards = detail ? [...detail.querySelectorAll('.copilot-run')] : [];
+  const latestId = runForPr(key)?.runId;
+  const reorder = cards.some(el => el.dataset.runId === latestId) && cards.find(el => !el.classList.contains('run-earlier'))?.dataset.runId !== latestId;
+  if (!detail || !p || (detail.dataset.runLead === String(+lead) && !reorder)) { S.runRelocations.delete(key); return; }
   if (!cards.length) { S.runRelocations.delete(key); renderRows(true); return; }
   // Only the run cards move. Defer while rows are in use or a non-output text selection touches a moving card;
   // selections elsewhere (failed logs, Explain, other PRs) are left attached.
-  const selection = window.getSelection(), range = selection?.isCollapsed === false ? selection.getRangeAt(0) : null;
-  const outputOnly = range && cards.some(card => $('.run-output', card)?.contains(range.startContainer) && $('.run-output', card).contains(range.endContainer));
-  const moving = [...cards, ...detail.querySelectorAll('.lead-blockers')];
-  if (rowsInUse() || crossRunOutputSelection() || (range && !outputOnly && moving.some(el => range.intersectsNode(el)))) {
+  if (rowsInUse() || crossRunOutputSelection() || selectionBlocksMove([...cards, ...detail.querySelectorAll('.lead-blockers')])) {
     S.runRelocations.add(key); renderStatus(); return;
   }
   S.runRelocations.delete(key);
   const outputSelection = captureRunOutputs();
-  detail.querySelector('.lead-blockers')?.remove();
-  let leading = detail.firstElementChild.classList.contains('full') ? detail.firstElementChild : null;
-  if (lead) {
-    if (!leading) { leading = document.createElement('div'); leading.className = 'full stack'; detail.prepend(leading); }
-    leading.insertAdjacentHTML('beforeend', leadBlockersCard(p));
-    leading.append(...cards);
-  } else {
-    detail.lastElementChild.append(...cards);
-    if (leading && !leading.children.length) leading.remove();
+  reorderRunCards(key, cards);
+  if (detail.dataset.runLead !== String(+lead)) {
+    const ordered = [...detail.querySelectorAll('.copilot-run')];
+    detail.querySelector('.lead-blockers')?.remove();
+    let leading = detail.firstElementChild.classList.contains('full') ? detail.firstElementChild : null;
+    if (lead) {
+      if (!leading) { leading = document.createElement('div'); leading.className = 'full stack'; detail.prepend(leading); }
+      leading.insertAdjacentHTML('beforeend', leadBlockersCard(p));
+      leading.append(...ordered);
+    } else {
+      detail.lastElementChild.append(...ordered);
+      if (leading && !leading.children.length) leading.remove();
+    }
   }
   for (const card of cards) {
     const view = S.runOutputs.get(card.dataset.runId);

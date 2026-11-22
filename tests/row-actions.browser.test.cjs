@@ -1386,6 +1386,28 @@ test('real row hit testing and action identity across refreshes', { timeout: 900
       await click(await elementPoint('[data-lane="completed"]')); await frame();
       assert.ok((await evaluate(`[...document.querySelectorAll('#rows > .pr')].map(r=>r.dataset.key)`)).includes('history-only:1'),
         'The Completed lane shows the history change');
+      // An older run validly recovering becomes the main card; a selection from Explain into its output holds that swap.
+      await move(10, 10);
+      await evaluate(`{const pr=S.snap.prs.find(p=>p.key==='${key}');S.lane=null;
+        S.runs.set('sel-rec',{...pr,runId:'sel-rec',id:0,status:'needs-attention',mayBeRunning:false,startedAt:'2025-12-31T00:00:00Z',output:'Recovered\\n',outputOffset:10});
+        S.runs.set('sel-new',{...S.runs.get('sel-new'),status:'completed',mayBeRunning:false,revision:5});render();}`);
+      await frame();
+      assert.deepEqual([await lead(), await runs()], ['0', ['sel-new', 'sel-old', 'sel-rec']]);
+      await select(`#rows [data-key="${key}"] .explain-output`, `#rows [data-key="${key}"] .copilot-run[data-run-id="sel-rec"] .run-output`);
+      assert.equal(await intact(), true, 'The recovery-crossing selection baseline is intact before promotion');
+      await evaluate(`window.recCard=document.querySelector('#rows [data-key="${key}"] .copilot-run[data-run-id="sel-rec"]');
+        updateCopilotRun({...S.runs.get('sel-rec'),status:'recovering',mayBeRunning:true,revision:1})`);
+      await frame();
+      assert.deepEqual([await evaluate(`{const s=window.getSelection(),r=s.rangeCount&&s.getRangeAt(0);
+        !!r && r.startContainer===window.selNodes[0] && r.endContainer===window.selNodes[1] && window.selNodes.every(n=>n.isConnected) &&
+        window.selRow===document.querySelector('#rows [data-key="${key}"]') && s.toString().startsWith('Synthetic selectable prose for ${key}') && s.toString().trimEnd().endsWith('Recovered')}`),
+        await lead(), await runs(), await evaluate(`S.runRelocations.has('${key}')`)], [true, '0', ['sel-new', 'sel-old', 'sel-rec'], true],
+        'Promotion of a recovered run waits while a selection endpoint sits in its card');
+      await evaluate('window.getSelection().removeAllRanges()');
+      await frame(); await frame();
+      assert.deepEqual([await lead(), await runs(), await evaluate('S.runRelocations.size'),
+        await evaluate(`window.recCard.isConnected && !window.recCard.classList.contains('run-earlier') && window.selNodes[1].isConnected`)],
+        ['1', ['sel-rec', 'sel-new', 'sel-old'], 0, true], 'The same recovered card leads once the selection clears');
     });
 
     await t.test('layout narrow-window identity cue names the panned row without covering gates or actions', async () => {
@@ -2270,7 +2292,8 @@ test('real row hit testing and action identity across refreshes', { timeout: 900
         await evaluate(`{const key='sample-service-id:101',pr=S.snap.prs.find(p=>p.key===key);
           const older=Array.from({length:160},(_,n)=>'Older recovered synthetic line '+n+'\\n').join('');
           const newer='Newer completed synthetic output\\n'.repeat(160);
-          S.runs.set('older-recovered-run',{...pr,runId:'older-recovered-run',status:'needs-attention',mayBeRunning:false,
+          // id:0 keeps the older run non-cancelable history until it actually recovers.
+          S.runs.set('older-recovered-run',{...pr,runId:'older-recovered-run',id:0,status:'needs-attention',mayBeRunning:false,
             startedAt:'2026-01-01T00:00:00Z',output:older,outputOffset:older.length});
           S.runs.set('newer-completed-run',{...pr,runId:'newer-completed-run',status:'completed',mayBeRunning:false,
             startedAt:'2026-01-02T00:00:00Z',output:newer,outputOffset:newer.length});
