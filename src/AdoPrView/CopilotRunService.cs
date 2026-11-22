@@ -239,7 +239,7 @@ public sealed partial class CopilotRunService : IAsyncDisposable
                 {
                     if (entry.Environment is null) throw new RunSetupException("A verified saved WSL environment is required to cancel this task.");
                     var ownership = await VerifyRunAsync(entry).ConfigureAwait(false);
-                    var task = ReadOwnedTask(entry, await Invoke("status", entry.Environment.Distribution, StatusScript,
+                    var task = ReadOwnedTask(entry, await InvokeRun("status", entry.Environment, StatusScript,
                         [entry.Environment.Bgtask, entry.TaskName]).ConfigureAwait(false));
                     if (task.Status == "running") await StopRecoveredAsync(entry).ConfigureAwait(false);
                     else if (task.Status is not ("exited" or "dead") || ownership[1] != "FREE")
@@ -291,9 +291,9 @@ public sealed partial class CopilotRunService : IAsyncDisposable
                     continue;
                 }
                 var env = e.Environment!;
-                var result = await Invoke("stop", env.Distribution, StopScript, [env.Bgtask, e.TaskName]).ConfigureAwait(false);
+                var result = await InvokeRun("stop", env, StopScript, [env.Bgtask, e.TaskName]).ConfigureAwait(false);
                 RequireSuccess(result, "The owned task stop could not be confirmed.");
-                var status = await Invoke("status", env.Distribution, StatusScript, [env.Bgtask, e.TaskName]).ConfigureAwait(false);
+                var status = await InvokeRun("status", env, StatusScript, [env.Bgtask, e.TaskName]).ConfigureAwait(false);
                 var code = ReadExitCode(status);
                 lock (gate)
                 {
@@ -396,7 +396,7 @@ public sealed partial class CopilotRunService : IAsyncDisposable
                 PreparationLogPath = e.RunDirectory + "/prepare.stderr" });
             CheckCli(env.Help);
             token.ThrowIfCancellationRequested();
-            var prepared = await Invoke("prepare", env.Distribution, PrepareScript,
+            var prepared = await InvokeRun("prepare", env, PrepareScript,
                 [env.Root, env.CommonDirectory, env.Remote, env.RemoteHash, r.SourceRef, r.SourceCommit.ToLowerInvariant(),
                     e.State.RunId, r.PrId.ToString(System.Globalization.CultureInfo.InvariantCulture), e.OwnershipToken, e.State.SessionId!,
                     r.PushToSource ? env.PushHash! : ""],
@@ -415,7 +415,7 @@ public sealed partial class CopilotRunService : IAsyncDisposable
             if (!verifiedReceipt)
                 throw new RunSetupException("WSL returned an invalid worktree receipt; no Copilot task was launched.");
             token.ThrowIfCancellationRequested();
-            var staged = await Invoke("stage-prompt", env.Distribution, StagePromptScript,
+            var staged = await InvokeRun("stage-prompt", env, StagePromptScript,
                 [e.RunDirectory], r.Prompt + PublishInstructions(r, env.Remote, env.PushHash), token: token).ConfigureAwait(false);
             RequireSuccess(staged, "Could not securely stage the prompt in the app-owned run directory.");
             token.ThrowIfCancellationRequested();
@@ -423,14 +423,14 @@ public sealed partial class CopilotRunService : IAsyncDisposable
             launchAttempted = true;
             e.LaunchIntent = true;
             Update(e, s => s with { MayBeRunning = true });
-            var launched = await Invoke("launch", env.Distribution, LaunchScript,
+            var launched = await InvokeRun("launch", env, LaunchScript,
                 LaunchArguments(e, resume: false),
                 token: CancellationToken.None).ConfigureAwait(false);
             RequireSuccess(launched, "The managed WSL task could not be launched; the worktree is retained.");
             Update(e, s => s with { Status = "running", WorktreeStatus = "in-use" });
             if (store is not null)
             {
-                var task = ReadOwnedTask(e, await Invoke("status", env.Distribution, StatusScript, [env.Bgtask, e.TaskName],
+                var task = ReadOwnedTask(e, await InvokeRun("status", env, StatusScript, [env.Bgtask, e.TaskName],
                     token: token).ConfigureAwait(false));
                 e.TaskIdentity = task.Id;
                 Update(e, s => s with { LogPath = task.Log });
@@ -478,11 +478,11 @@ public sealed partial class CopilotRunService : IAsyncDisposable
                     if (store is not null) await StopRecoveredAsync(e).ConfigureAwait(false);
                     else
                     {
-                    var stopped = await Invoke("stop", env.Distribution, StopScript, [env.Bgtask, e.TaskName],
+                    var stopped = await InvokeRun("stop", env, StopScript, [env.Bgtask, e.TaskName],
                         token: CancellationToken.None).ConfigureAwait(false);
                     RequireSuccess(stopped, "The owned task stop could not be confirmed.");
                     }
-                    var status = await Invoke("status", env.Distribution, StatusScript, [env.Bgtask, e.TaskName],
+                    var status = await InvokeRun("status", env, StatusScript, [env.Bgtask, e.TaskName],
                         token: CancellationToken.None).ConfigureAwait(false);
                     exitCode = ReadExitCode(status);
                     e.TaskConfirmedStopped = true;
@@ -510,11 +510,11 @@ public sealed partial class CopilotRunService : IAsyncDisposable
                 try
                 {
                     // This removes only the private prompt, not the worktree or user files.
-                    await Invoke("discard-prompt", env.Distribution, DiscardPromptScript, [e.RunDirectory],
+                    await InvokeRun("discard-prompt", env, DiscardPromptScript, [e.RunDirectory],
                         token: CancellationToken.None).ConfigureAwait(false);
                     if (finalStatus == "completed" && e.TaskConfirmedStopped)
                     {
-                        var cleaned = await Invoke("cleanup", env.Distribution, CleanupScript, CleanupArguments(e),
+                        var cleaned = await InvokeRun("cleanup", env, CleanupScript, CleanupArguments(e),
                             token: CancellationToken.None).ConfigureAwait(false);
                         var disposition = ProtocolFields(cleaned.StandardOutput);
                         Update(e, s => s with
@@ -542,9 +542,14 @@ public sealed partial class CopilotRunService : IAsyncDisposable
         }
     }
 
+    Task<CopilotProcessResult> InvokeRun(string operation, EnvironmentInfo environment, string script, IReadOnlyList<string> arguments,
+        string? input = null, Action<string>? stdout = null, Action<string>? stderr = null, CancellationToken token = default,
+        TimeSpan? responseLimit = null) =>
+        Invoke(operation, environment.Distribution, script, arguments, input, stdout, stderr, token, responseLimit, environment);
+
     internal async Task<CopilotProcessResult> Invoke(string operation, string? distribution, string script, IReadOnlyList<string> arguments,
         string? input = null, Action<string>? stdout = null, Action<string>? stderr = null, CancellationToken token = default,
-        TimeSpan? responseLimit = null)
+        TimeSpan? responseLimit = null, EnvironmentInfo? environment = null)
     {
         var source = new CancellationTokenSource();
         var cancellation = source.Token;
@@ -558,10 +563,13 @@ public sealed partial class CopilotRunService : IAsyncDisposable
         }
         var registration = token.Register(() => _ = CancelTransport());
         var acceptingOutput = 1;
+        var capturedControl = operation is "status" or "stop" ||
+            environment?.XdgConfigHome is not null && operation is "follow" or "history" or "verify-run";
         // A disconnected transport must not hold cancellation hostage or deliver late output into a detached run.
         var work = Task.Run(() => transport.ExecuteAsync(new(operation, string.IsNullOrWhiteSpace(distribution) ? null : distribution,
             (operation == "preflight" ? PreflightDiagnosticsScript + "\n" : "") +
-            (operation is "status" or "stop" ? "set -euo pipefail\nexport NO_COLOR=1 TERM=dumb" : EnvironmentScript) + "\n" + script, arguments, input),
+            (capturedControl ? "set -euo pipefail\nexport NO_COLOR=1 TERM=dumb" : EnvironmentScript) + "\n" +
+            CapturedTaskEnvironment(environment) + script, arguments, input),
             stdout is null ? null : text => { if (Volatile.Read(ref acceptingOutput) != 0 && !token.IsCancellationRequested && !cancellation.IsCancellationRequested) stdout(text); },
             stderr is null ? null : text => { if (Volatile.Read(ref acceptingOutput) != 0 && !token.IsCancellationRequested && !cancellation.IsCancellationRequested) stderr(text); }, cancellation));
         try { return await work.WaitAsync(limit, token).ConfigureAwait(false); }
@@ -579,6 +587,20 @@ public sealed partial class CopilotRunService : IAsyncDisposable
             { _ = t.Exception; source.Dispose(); }, CancellationToken.None,
                 TaskContinuationOptions.ExecuteSynchronously, TaskScheduler.Default);
         }
+    }
+
+    static string CapturedTaskEnvironment(EnvironmentInfo? environment)
+    {
+        if (environment is null) return "";
+        var script = "export HOME=" + ShellQuote(environment.Home) + "\n";
+        if (environment.XdgConfigHome is null) return script;
+        if (!environment.XdgConfigHome.StartsWith('/') ||
+            environment.BgtaskStateDirectory is null ||
+            environment.BgtaskStateDirectory.Length != 0 && !environment.BgtaskStateDirectory.StartsWith('/'))
+            throw new RunSetupException("The captured task registry context is invalid. Work and its reservation are preserved.");
+        return script + "export XDG_CONFIG_HOME=" + ShellQuote(environment.XdgConfigHome) + "\n" +
+            (environment.BgtaskStateDirectory.Length == 0 ? "unset BGTASK_STATE_DIR\n" :
+                "export BGTASK_STATE_DIR=" + ShellQuote(environment.BgtaskStateDirectory) + "\n");
     }
 
     void SignalCancellation(Entry entry, CancellationTokenSource source)
@@ -671,8 +693,8 @@ public sealed partial class CopilotRunService : IAsyncDisposable
         while (true)
         {
             token.ThrowIfCancellationRequested();
-            var result = await Invoke("status", e.Environment!.Distribution, StatusScript,
-                [e.Environment.Bgtask, e.TaskName], token: token).ConfigureAwait(false);
+            var result = await InvokeRun("status", e.Environment!, StatusScript,
+                [e.Environment!.Bgtask, e.TaskName], token: token).ConfigureAwait(false);
             if (store is not null)
             {
                 var task = ReadOwnedTask(e, result);
@@ -702,7 +724,7 @@ public sealed partial class CopilotRunService : IAsyncDisposable
     {
         try
         {
-            return await Invoke("follow", e.Environment!.Distribution, FollowScript, [e.Environment.Bgtask, e.TaskName],
+            return await InvokeRun("follow", e.Environment!, FollowScript, [e.Environment!.Bgtask, e.TaskName],
                 stdout: text => Append(e, text, false), stderr: text => Append(e, text, true), token: token).ConfigureAwait(false);
         }
         catch (Exception ex) when (ex is IOException or Win32Exception)
@@ -724,13 +746,19 @@ public sealed partial class CopilotRunService : IAsyncDisposable
         return start < 0 ? [] : output[(start + marker.Length)..].TrimEnd('\0').Split('\0');
     }
 
-    static EnvironmentInfo ParseEnvironment(string output, CopilotRunRequest request)
+    internal static EnvironmentInfo ParseEnvironment(string output, CopilotRunRequest request)
     {
         var f = ProtocolFields(output);
         if (f.Length < 9 || f.Take(7).Any(string.IsNullOrWhiteSpace))
             throw new RunSetupException("WSL preflight returned invalid environment data.");
+        var hasRegistry = f.Length >= 13 && f[^4] == "ADOPRVIEW_TASK_REGISTRY" && f[^1] == "END_TASK_REGISTRY";
+        var xdgConfigHome = hasRegistry ? f[^3] : null;
+        var bgtaskStateDirectory = hasRegistry ? f[^2] : null;
+        if (hasRegistry && (!xdgConfigHome!.StartsWith('/') ||
+            bgtaskStateDirectory!.Length != 0 && !bgtaskStateDirectory.StartsWith('/')))
+            throw new RunSetupException("WSL preflight returned invalid task registry data. No task was launched.");
         var fetchMatched = false;
-        for (var i = 9; i + 3 < f.Length; i += 4)
+        for (var i = 9; i + 3 < (hasRegistry ? f.Length - 4 : f.Length); i += 4)
         {
             if (!RemoteMatches(f[i + 1], request.Organization, request.Project, request.Repository)) continue;
             fetchMatched = true;
@@ -739,7 +767,7 @@ public sealed partial class CopilotRunService : IAsyncDisposable
                 !f[i + 2].Split('\n').All(u => RemoteMatches(u, request.Organization, request.Project, request.Repository))))
                 continue;
             var hash = Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(f[i + 1]))).ToLowerInvariant();
-            return new(f[0], f[3], f[4], f[5], f[6], f[7], f[i], hash, f[2], f[8], f[i + 3]);
+            return new(f[0], f[3], f[4], f[5], f[6], f[7], f[i], hash, f[2], f[8], f[i + 3], xdgConfigHome, bgtaskStateDirectory);
         }
         throw new RunSetupException(fetchMatched
             ? "This run is authorized to publish, but no Git remote in the configured WSL checkout has a fetch URL and every effective push URL (including pushurl and pushInsteadOf rewrites) matching this PR's exact organization, project and repository. Nothing was pushed, Git configuration was not changed, and no worktree or Copilot task was created."
@@ -887,7 +915,8 @@ public sealed partial class CopilotRunService : IAsyncDisposable
     }
 
     internal sealed record EnvironmentInfo(string Distribution, string Root, string CommonDirectory, string Copilot,
-        string Bgtask, string Help, string Remote, string RemoteHash, string Home, string CopilotHome, string? PushHash = null);
+        string Bgtask, string Help, string Remote, string RemoteHash, string Home, string CopilotHome, string? PushHash = null,
+        string? XdgConfigHome = null, string? BgtaskStateDirectory = null);
     sealed class RunSetupException(string message) : Exception(message);
 
     sealed class OutputTail
@@ -1029,6 +1058,11 @@ public sealed partial class CopilotRunService : IAsyncDisposable
           pushhash="$(git remote get-url --push --all "$remote" | sha256sum)"
           printf '%s\0%s\0%s\0%s\0' "$remote" "$url" "$push" "${pushhash%% *}"
         done <<< "$remotes"
+        xdg_config="${XDG_CONFIG_HOME:-$HOME/.config}"
+        [[ "$xdg_config" == /* ]] || xdg_config="$root/$xdg_config"
+        bg_state="${BGTASK_STATE_DIR-}"
+        if [[ -n "$bg_state" && "$bg_state" != /* ]]; then bg_state="$root/$bg_state"; fi
+        printf 'ADOPRVIEW_TASK_REGISTRY\0%s\0%s\0END_TASK_REGISTRY\0' "$xdg_config" "$bg_state"
         trap - ERR
         """;
 

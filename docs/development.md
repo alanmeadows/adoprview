@@ -206,6 +206,26 @@ lifecycle/worktree state or same-revision output when restoration offers old dat
 check failure/repeated-failure/success/later-failure notification recovery and
 prove an abandoned post cannot clear the current failure marker. The actual
 WPF control fixture uses that same factory.
+`Copilot task registry context` verifies durable registry capture and exact
+cancellation while recovery preflight is blocked or its registry changed.
+The `WSL captured task registry` case uses the actual production WSL transport,
+preflight/parser, launch request, status, Stop and log scripts with a fake
+file-backed supervisor. It covers default HOME, quoted XDG paths and a relative
+`BGTASK_STATE_DIR` override, then replaces the environment file with a failing
+sentinel and checks that control bypasses it, retaining synthetic work/logs.
+Enable only in an already-running Ubuntu distribution:
+
+```powershell
+$env:ADOPRVIEW_TEST_WSL_PREFLIGHT = '1'
+$env:ADOPRVIEW_TEST_FILTER = 'WSL captured task registry|Copilot task registry context'
+dotnet run --project tests\AdoPrView.Tests -c Release
+Remove-Item Env:\ADOPRVIEW_TEST_WSL_PREFLIGHT, Env:\ADOPRVIEW_TEST_FILTER
+```
+
+The fixture has a 25-second host deadline and removes its exact temporary
+directory. Its fake supervisor never launches the runner or kills a process;
+this is production-transport registry proof, not live bgtask/model integration,
+kernel escalation or an installed/native UI rerun.
 
 The smaller kernel-control opt-in executes the exact production runner in an
 explicitly selected, already-responsive WSL distribution:

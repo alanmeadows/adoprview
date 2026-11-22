@@ -1,4 +1,6 @@
 using AdoPrView;
+using System.Diagnostics;
+using System.Text.Json;
 
 static class CopilotPreflightTests
 {
@@ -53,7 +55,142 @@ static class CopilotPreflightTests
         });
 
         if (Environment.GetEnvironmentVariable("ADOPRVIEW_TEST_WSL_PREFLIGHT") == "1")
+        {
             await test("WSL preflight non-login executable discovery, quoted paths, child PATH and safe failures", RunWsl);
+            await test("WSL captured task registry controls avoid changed environment setup", RunRegistry);
+        }
+    }
+
+    static async Task RunRegistry()
+    {
+        var native = new WslCopilotRunTransport();
+        using var deadline = new CancellationTokenSource(TimeSpan.FromSeconds(25));
+        Task<CopilotProcessResult> Shell(string script, params string[] args) =>
+            native.ExecuteAsync(new("registry-fixture", "Ubuntu", script, args), null, null, deadline.Token);
+        var created = await Shell("mktemp -d /tmp/ado-prview-registry.XXXXXXXXXX");
+        Check(created.ExitCode == 0, "Could not create disposable registry fixture");
+        var directory = created.StandardOutput.Trim();
+        Check(System.Text.RegularExpressions.Regex.IsMatch(directory, @"\A/tmp/ado-prview-registry\.[a-zA-Z0-9]+\z"),
+            "Invalid registry fixture directory");
+        try
+        {
+            var home = directory + "/home 'quoted";
+            var checkout = home + "/source";
+            var setup = await Shell("""
+                set -euo pipefail
+                mkdir -p -- "$1/.config/bash" "$1/.local/bin" "$1/go/bin" "$2/worktree"
+                git init -q -- "$2"
+                git -C "$2" remote add origin https://dev.azure.com/offline-org/offline-project/_git/offline-repo
+                printf '#!/bin/bash\nprintf "%%s\\n" "%s"\n' "$3" > "$1/.local/bin/copilot"
+                cat > "$1/go/bin/bgtask" <<'PY'
+                #!/usr/bin/python3
+                import json, os, pathlib, sys
+                a = sys.argv[1:]
+                if a == ["--help"]:
+                    sys.exit(0)
+                root = os.environ.get("BGTASK_STATE_DIR") or os.path.join(
+                    os.environ.get("XDG_CONFIG_HOME") or os.path.join(os.environ["HOME"], ".config"), "bgtask")
+                if a[0] == "run":
+                    name, cwd = a[2], a[4]
+                    p = pathlib.Path(root) / "procs" / name
+                    p.mkdir(parents=True)
+                    task = dict(id="registry-fixture", name=name, cwd=cwd, command=a[6:],
+                                status=dict(state="running"))
+                    (p / "meta.json").write_text(json.dumps(task))
+                    (p / "output").write_text("PRESERVED-REGISTRY-OUTPUT\n")
+                    sys.exit(0)
+                p = pathlib.Path(root) / "procs" / a[1]
+                if not (p / "meta.json").is_file():
+                    sys.exit(84)
+                task = json.loads((p / "meta.json").read_text())
+                if a[0] == "stop":
+                    task["status"] = dict(state="exited", exited=dict(code=143))
+                    (p / "meta.json").write_text(json.dumps(task))
+                elif a[0] == "status":
+                    print(json.dumps(task))
+                elif a[0] == "logs":
+                    print((p / "output").read_text(), end="")
+                else:
+                    sys.exit(85)
+                PY
+                chmod +x -- "$1/.local/bin/copilot" "$1/go/bin/bgtask"
+                printf 'fixture-owned-work\n' > "$2/worktree/preserved"
+                """, home, checkout, Help);
+            Check(setup.ExitCode == 0, "Could not initialize fake registry supervisor");
+            await using var service = new CopilotRunService(new RegistryTransport(native, home));
+            var request = new CopilotRunRequest("offline:1", 1, "Offline registry fixture", "offline-org",
+                "offline-project", "offline-repo", "offline", "refs/heads/offline", new string('1', 40), "");
+            foreach (var variant in new[] { "default", "xdg", "override" })
+            {
+                var config = variant == "default" ? home + "/.config" : home + "/config 'selected";
+                var state = variant == "override" ? "relative 'registry" : "";
+                Check((await Shell("""
+                    printf 'export XDG_CONFIG_HOME=%q\nexport BGTASK_STATE_DIR=%q\n' "$2" "$3" > "$1/.config/bash/environment"
+                    """, home, variant == "default" ? "" : config, state)).ExitCode == 0, "Could not select fixture registry");
+                var preflight = await service.Invoke("preflight", "Ubuntu", CopilotRunService.PreflightScript,
+                    [checkout, "offline-repo"], token: deadline.Token);
+                CopilotRunService.RequirePreflightSuccess(preflight);
+                var env = CopilotRunService.ParseEnvironment(preflight.StandardOutput, request);
+                Check(env.XdgConfigHome == config &&
+                    env.BgtaskStateDirectory == (state.Length == 0 ? "" : checkout + "/" + state),
+                    "Actual preflight did not capture absolute XDG/override registry context");
+                var run = home + "/run-" + variant;
+                Check((await Shell("mkdir -- \"$1\"; touch -- \"$1/ownership\"", run)).ExitCode == 0,
+                    "Could not create fake launch receipt");
+                var name = "registry-" + variant;
+                var launched = await service.Invoke("launch", "Ubuntu", CopilotRunService.LaunchScript,
+                    [env.Bgtask, name, checkout + "/worktree", env.Copilot, run,
+                        CopilotRunService.RunnerScript.Replace("\r\n", "\n"), "offline-session", "offline-nonce", "start"],
+                    token: deadline.Token, environment: env);
+                Check(launched.ExitCode == 0, "Production launch request failed against the fake registry supervisor");
+                Check((await Shell("""
+                    printf 'printf "unexpected-environment-source\\n" > "$HOME/poison-read"\nexit 79\n' > "$1/.config/bash/environment"
+                    """, home)).ExitCode == 0, "Could not isolate changed environment setup");
+                var elapsed = Stopwatch.StartNew();
+                var before = await service.Invoke("status", "Ubuntu", CopilotRunService.StatusScript,
+                    [env.Bgtask, name], token: deadline.Token, environment: env);
+                Check(before.ExitCode == 0, "Actual control transport could not find the launch registry");
+                using var beforeTask = JsonDocument.Parse(before.StandardOutput);
+                Check(beforeTask.RootElement
+                    .GetProperty("status").GetProperty("state").GetString() == "running",
+                    "Actual control transport could not find the launch registry");
+                var stopped = await service.Invoke("stop", "Ubuntu", CopilotRunService.StopScript,
+                    [env.Bgtask, name], token: deadline.Token, environment: env);
+                var after = await service.Invoke("status", "Ubuntu", CopilotRunService.StatusScript,
+                    [env.Bgtask, name], token: deadline.Token, environment: env);
+                using var task = JsonDocument.Parse(after.StandardOutput);
+                Check(stopped.ExitCode == 0 && after.ExitCode == 0 &&
+                    task.RootElement.GetProperty("id").GetString() == "registry-fixture" &&
+                    task.RootElement.GetProperty("status").GetProperty("exited").GetProperty("code").GetInt32() == 143 &&
+                    elapsed.Elapsed < TimeSpan.FromSeconds(3), "Captured-registry fake stop was not bounded and exact");
+                var stopMs = elapsed.Elapsed.TotalMilliseconds;
+                var logs = await service.Invoke("history", "Ubuntu", "\"$1\" logs \"$2\" --tail 2000",
+                    [env.Bgtask, name], token: deadline.Token, environment: env);
+                Check(logs.ExitCode == 0 && logs.StandardOutput == "PRESERVED-REGISTRY-OUTPUT\n" &&
+                    (await Shell("[[ ! -e \"$1/poison-read\" && -f \"$2/worktree/preserved\" ]]", home, checkout)).ExitCode == 0,
+                    "Control sourced changed environment or lost synthetic work/logs");
+                Console.WriteLine($"REGISTRY variant={variant} stopMs={stopMs:F1} captured=true workAndLogPreserved=true");
+            }
+        }
+        finally
+        {
+            using var cleanup = new CancellationTokenSource(TimeSpan.FromSeconds(5));
+            var removed = await native.ExecuteAsync(new("registry-cleanup", "Ubuntu",
+                "rm -rf -- \"$1\"; [[ ! -e \"$1\" ]]", [directory]), null, null, cleanup.Token);
+            Check(removed.ExitCode == 0, "Exact registry fixture cleanup failed");
+        }
+    }
+
+    sealed class RegistryTransport(ICopilotRunTransport native, string home) : ICopilotRunTransport
+    {
+        public Task<CopilotProcessResult> ExecuteAsync(CopilotProcessRequest request, Action<string>? stdout,
+            Action<string>? stderr, CancellationToken token) =>
+            native.ExecuteAsync(request with
+            {
+                Script = "export HOME=\"$1\" PATH=/usr/bin:/bin\nunset BASH_ENV ADO_PRVIEW_BASH_ENV XDG_CONFIG_HOME BGTASK_STATE_DIR\nshift\n" +
+                    request.Script,
+                Arguments = new[] { home }.Concat(request.Arguments).ToArray()
+            }, stdout, stderr, token);
     }
 
     static async Task RunWsl()

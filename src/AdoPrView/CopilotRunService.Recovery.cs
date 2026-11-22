@@ -106,7 +106,8 @@ public sealed partial class CopilotRunService
             RequirePreflightSuccess(probe);
             var env = ParseEnvironment(probe.StandardOutput, e.State.Request);
             if (env.Distribution != old.Distribution || env.Root != old.Root || env.CommonDirectory != old.CommonDirectory ||
-                env.Home != old.Home || env.CopilotHome != old.CopilotHome || env.RemoteHash != old.RemoteHash)
+                env.Home != old.Home || env.CopilotHome != old.CopilotHome || env.RemoteHash != old.RemoteHash ||
+                old.XdgConfigHome is not null && (env.XdgConfigHome != old.XdgConfigHome || env.BgtaskStateDirectory != old.BgtaskStateDirectory))
                 throw new RunSetupException("The saved WSL/repository/session environment changed. Work is preserved; no automatic resume or cleanup was attempted.");
             e.Environment = env;
             var ownership = await VerifyRunAsync(e, token).ConfigureAwait(false);
@@ -122,7 +123,7 @@ public sealed partial class CopilotRunService
                 Update(e, s => s with { WorktreePath = e.RunDirectory + "/worktree", WorktreeStatus = "retained-recovery" });
             if (!saved.LaunchIntent)
                 throw new RunSetupException("Launch was never confirmed and no saved session can safely be resumed. The prepared worktree is preserved; the original prompt is not replayed.");
-            var result = await Invoke("status", env.Distribution, StatusScript, [env.Bgtask, e.TaskName], token: token).ConfigureAwait(false);
+            var result = await InvokeRun("status", env, StatusScript, [env.Bgtask, e.TaskName], token: token).ConfigureAwait(false);
             var task = ReadOwnedTask(e, result);
             e.TaskIdentity = task.Id;
             Update(e, s => s with { LogPath = task.Log });
@@ -169,10 +170,10 @@ public sealed partial class CopilotRunService
                 MayBeRunning = true });
             e.TaskIdentity = null;
             Persist(e);
-            var launched = await Invoke("launch", env.Distribution, LaunchScript, LaunchArguments(e, resume: true),
+            var launched = await InvokeRun("launch", env, LaunchScript, LaunchArguments(e, resume: true),
                 token: CancellationToken.None).ConfigureAwait(false);
             RequireSuccess(launched, "Exact-session resume could not be launched; the worktree remains preserved.");
-            var resumed = ReadOwnedTask(e, await Invoke("status", env.Distribution, StatusScript, [env.Bgtask, e.TaskName],
+            var resumed = ReadOwnedTask(e, await InvokeRun("status", env, StatusScript, [env.Bgtask, e.TaskName],
                 token: token).ConfigureAwait(false));
             e.TaskIdentity = resumed.Id;
             Update(e, s => s with { Status = "running", LogPath = resumed.Log });
@@ -242,7 +243,7 @@ public sealed partial class CopilotRunService
         {
             try
             {
-                var cleaned = await Invoke("cleanup", e.Environment!.Distribution, CleanupScript, CleanupArguments(e)).ConfigureAwait(false);
+                var cleaned = await InvokeRun("cleanup", e.Environment!, CleanupScript, CleanupArguments(e)).ConfigureAwait(false);
                 var fields = ProtocolFields(cleaned.StandardOutput);
                 Update(e, s => s with { WorktreeStatus = cleaned.ExitCode == 0 && fields.FirstOrDefault() == "REMOVED" ?
                     "removed-clean" : "retained-changes", Error = fields.FirstOrDefault() == "REMOVED" ? null :
@@ -256,15 +257,15 @@ public sealed partial class CopilotRunService
     {
         if (e.Environment is null) return;
         var env = e.Environment;
-        ReadOwnedTask(e, await Invoke("status", env.Distribution, StatusScript, [env.Bgtask, e.TaskName], token: token).ConfigureAwait(false));
-        var logs = await Invoke("history", env.Distribution, "\"$1\" logs \"$2\" --tail 2000", [env.Bgtask, e.TaskName],
+        ReadOwnedTask(e, await InvokeRun("status", env, StatusScript, [env.Bgtask, e.TaskName], token: token).ConfigureAwait(false));
+        var logs = await InvokeRun("history", env, "\"$1\" logs \"$2\" --tail 2000", [env.Bgtask, e.TaskName],
             stdout: s => Append(e, s, false, history: true), stderr: s => Append(e, s, true, history: true), token: token).ConfigureAwait(false);
         RequireSuccess(logs, "Saved task logs could not be read; terminal history and retained work remain recorded.");
     }
 
     Task<CopilotProcessResult> ProbeRunAsync(Entry e, CancellationToken token = default) =>
-        Invoke("verify-run", e.Environment!.Distribution, RecoveryProbeScript,
-            [e.Environment.Root, e.Environment.CommonDirectory, e.RunDirectory!, e.State.RunId,
+        InvokeRun("verify-run", e.Environment!, RecoveryProbeScript,
+            [e.Environment!.Root, e.Environment.CommonDirectory, e.RunDirectory!, e.State.RunId,
                 e.State.Request.SourceCommit.ToLowerInvariant(), e.OwnershipToken, e.State.SessionId ?? "", e.Environment.CopilotHome], token: token);
 
     async Task<string[]> VerifyRunAsync(Entry e, CancellationToken token = default)
@@ -307,10 +308,10 @@ public sealed partial class CopilotRunService
     {
         await VerifyRunAsync(e).ConfigureAwait(false);
         var env = e.Environment!;
-        ReadOwnedTask(e, await Invoke("status", env.Distribution, StatusScript, [env.Bgtask, e.TaskName]).ConfigureAwait(false));
-        RequireSuccess(await Invoke("stop", env.Distribution, StopScript, [env.Bgtask, e.TaskName]).ConfigureAwait(false),
+        ReadOwnedTask(e, await InvokeRun("status", env, StatusScript, [env.Bgtask, e.TaskName]).ConfigureAwait(false));
+        RequireSuccess(await InvokeRun("stop", env, StopScript, [env.Bgtask, e.TaskName]).ConfigureAwait(false),
             "The exact recovered task could not be stopped.");
-        var after = ReadOwnedTask(e, await Invoke("status", env.Distribution, StatusScript, [env.Bgtask, e.TaskName]).ConfigureAwait(false));
+        var after = ReadOwnedTask(e, await InvokeRun("status", env, StatusScript, [env.Bgtask, e.TaskName]).ConfigureAwait(false));
         var ownership = await VerifyRunAsync(e).ConfigureAwait(false);
         if (after.Status != "exited" || ownership[1] != "FREE")
             throw new RunSetupException("The recovered task or its CLI process group is still active; cancellation could not be confirmed.");

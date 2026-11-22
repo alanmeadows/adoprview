@@ -624,6 +624,14 @@ During blocked or failed shutdown, exact-run controls stay available until
 other service teardown succeeds. A failed exit restores browser output delivery.
 Native Stop entries include the full run ID to distinguish retained runs for
 the same PR. Unreadable history without a PR identity is not an actionable target.
+New launches capture the Linux HOME, XDG config directory and any
+`BGTASK_STATE_DIR` override. Launch, status, Stop and log access use that same
+registry even if shell configuration changes. Exact-task control and ownership
+probes do not re-source environment files for these captured runs, so a blocked
+setup cannot redirect or hold their Stop request. Recovery refuses automatic
+resume if the captured registry changed; explicit Stop still checks the original
+task identity. Older records without registry context retain ownership checks
+and report missing/ambiguous tasks as unconfirmed rather than guessing a registry.
 
 Output uses a fixed-size tail buffer, and native delivery keeps at most one
 unacknowledged browser message plus the latest pending snapshot per run. A busy
@@ -656,7 +664,7 @@ and report a native error when the dashboard cannot display one.
 
 Tracked launches are recorded atomically under
 `%LOCALAPPDATA%\AdoPrView\CopilotRuns`, separately from settings and credentials.
-Records contain captured PR/workspace/task/session identity, status and log
+Records contain captured PR/workspace/task/session identity, task-registry paths, status and log
 pointers, not the prompt, output body or credentials. WSL ownership receipts and
 supervised logs remain in their existing run/task locations. Cross-instance
 reservations and run leases prevent duplicate launches, resumes and cleanup.

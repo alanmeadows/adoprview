@@ -23,6 +23,49 @@ static class CopilotRecoveryTests
 
     public static async Task Run(Func<string, Func<Task>, Task> test)
     {
+        await test("Copilot task registry context stays captured across launch stop and recovery", async () =>
+        {
+            foreach (var stateOverride in new[] { "", "/home/offline/task registry 'override" })
+            {
+                using var f = new Fixture();
+                f.Transport.RegistryConfig = "/home/offline/config 'registry";
+                f.Transport.RegistryOverride = stateOverride;
+                await using var service = f.Service();
+                var run = await service.StartAsync(Request());
+                await Wait(service, run.RunId, s => s.Output.Contains("FAKE-READY"));
+                var saved = f.Store.Load().Single().Saved!;
+                var environment = JsonSerializer.Serialize(saved.Environment);
+                Check(environment.Contains("XdgConfigHome"),
+                    "The launch registry context was not captured in the durable record");
+                await service.DisposeAsync();
+                f.Transport.BlockPreflight = stateOverride.Length == 0;
+                if (!f.Transport.BlockPreflight) f.Transport.RegistryConfig = "/home/offline/changed-registry";
+                await using var recovered = f.Service();
+                var recovery = recovered.RecoverAsync();
+                if (f.Transport.BlockPreflight)
+                    await f.Transport.RecoveryEntered.Task.WaitAsync(TimeSpan.FromSeconds(3));
+                else
+                {
+                    await recovery.WaitAsync(TimeSpan.FromSeconds(3));
+                    Check(recovered.Get(run.RunId)!.Status == "needs-attention" && f.Transport.Launches == 1,
+                        "Changed registry was adopted or automatically relaunched");
+                }
+                var stopped = await recovered.CancelAsync(run.Key, run.RunId).WaitAsync(TimeSpan.FromSeconds(3));
+                await recovery.WaitAsync(TimeSpan.FromSeconds(3));
+                Check(stopped!.Status == "cancelled" && !stopped.MayBeRunning && stopped.WorktreeRetained &&
+                    stopped.Output.Contains("FAKE-READY"), "Captured-registry cancellation lost truthful state, output or work");
+                foreach (var call in f.Transport.Calls.Where(c => c.Operation is "launch" or "follow" or "status" or "stop" or "history"))
+                {
+                    Check(call.Script.Contains("export XDG_CONFIG_HOME='/home/offline/config '\\''registry'") &&
+                        call.Script.Contains(stateOverride.Length == 0 ? "unset BGTASK_STATE_DIR" :
+                            "export BGTASK_STATE_DIR='/home/offline/task registry '\\''override'"),
+                        "Launch and control did not use the same captured task registry");
+                    if (call.Operation is "status" or "stop" or "follow" or "history")
+                        Check(!call.Script.Contains("source ") && !call.Script.Contains("nvm"),
+                            "Emergency task control re-entered potentially blocking environment setup");
+                }
+            }
+        });
         await test("Copilot failed uncertain cancellation retains its cross-dashboard reservation and exact-run retry proves stop", async () =>
         {
             using var f = new Fixture();
@@ -443,6 +486,8 @@ static class CopilotRecoveryTests
         public string Cleanup = "REMOVED";
         public bool SessionAvailable = true, LockHeld, WorkspaceRemoved;
         public bool BlockPreflight, BlockFollowers;
+        public string? RegistryConfig;
+        public string RegistryOverride = "";
         public readonly TaskCompletionSource RecoveryEntered = new(TaskCreationOptions.RunContinuationsAsynchronously);
         public readonly TaskCompletionSource ReleasePreflight = new(TaskCreationOptions.RunContinuationsAsynchronously);
         public readonly TaskCompletionSource ReleaseFollowers = new(TaskCreationOptions.RunContinuationsAsynchronously);
@@ -469,7 +514,8 @@ static class CopilotRecoveryTests
                     return new(0, Protocol("Offline-Ubuntu", "offline", "/home/offline", "/home/offline/source",
                     "/home/offline/source/.git", "/home/offline/bin/copilot", "/home/offline/bin/bgtask", Help, "/home/offline/.copilot",
                     "origin", "https://dev.azure.com/offline-org/offline-project/_git/offline-repo",
-                    "https://dev.azure.com/offline-org/offline-project/_git/offline-repo", new string('a', 64)), "");
+                    "https://dev.azure.com/offline-org/offline-project/_git/offline-repo", new string('a', 64)) +
+                    (RegistryConfig is null ? "" : "ADOPRVIEW_TASK_REGISTRY\0" + RegistryConfig + "\0" + RegistryOverride + "\0END_TASK_REGISTRY\0"), "");
                 case "prepare": return new(0, Protocol("WORKTREE", "/home/offline/.local/state/ado-prview/runs/" + r.Arguments[6],
                     "/home/offline/.local/state/ado-prview/runs/" + r.Arguments[6] + "/worktree"), "");
                 case "launch":
