@@ -126,10 +126,20 @@ each lane. Click a counter to filter by it.
 - **Blocked** — failures and required fixes: merge conflicts, a failed build or
   check, unresolved comments, open review-bot findings, a rejecting vote, and so
   on. These are what the inline Copilot Fix is for.
-- **Waiting** — other automated work (builds, checks, review bot) is pending, or
-  merge verification remains and no human action is available.
-- **Ready** — no outstanding actions or observed merge uncertainty remains;
-  auto-complete can complete when ADO's policies allow.
+- **Waiting** — other automated work (builds, checks, review bot) is pending,
+  merge verification remains and no human action is available, or nothing is
+  left but for ADO to complete the PR with its auto-complete ("Auto-complete is
+  set; waiting for Azure DevOps to complete the PR.").
+- **Completed** — read-only history of your and watched authors' PRs that ADO
+  reports as completed (merged) in the last 7 days, newest first. It is opt-in:
+  **All** and the counts beside it stay active-only. Each full refresh checks
+  up to 100 completions per repository; when that limit is reached, a note says
+  watched PRs may be missing, even if none matched. If history cannot be read,
+  the note says so and active PRs are unaffected. Completed rows have only
+  **Open** (and **Hide** from the row menu, undone with Ctrl+Z). A PR that ADO
+  reports completed during a refresh moves there once; abandoned PRs never
+  appear. A running Fix for that PR keeps its output and **Cancel run** below
+  the table.
 
 The Needs Human lane highlights available human work, not a guarantee that the
 merge preview is complete, current or clean, or that every policy is green. Open the
@@ -154,7 +164,7 @@ requirement and no warnings or waits are invented.
   Background refreshes and row actions retain surviving rows' order, even when
   their Updated time or lane changes. Current lane labels/colors and header
   counts remain live; new PRs append and removed/hidden PRs disappear. Refresh
-  restores Needs Human / Blocked / Waiting / Ready priority, then newest Updated
+  restores Needs Human / Blocked / Waiting priority, then newest Updated
   within each lane. Search and lane/repo filters do not re-sort.
   If a displayed PR changes lane while a lane filter is active, it stays
   accessible with its new lane label until Refresh or you change a filter;
@@ -220,6 +230,21 @@ prompt**), a **Merge** card (merge status, merge re-check, branches,
 auto-complete, review bot, author, created), the policies and the reviewers with
 their votes. Build policies have **Re-queue** and a link to the build.
 
+Expanded details lead with what needs action: approval, load errors and failed
+gates come first. A Fix run that is live, recovering, possibly still running or
+needs attention comes next, with its status, **Cancel run** and output. The
+description and Status/Merge cards follow. Explain, the video card and finished
+or not-started Fix runs come after that context; their launchers and readable
+output stay visible. The Status card shows the Fix PR execution scope (`--yolo`,
+worktree, push limits) once per PR beside **Fix PR**. Retained runs below the
+table and ignored drafts with runs show it once above their run cards. While a
+run is live, **Show run** scrolls to that run and focuses its output.
+
+In a narrow window the table scrolls sideways. Once a row's PR title column is
+out of view, a small `!id · repo` cue appears at the top-left of each row so you
+can still tell rows apart. It is display-only and does not take clicks or
+keyboard focus.
+
 For a failed build policy, a **Failed gate** card lists the failed tasks and
 their reported issues. The first failed task's log tail loads automatically;
 other tasks have **Load log tail**. Loaded logs offer **Timestamps** and **Copy**.
@@ -270,7 +295,7 @@ Pending or unverified merge information does not hide otherwise available human
 actions: **Needs Human** can appear in the first snapshot without any clock
 advance. Other pending builds/checks/review-bot gates still take precedence, as
 do observed conflicts, failure and policy rejection (**Blocked**). With no
-human work, an unverified merge stays **Waiting**, not **Ready**.
+human work, an unverified merge stays **Waiting**.
 Ref-read failures are visible and retried on the next refresh.
 Existing merge options are preserved. No merge, branch push, policy change or
 auto-complete change is part of these automatic checks.

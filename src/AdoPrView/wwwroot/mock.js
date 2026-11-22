@@ -124,8 +124,8 @@ Fixes AB#1234`;
       agency: { state: 'none', detail: 'No Review Bot review reported on this PR; no active run is confirmed' },
       gates: { ...okGates, build: g('na', 'None'), reviews: g('human', 'Needs +1'), agency: g('warn', 'No report'), pop: g('na', '—'), autocomplete: g('human', 'Not set') },
     }),
-    base(110, 'sample-deploy', 'Rotate ingress certificates for sample sites', 'ready', {
-      autoCompleteBy: 'Sam Example', updated: 1, gates: okGates,
+    base(110, 'sample-deploy', 'Rotate ingress certificates for sample sites', 'waiting', {
+      autoCompleteBy: 'Sam Example', updated: 1, waiting: ['Auto-complete is set; waiting for Azure DevOps to complete the PR.'], gates: okGates,
     }),
   ];
 
@@ -143,7 +143,14 @@ Fixes AB#1234`;
     triageInstructions: null,
     wslDistro: null, wslRepoDirectories: {},
   };
-  const snapshot = { prs, lastRefresh: iso(0.4), refreshing: false, error: null, repoErrors: [], me: 'Sam Example',
+  // Watched completions from the last 7 days; read-only and separate from active prs.
+  const done = (id, repo, title, mins, author) => ({ key: `${repo}-id:${id}`, id, title, url: url(repo, id), org, project, repo, repoId: `${repo}-id`,
+    author: author || me, isMine: !author, isHidden: false, closed: iso(mins), closedBy: author ? null : me.name });
+  const completed = [
+    done(96, 'sample-api', 'Retire the v1 health endpoint', 90),
+    done(94, 'sample-operator', 'Bump controller-runtime to the current minor', 60 * 30, { name: 'Riley Reviewer', uniqueName: 'riley@contoso.example', id: 'riley' }),
+  ];
+  const snapshot = { prs, completed, completedWarnings: ['sample-service: Checked 100 completions in this repository; watched PRs may be missing.'], lastRefresh: iso(0.4), refreshing: false, error: null, repoErrors: [], me: 'Sam Example',
     approvalProvider: { name: 'Sample approval', linkUrl: null, linkLabel: null }, approvalProviderError: null };
   const runs = new Map();
   const explanations = new Map();

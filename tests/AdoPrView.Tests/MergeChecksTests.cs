@@ -342,7 +342,7 @@ static class MergeChecksTests
             var a = f.Add(); var b = f.Add("repo-two");
             await f.Service.RefreshAsync();
             a.Draft = true;
-            await f.Service.RefreshAsync(); // Ready -> Needs Human, with unchanged target.
+            await f.Service.RefreshAsync(); // Awaiting completion -> Needs Human, with unchanged target.
             f.Store.Update(s => s.Hidden.Add(a.Key));
             await f.Service.RefreshAsync();
             f.FailLists.Add("repo-two");
@@ -679,7 +679,84 @@ static class MergeChecksTests
             await f.Service.RefreshOneAsync(p.Key);
             Check(f.View(p).Blockers.Count(x => x.Contains("Merge conflicts")) == 1, "Reclassification duplicated blockers");
         });
-    }
+
+        await test("completed history: a capped raw page with no watched match still warns and stays apart from active PRs", async () =>
+        {
+            using var f = new Fixture();
+            var active = f.Add();
+            f.CompletedNoise = PrService.CompletedTop;
+            await f.Service.RefreshAsync();
+            var s = f.Service.Current;
+            Check(s.Completed.Count == 0 && s.CompletedWarnings.SequenceEqual(new[] { "repo-one: Checked 100 completions in this repository; watched PRs may be missing." }),
+                "Capped history without watched matches did not warn: " + string.Join("|", s.CompletedWarnings));
+            var q = f.CompletedQueries.Single();
+            Check(q.Contains("searchCriteria.queryTimeRangeType=closed") && q.Contains("searchCriteria.minTime=2026-10-25T00:00:00Z") && q.Contains("$top=100"),
+                "Wrong completed-history query: " + q);
+            Check(s.Prs.Single().Key == active.Key && s.Error is null && s.RepoErrors.Count == 0, "History cap affected active refresh");
+            f.CompletedNoise = PrService.CompletedTop - 1;
+            await f.Service.RefreshAsync();
+            Check(f.Service.Current.CompletedWarnings.Count == 0, "Uncapped page warned");
+        });
+
+        await test("completed history: watched in-window completions sort by closed date; abandoned, old and unwatched never appear", async () =>
+        {
+            using var f = new Fixture();
+            f.Store.Current.Whitelist.Add("Friend");
+            PullRequest Done(int id, string closed, string author = "me", string status = "completed")
+            {
+                var p = f.Add(id: id); p.Status = status; p.Closed = closed; p.Author = author; return p;
+            }
+            var old = Done(2, "2026-10-20T00:00:00Z");
+            var newest = Done(3, "2026-10-31T12:00:00Z");
+            var hidden = Done(4, "2026-10-27T00:00:00Z");
+            var abandoned = Done(5, "2026-10-30T00:00:00Z", status: "abandoned");
+            var stranger = Done(6, "2026-10-30T00:00:00Z", author: "stranger");
+            var friend = Done(7, "2026-10-29T00:00:00Z", author: "Friend");
+            f.Store.Current.Hidden.Add(hidden.Key);
+            await f.Service.RefreshAsync();
+            var c = f.Service.Current.Completed;
+            Check(c.Select(x => x.Key).SequenceEqual(new[] { newest.Key, friend.Key, hidden.Key }), "Wrong history rows/order: " + string.Join(",", c.Select(x => x.Key)));
+            Check(c[0].IsMine && !c[1].IsMine && c[2].IsHidden && !c[0].IsHidden && c.All(x => x.ClosedBy is null), "History lost mine/hidden or invented closedBy");
+            Check(f.Service.Current.Prs.Count == 0, "History entered active PRs");
+            try { f.Service.Find(newest.Key); throw new Exception("Completed PR became actionable"); }
+            catch (InvalidOperationException) { }
+        });
+
+        await test("completed history: obtained completed detail moves a PR exactly once; disappearance and abandonment never do", async () =>
+        {
+            using var f = new Fixture();
+            var p = f.Add(); var gone = f.Add(id: 2); var abandoned = f.Add(id: 3); var during = f.Add(id: 4);
+            await f.Service.RefreshAsync();
+            p.Status = "completed"; p.Closed = "2026-10-31T00:00:00Z";
+            await f.Service.RefreshOneAsync(p.Key);
+            var s = f.Service.Current;
+            Check(s.Prs.All(x => x.Key != p.Key) && s.Completed.Single().Key == p.Key, "Detail completion did not move into history");
+            Check(!System.Text.Json.JsonSerializer.Serialize(s.Prs[0]).Contains("CompletedAt"), "Internal completion evidence changed the PR wire type");
+            abandoned.Status = "abandoned"; abandoned.Closed = "2026-10-31T00:00:00Z";
+            await f.Service.RefreshOneAsync(abandoned.Key);
+            Check(f.Service.Current.Completed.Single().Key == p.Key && f.Service.Current.Prs.All(x => x.Key != abandoned.Key), "Abandoned PR entered history");
+            gone.Status = "completed"; // No dated completion evidence: it only disappears.
+            f.BeforePrRead = (pr, _) => { if (pr == during) { during.Status = "completed"; during.Closed = "2026-10-31T06:00:00Z"; } };
+            var snaps = new List<Snapshot>();
+            f.Service.Changed += snaps.Add;
+            await f.Service.RefreshAsync();
+            Check(snaps[0].Refreshing && snaps[0].Completed.Single().Key == p.Key, "Refreshing snapshot dropped history");
+            var keys = f.Service.Current.Completed.Select(x => x.Key).ToList();
+            Check(keys.SequenceEqual(new[] { during.Key, p.Key }), "History duplicated, missed a detail move, or inferred completion: " + string.Join(",", keys));
+            Check(f.Service.Current.Prs.All(x => x.Key != during.Key && x.Key != gone.Key), "Completed PR stayed active");
+        });
+
+        foreach (var (body, status) in new[] { ("""{"message":"denied"}""", HttpStatusCode.Forbidden), ("{}", HttpStatusCode.OK), ("", HttpStatusCode.OK), ("""{"value":{}}""", HttpStatusCode.OK) })
+            await test("completed history unavailable (" + status + " " + body + ") warns without harming active PRs", async () =>
+            {
+                using var f = new Fixture();
+                var p = f.Add();
+                f.CompletedResponse = (body, status);
+                await f.Service.RefreshAsync();
+                var s = f.Service.Current;
+                Check(s.Error is null && s.RepoErrors.Count == 0 && s.Prs.Single().Key == p.Key && s.Prs[0].Error is null, "History failure harmed active results");
+                Check(s.Completed.Count == 0 && s.CompletedWarnings.Single().StartsWith("repo-one: Completed history unavailable"), "History failure was hidden as an empty success");
+            });    }
 
     sealed class Clock : TimeProvider
     {
@@ -700,9 +777,10 @@ static class MergeChecksTests
         public string? Preview = Fixture.Old;
         public string Author = "me";
         public bool Draft;
+        public string? Closed;
         public JsonNode Json() => new JsonObject
         {
-            ["pullRequestId"] = Id, ["title"] = "Offline PR " + Id, ["status"] = Status, ["isDraft"] = Draft,
+            ["pullRequestId"] = Id, ["title"] = "Offline PR " + Id, ["status"] = Status, ["isDraft"] = Draft, ["closedDate"] = Closed,
             ["mergeStatus"] = MergeStatus, ["sourceRefName"] = "refs/heads/topic-" + Id, ["targetRefName"] = "refs/heads/main",
             ["mergeFailureMessage"] = MergeFailure,
             ["createdBy"] = new JsonObject { ["id"] = Author, ["displayName"] = Author },
@@ -735,6 +813,9 @@ static class MergeChecksTests
         public HttpStatusCode? PatchFailure;
         public string? PatchFailureKey;
         public bool ReturnQueued = true;
+        public int CompletedNoise;
+        public (string Body, HttpStatusCode Status)? CompletedResponse;
+        public readonly List<string> CompletedQueries = [];
         public Action<PullRequest, int>? BeforePrRead;
         public TaskCompletionSource? HoldPatch;
         public TaskCompletionSource PatchEntered = new(TaskCreationOptions.RunContinuationsAsynchronously);
@@ -786,6 +867,14 @@ static class MergeChecksTests
                         return Response(failure == HttpStatusCode.OK ? """{"value":[]}""" : """{"message":"ref read denied"}""", failure);
                     result = new JsonObject { ["value"] = new JsonArray(new JsonObject { ["name"] = "refs/heads/main", ["objectId"] = Heads[repo] },
                         new JsonObject { ["name"] = "refs/heads/main-extra", ["objectId"] = New }) };
+                }
+                else if (tail.Length == 2 && uri.Query.Contains("searchCriteria.status=completed"))
+                {
+                    CompletedQueries.Add(Uri.UnescapeDataString(uri.Query));
+                    if (CompletedResponse is { } r) return Response(r.Body, r.Status);
+                    // Unwatched completions fill the raw page so a cap can be reached with no watched match.
+                    var noise = Enumerable.Range(9000, CompletedNoise).Select(n => { var x = new PullRequest(repo, n) { Status = "completed", Author = "stranger", Closed = "2026-10-31T00:00:00Z" }; return x.Json(); });
+                    result = new JsonObject { ["value"] = new JsonArray(_prs.Where(p => p.Repo == repo && p.Status != "active").Select(p => p.Json()).Concat(noise).ToArray()) };
                 }
                 else if (tail.Length == 2)
                 {

@@ -74,7 +74,13 @@ public sealed class PrView
     public List<ReviewerView> Reviewers { get; } = new();
     public AgencyView? Agency { get; set; }
     public string? Error { get; set; }
+    // Set only when an obtained ADO response says completed; never inferred from disappearance.
+    internal DateTimeOffset? CompletedAt { get; set; }
 }
+
+// Read-only history row: deliberately not a PrView, so actions and Find never see it.
+public sealed record CompletedPr(string Key, int Id, string Title, string Url, string Org, string Project, string Repo,
+    string RepoId, Person Author, bool IsMine, bool IsHidden, DateTimeOffset Closed, string? ClosedBy);
 
 public sealed class Snapshot
 {
@@ -84,6 +90,8 @@ public sealed class Snapshot
     public bool Refreshing { get; init; }
     public string? Error { get; init; }
     public List<string> RepoErrors { get; init; } = new();
+    public List<CompletedPr> Completed { get; init; } = new();
+    public List<string> CompletedWarnings { get; init; } = new();
     public string? Me { get; init; }
     public string? MergeCheckStatus { get; init; }
     public long OrderRevision { get; init; }

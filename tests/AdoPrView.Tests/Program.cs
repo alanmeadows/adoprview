@@ -69,6 +69,7 @@ PrView Pr(string repo = "sample-repo", string org = "contoso", string project = 
 };
 PolicyView Policy(string kind, string status, bool automaticReview = false, string? description = null, bool blocking = true, bool requiresLatestApproval = false) =>
     new("offline", kind, kind, status, blocking, null, null, false, automaticReview, description, requiresLatestApproval);
+bool AwaitingAdoCompletion(PrView pr) => pr.Lane == Lane.Waiting && pr.Waiting.SequenceEqual(new[] { PrService.AutoCompleteWaiting });
 void Check([System.Diagnostics.CodeAnalysis.DoesNotReturnIf(false)] bool condition, string message)
 {
     if (!condition) throw new Exception(message);
@@ -219,8 +220,8 @@ foreach (var needsApproval in new[] { false, true })
         if (needsApproval) pr.Policies.Add(Policy("review", "queued"));
         pr.Agency = new("partial", 1, 1, "review bot completed with partial coverage");
         PrService.Classify(pr);
-        Check(pr.Lane == (needsApproval ? Lane.NeedsHuman : Lane.Ready), "Completed partial review kept PR waiting");
-        Check(pr.Waiting.Count == 0 && pr.Gates["agency"].State == "warn" && pr.Gates["agency"].Label == "Partial", "Coverage warning was lost or treated as running");
+        Check(needsApproval ? pr.Lane == Lane.NeedsHuman && pr.Waiting.Count == 0 : AwaitingAdoCompletion(pr), "Completed partial review kept PR waiting on automation");
+        Check(pr.Gates["agency"].State == "warn" && pr.Gates["agency"].Label == "Partial", "Coverage warning was lost or treated as running");
         return Task.CompletedTask;
     });
 
@@ -283,7 +284,7 @@ foreach (var (marker, expected) in new[] { ("No issues found", "clean"), ("Block
         threads["value"]![0]!["status"] = "fixed";
         PrService.ParseThreads(pr, threads, BotIterations(7), "current", bot);
         PrService.Classify(pr);
-        Check(pr.Agency?.State == expected && pr.Lane == Lane.Ready && pr.Waiting.Count == 0, "Recorded review bot result became an imaginary in-progress run");
+        Check(pr.Agency?.State == expected && AwaitingAdoCompletion(pr), "Recorded review bot result became an imaginary in-progress run");
         Check(pr.Agency.Detail.Contains("updates do not trigger another Review bot review"), "Later updates are not explained");
         return Task.CompletedTask;
     });
@@ -325,7 +326,7 @@ await Test("partial coverage warning survives resolution of the run's findings",
     threads["value"]![1]!["status"] = "fixed";
     PrService.ParseThreads(pr, threads, BotIterations(7), "current", bot);
     PrService.Classify(pr);
-    Check(pr.Agency?.State == "partial" && pr.Gates["agency"].State == "warn" && pr.Lane == Lane.Ready, "Resolved findings erased the partial-coverage warning");
+    Check(pr.Agency?.State == "partial" && pr.Gates["agency"].State == "warn" && AwaitingAdoCompletion(pr), "Resolved findings erased the partial-coverage warning");
     return Task.CompletedTask;
 });
 
@@ -346,7 +347,7 @@ await Test("a newer observed clean review replaces an older partial result", () 
     var pr = Pr();
     PrService.ParseThreads(pr, BotThreads("Iteration #1 **Partial review**", "Iteration #3 **No issues found**"), BotIterations(7), "current", bot);
     PrService.Classify(pr);
-    Check(pr.Agency?.State == "clean" && pr.Agency.Iteration == 3 && pr.Lane == Lane.Ready, "A later actual review outcome was ignored");
+    Check(pr.Agency?.State == "clean" && pr.Agency.Iteration == 3 && AwaitingAdoCompletion(pr), "A later actual review outcome was ignored");
     return Task.CompletedTask;
 });
 
@@ -417,7 +418,7 @@ await Test("only required no-vote reviewers create a human action", () =>
         pr.Reviewers.Add(new("Reviewer", 0, required, false));
         pr.Policies.Add(Policy("review", "queued", blocking: false));
         PrService.Classify(pr);
-        Check(pr.Lane == (required ? Lane.NeedsHuman : Lane.Ready), "Wrong handling of optional/required reviewer");
+        Check(required ? pr.Lane == Lane.NeedsHuman : AwaitingAdoCompletion(pr), "Wrong handling of optional/required reviewer");
     }
     return Task.CompletedTask;
 });

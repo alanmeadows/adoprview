@@ -896,14 +896,15 @@ test('Needs Human label, filter, reviewer gate and status explain the human requ
   assert.match(hooks.renderDetail(pr), /Waiting on reviewer\(s\) to approve/);
 });
 
-test('Ready retains partial coverage warning without claiming all gates are green', () => {
+test('Awaiting ADO completion is Waiting and retains partial coverage warning without claiming all gates are green', () => {
   const { hooks, pr, elements } = setup();
-  pr.lane = 'ready';
+  pr.lane = 'waiting';
   pr.humanActions = [];
+  pr.waiting = ['Auto-complete is set; waiting for Azure DevOps to complete the PR.'];
   pr.gates.agency = { state: 'warn', label: 'Partial', detail: 'Review bot completed with partial coverage' };
-  hooks.S.lane = 'ready';
+  hooks.S.lane = 'waiting';
   hooks.setSnapshot({ ...hooks.S.snap, prs: [pr] });
-  assert.match(elements.get('#rows').innerHTML, /No outstanding actions/);
+  assert.match(hooks.renderDetail(pr), /Auto-complete is set; waiting for Azure DevOps to complete the PR\./);
   assert.match(elements.get('#rows').innerHTML, /Partial/);
   assert.ok(!elements.get('#rows').innerHTML.includes('All gates green'));
 });
@@ -1084,7 +1085,7 @@ test('confirmed hides undo in reverse order without undoing other row actions', 
 
 test('Updated and lane changes preserve surviving positions; only explicit Refresh revisions sort them', () => {
   const { hooks, pr, elements } = setup();
-  const second = { ...pr, key: 'repo:456', id: 456, updated: '2026-01-01', lane: 'ready' };
+  const second = { ...pr, key: 'repo:456', id: 456, updated: '2026-01-01', lane: 'waiting' };
   pr.updated = '2026-01-02';
   hooks.setSnapshot({ prs: [second, pr], lastRefresh: '2026-01-01', orderRevision: 0 });
   assert.deepEqual(Array.from(hooks.S.snap.prs, p => p.key), [pr.key, second.key]);
@@ -1136,9 +1137,9 @@ test('active lane filters retain a row that changes lane during actions until ex
   hooks.setSnapshot(hooks.S.snap);
   hooks.S.lane = 'needsHuman';
   hooks.renderRows();
-  hooks.setSnapshot({ ...hooks.S.snap, prs: [{ ...pr, lane: 'ready' }] });
+  hooks.setSnapshot({ ...hooks.S.snap, prs: [{ ...pr, lane: 'waiting' }] });
   assert.match(elements.get('#rows').innerHTML, /data-key="repo:123"/);
-  assert.match(elements.get('#rows').innerHTML, /row-lane[^>]*>Ready/);
+  assert.match(elements.get('#rows').innerHTML, /row-lane[^>]*>Waiting/);
   assert.match(elements.get('#statusline').innerHTML, /changed lane stay here/);
   hooks.setSnapshot({ ...hooks.S.snap, orderRevision: 1 });
   assert.equal(elements.get('#empty').hidden, false);
@@ -1178,7 +1179,7 @@ test('Fix PR starts once with captured identity, never clipboard/focus; Copy pro
   assert.equal(calls[0].method, 'startCopilot');
   assert.equal(calls[0].key, pr.key);
   const r = { key: pr.key, id: pr.id, repo: pr.repo, title: pr.title, runId: 'offline-1', status: 'running', message: 'Started fake CLI', output: '<script>not executable</script>', worktreePath: '/tmp/offline-worktree' };
-  hooks.setSnapshot({ ...hooks.S.snap, prs: [{ ...pr, updated: '2099-01-01', lane: 'ready' }] });
+  hooks.setSnapshot({ ...hooks.S.snap, prs: [{ ...pr, updated: '2099-01-01', lane: 'waiting' }] });
   resolve(r); await first;
   assert.equal(hooks.runForPr(pr.key).runId, r.runId);
   assert.match(hooks.actionButtons(pr).match(/<button[^>]*data-act="triage"[^>]*>/)[0], /running/);
@@ -1280,7 +1281,7 @@ test('active run panel stays with its own row across lanes, search, repo, scope 
   const ownRunCard = () => (rows().split('<div class="pr ').find(chunk => chunk.includes(`data-key="${pr.key}"`)) || '').includes('data-run-id="live-1"');
   const views = [
     () => { hooks.S.lane = 'needsHuman'; }, () => { hooks.S.lane = 'blocked'; }, () => { hooks.S.lane = 'waiting'; },
-    () => { hooks.S.lane = 'ready'; }, () => { hooks.S.lane = null; hooks.S.q = 'no-such-pr'; },
+    () => { hooks.S.lane = 'completed'; }, () => { hooks.S.lane = null; hooks.S.q = 'no-such-pr'; },
     () => { hooks.S.q = ''; hooks.S.repo = 'sample-api'; }, () => { hooks.S.repo = ''; hooks.S.scope = 'watched'; },
     () => { hooks.S.scope = 'all'; },
   ];
@@ -1504,7 +1505,7 @@ test('failed-build log tails with equal build and log ids stay separate per orga
   hooks.S.snap.prs = [a, b, c];
   const calls = [];
   window.MockHost.rpc = async (method, p) => {
-    calls.push([method, p]);
+    calls.push(JSON.parse(JSON.stringify([method, p])));
     if (method === 'logTail') return `tail for ${p.key}`;
   };
   const settle = () => new Promise((resolve) => setImmediate(resolve));
@@ -1523,4 +1524,53 @@ test('failed-build log tails with equal build and log ids stay separate per orga
     assert.equal(calls.at(-1)[1].text, `tail for ${p.key}`);
   }
   assert.equal(calls.filter(([m]) => m === 'logTail').length, 3);
+});
+
+test('Completed lane is opt-in read-only history: counts, warnings, filters, Open/Hide/Undo and no active actions', async () => {
+  const { hooks, pr, window, elements } = setup();
+  const done = { key: 'other:96', id: 96, repo: 'history-only', title: 'Merged change', isMine: true,
+    url: 'https://dev.azure.com/contoso/Sample/_git/history-only/pullrequest/96', closed: '2026-01-02T00:00:00Z', closedBy: null };
+  const friend = { ...done, key: 'other:94', id: 94, title: 'Friend change', isMine: false, author: { name: 'Riley' } };
+  const lanes = () => elements.get('#laneCounters').innerHTML;
+  const chip = lane => lanes().match(new RegExp(`data-lane="${lane}"[^>]*>\\s*<span class="bar"></span><span class="n">(\\d+)`))[1];
+  hooks.setSnapshot({ ...hooks.S.snap, completed: [], completedWarnings: ['sample-service: Checked 100 completions in this repository; watched PRs may be missing.'] });
+  hooks.renderHeader();
+  assert.equal(chip('completed'), '0');
+  assert.equal(hooks.baseVisible().length, 1, 'All/totals remain active-only');
+  hooks.S.lane = 'completed'; hooks.renderRows();
+  assert.match(elements.get('#rows').innerHTML, /Checked 100 completions in this repository; watched PRs may be missing\./, 'Capped history warns with zero matches');
+  assert.equal(elements.get('#empty').hidden, false);
+
+  hooks.setSnapshot({ ...hooks.S.snap, completed: [done, friend] });
+  hooks.renderHeader();
+  assert.equal(chip('completed'), '2', 'History-only snapshot change updates the chip');
+  assert.match(elements.get('#repoFilter').innerHTML, /<option >history-only<\/option>/);
+  const rows = elements.get('#rows').innerHTML;
+  assert.match(rows, /data-key="other:96" data-completed/);
+  assert.doesNotMatch(rows, /data-key="repo:123"/);
+  assert.deepEqual([...rows.matchAll(/data-act="([^"]+)"/g)].map(m => m[1]), ['open', 'open'], 'Only Open; no toggle or launchers');
+  hooks.S.scope = 'mine'; hooks.renderHeader(); assert.equal(chip('completed'), '1');
+  hooks.S.scope = 'all'; hooks.S.q = 'friend'; hooks.renderHeader(); assert.equal(chip('completed'), '1');
+  hooks.S.q = ''; hooks.S.repo = 'sample-service'; hooks.renderHeader(); assert.equal(chip('completed'), '0');
+  hooks.S.repo = null;
+
+  const calls = [];
+  window.MockHost.rpc = async (method, p) => {
+    calls.push(JSON.parse(JSON.stringify([method, p])));
+    if (method === 'hide') return { ...hooks.S.settings, hidden: [p.key] };
+    if (method === 'unhide') return { ...hooks.S.settings, hidden: [] };
+    return {};
+  };
+  for (const act of ['fix', 'autocomplete', 'approve', 'toggle']) await hooks.onAction(act, {}, done.key);
+  assert.deepEqual(calls, [], 'Completed keys never reach active-only actions');
+  await hooks.onAction('open', {}, done.key);
+  assert.deepEqual(calls.at(-1), ['openUrl', { url: done.url }]);
+  await hooks.onAction('hide', {}, done.key);
+  assert.deepEqual(calls.at(-1), ['hide', { key: done.key }]);
+  assert.equal(chip('completed'), '1');
+  assert.doesNotMatch(elements.get('#rows').innerHTML, /data-key="other:96"/);
+  await hooks.undoHide();
+  assert.deepEqual(calls.at(-1), ['unhide', { key: done.key }]);
+  assert.equal(chip('completed'), '2');
+  assert.equal(pr.lane, 'needsHuman');
 });
