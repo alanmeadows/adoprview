@@ -934,9 +934,46 @@ function updateCopilotRun(r) {
     cancel.dataset.runId = r.runId;
   }
   if (!old) { renderRunShelf(true); renderRows(true); restoreRunOutputs(previousSelection); return; }
-  // Render (deferred while rows are in use) only when the run group's leading/trailing placement changes.
-  const detail = [...document.querySelectorAll('#rows > .pr')].find(el => el.dataset.key === r.key)?.querySelector(':scope > .detail[data-run-lead]');
-  if (detail && detail.dataset.runLead !== String(+runLeads(r.key))) renderRows(true);
+  relocateRunGroup(r.key);
+}
+
+// Move the existing run group (same nodes, reading and selection) when its leading/trailing placement changes.
+function relocateRunGroup(key) {
+  const detail = [...document.querySelectorAll('#rows > .pr')].find(el => el.dataset.key === key)?.querySelector(':scope > .detail[data-run-lead]');
+  const p = S.snap.prs.find(x => x.key === key), lead = runLeads(key);
+  if (!detail || !p || detail.dataset.runLead === String(+lead)) return;
+  if (rowsInUse() || crossRunOutputSelection()) { S.rowsPending = true; renderStatus(); return; }
+  const cards = [...detail.querySelectorAll('.copilot-run')];
+  if (!cards.length) { renderRows(true); return; }
+  const selection = captureRunOutputs();
+  detail.querySelector('.lead-blockers')?.remove();
+  let leading = detail.firstElementChild.classList.contains('full') ? detail.firstElementChild : null;
+  if (lead) {
+    if (!leading) { leading = document.createElement('div'); leading.className = 'full stack'; detail.prepend(leading); }
+    leading.insertAdjacentHTML('beforeend', leadBlockersCard(p));
+    leading.append(...cards);
+  } else {
+    detail.lastElementChild.append(...cards);
+    if (leading && !leading.children.length) leading.remove();
+  }
+  for (const card of cards) {
+    const view = S.runOutputs.get(card.dataset.runId);
+    if (view) { view.element.scrollTop = view.top; view.element.scrollLeft = view.left; view.top = view.element.scrollTop; }
+  }
+  restoreRunOutputSelection(selection);
+  detail.dataset.runLead = String(+lead);
+}
+
+const humanText = a => ({ reviews: 'Human reviewer approval needed (+1)', pop: 'Proof of Presence — tap your security key', autocomplete: 'Auto-complete not set', publish: 'Draft — publish when ready' }[a] || a);
+
+// A leading run must not bury blockers that no leading card above already conveys (e.g. conflicts, required reviews).
+function leadBlockersCard(p) {
+  const approvalCard = !!(p.approval || S.approvals.has(p.key));
+  const reasons = p.error || (p.failedBuilds || []).length ? [] : [
+    ...(p.blockers || []).map(x => ['fail', x]),
+    ...(p.humanActions || []).filter(a => a !== 'reviews' || !approvalCard).map(a => ['human', humanText(a)]),
+  ];
+  return reasons.length ? `<div class="card lead-blockers"><h3>Blocking</h3><div class="body"><ul class="list blockers">${reasons.map(([c, t]) => `<li><span class="dot ${c}"></span><span class="k">${esc(t)}</span></li>`).join('')}</ul></div></div>` : '';
 }
 
 function syncCopilotButton(key) {
@@ -1152,7 +1189,6 @@ function renderDetail(p) {
   const runGroup = renderRunCard(p.key) + earlierRunCards(p.key);
   const lead = runLeads(p.key);
   const trailing = [renderExplanation(p.key), renderVideo(p.key), ...(lead ? [] : [runGroup])];
-  const humanText = a => ({ reviews: 'Human reviewer approval needed (+1)', pop: 'Proof of Presence — tap your security key', autocomplete: 'Auto-complete not set', publish: 'Draft — publish when ready' }[a] || a);
 
   if (p.approval || S.approvals.has(p.key)) {
     const outcome = S.approvals.get(p.key);
@@ -1199,13 +1235,8 @@ function renderDetail(p) {
       <button class="mini" data-act="url" data-url="${esc(fb.url)}">${svg('ext')} Open logs</button></h3>${tasks}</div>`);
   }
   if (lead) {
-    // A leading run must not bury blockers that no leading card above already conveys (e.g. conflicts, required reviews).
-    const approvalCard = !!(p.approval || S.approvals.has(p.key));
-    const reasons = p.error || (p.failedBuilds || []).length ? [] : [
-      ...(p.blockers || []).map(x => ['fail', x]),
-      ...(p.humanActions || []).filter(a => a !== 'reviews' || !approvalCard).map(a => ['human', humanText(a)]),
-    ];
-    if (reasons.length) full.push(`<div class="card lead-blockers"><h3>Blocking</h3><div class="body"><ul class="list blockers">${reasons.map(([c, t]) => `<li><span class="dot ${c}"></span><span class="k">${esc(t)}</span></li>`).join('')}</ul></div></div>`);
+    const blockers = leadBlockersCard(p);
+    if (blockers) full.push(blockers);
     full.push(runGroup);
   }
 
