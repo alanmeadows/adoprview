@@ -1629,8 +1629,8 @@ test('real row hit testing and action identity across refreshes', { timeout: 900
       const results = [];
       for (const mode of ['forward', 'backward']) for (const lost of [false, true]) {
         await crossLogSelectionFixture(mode);
-        await evaluate(`window.crossOutput.scrollTop=window.crossOutput.scrollHeight-window.crossOutput.clientHeight;
-          window.scrollTo(0,window.scrollY+window.crossOutput.getBoundingClientRect().top-100);`);
+        await evaluate('window.crossOutput.scrollTop=window.crossOutput.scrollHeight-window.crossOutput.clientHeight');
+        await elementPoint('[data-run-id="cross-selected-run"] .run-output');
         await frame();
         await evaluate(`{const box=window.crossOutput.getBoundingClientRect();
           const range=document.caretRangeFromPoint(box.left+12,box.top+9);
