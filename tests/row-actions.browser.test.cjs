@@ -1376,7 +1376,8 @@ test('real row hit testing and action identity across refreshes', { timeout: 900
         await click(await elementPoint('#lateUndoFixture')); await frame();
         assert.equal((await calls()).filter(c => c.method === 'unhide').length, 1, 'Undo is usable again after dismissal');
       } finally {
-        await evaluate(`if(S.drawer)closeDrawer();document.querySelector('#statusline').inert=false;S.settings=${JSON.stringify(savedSettings)};render()`);
+        await evaluate(`if(S.drawer)closeDrawer();document.querySelector('#statusline').inert=false;
+          document.querySelector('#toasts').replaceChildren();S.settings=${JSON.stringify(savedSettings)};render()`);
       }
     });
 
