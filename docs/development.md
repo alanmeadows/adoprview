@@ -260,6 +260,11 @@ used by the native dialog: returned cleanup/history diagnostics remain visible,
 clean stopped results stay informational, and uncertain/missing results never
 claim inactive proof. This is offline notice composition, not a displayed
 WPF dialog or installed-app E2E.
+`Copilot terminal history` publishes failed/completed/cancelled state while a
+fake reader ignores cancellation, then clicks the captured actual native menu
+target. Stop and disposal must remain bounded, preserve real exit codes and
+partial logs/work/stop proof, and send no redundant task Stop or cleanup.
+The fake reader is released and menu items disposed in `finally`.
 
 The smaller kernel-control opt-in executes the exact production runner in an
 explicitly selected, already-responsive WSL distribution:

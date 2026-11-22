@@ -652,6 +652,9 @@ retained log again; Stop does not duplicate history in the current run.
 Native Stop includes returned cleanup/history diagnostics in its own warning
 dialog, even when the dashboard is unavailable. A warning does not undo verified
 inactive state or imply that an unconfirmed task stopped.
+An already-captured Stop action also interrupts pending terminal history after
+the task exits, even if its displayed status has already changed to completed
+or failed. Terminal status does not mean background reconciliation has finished.
 
 Output uses a grow-on-demand tail buffer with the same retained-output limit,
 so empty or short saved histories do not each reserve the maximum buffer.

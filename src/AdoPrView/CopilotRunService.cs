@@ -209,7 +209,8 @@ public sealed partial class CopilotRunService : IAsyncDisposable
         }
         // Signal first: neither durable IO nor output/notification locks may delay transport cancellation.
         var wasActive = entry.State.IsActive;
-        if (wasActive || entry.State.MayBeRunning || entry.State.Status == "needs-attention")
+        if (wasActive || entry.State.MayBeRunning || entry.State.Status == "needs-attention" ||
+            !entry.Completion.IsCompleted)
             SignalCancellation(entry, entry.Cancellation);
         Update(entry, s => s.IsActive ? s with { Status = "cancelling" } : s);
         if (store is not null) store.RequestCancel(runId);

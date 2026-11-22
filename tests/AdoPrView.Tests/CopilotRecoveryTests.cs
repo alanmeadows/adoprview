@@ -23,6 +23,61 @@ static class CopilotRecoveryTests
 
     public static async Task Run(Func<string, Func<Task>, Task> test)
     {
+        await test("Copilot terminal history pending after exit stops from the captured native menu", async () =>
+        {
+            foreach (var (terminal, code) in new[] { ("failed", 1), ("completed", 0), ("cancelled", 143) })
+            {
+                using var f = new Fixture();
+                f.Transport.Cleanup = "RETAINED";
+                await using var first = f.Service();
+                var run = await first.StartAsync(Request());
+                await Wait(first, run.RunId, s => s.Output.Contains("FAKE-READY"));
+                f.Transport.End(code);
+                await Wait(first, run.RunId, s => s.Status == (code == 0 ? "completed" : "failed"));
+                await first.DisposeAsync();
+                var saved = f.Store.Load().Single().Saved!;
+                f.Store.Write(saved with { State = saved.State with { Status = terminal } });
+                var cleanups = f.Transport.Cleanups;
+                f.Transport.BlockHistory = true;
+                await using var recovered = f.Service();
+                var recovery = recovered.RecoverAsync();
+                Task<CopilotRunState?>? stop = null;
+                System.Windows.Forms.ToolStripMenuItem[] items = [];
+                try
+                {
+                    await f.Transport.HistoryEntered.Task.WaitAsync(TimeSpan.FromSeconds(3));
+                    Check(recovered.Get(run.RunId) is { IsActive: false, MayBeRunning: false } current &&
+                        current.Status == terminal, "Fixture did not publish terminal state before pending history");
+                    items = MainWindow.CopilotStopMenuItems([run],
+                        selected => stop = recovered.CancelAsync(selected.Key, selected.RunId));
+                    Check(items.Length == 1 && items[0].Enabled, "Captured native menu lost its exact active target");
+                    items[0].PerformClick();
+                    var final = await (stop ?? throw new Exception("Captured Stop did not call cancellation"))
+                        .WaitAsync(TimeSpan.FromSeconds(3)) ?? throw new Exception("Stop returned no recovered run");
+                    Check(final is { Status: "cancelled", MayBeRunning: false, WorktreeRetained: true } &&
+                        final.ExitCode == code && final.Error?.Contains("logs") == true &&
+                        final.Output.Contains("FAKE-READY") && f.Transport.HistoryReaders.Count == 1 &&
+                        f.Transport.Launches == 1 && f.Transport.Stops == 0 && f.Transport.Cleanups == cleanups &&
+                        f.Store.Load().Single().Saved!.TaskConfirmedStopped,
+                        "Terminal history Stop lost real outcome, partial logs/work or owned inactive proof");
+                    Check(final.OutputOffset == saved.State.OutputOffset + f.Transport.RecordedOutput.Length &&
+                        final.Output.IndexOf("FAKE-READY", StringComparison.Ordinal) ==
+                            final.Output.LastIndexOf("FAKE-READY", StringComparison.Ordinal),
+                        "Terminal history Stop duplicated its partial replay or changed the accepted offset");
+                    foreach (var reader in f.Transport.HistoryReaders) reader("LATE-HISTORY-REPLY\n");
+                    Check(recovered.Get(run.RunId)!.Output == final.Output,
+                        "Abandoned terminal history changed stopped output");
+                    await recovered.DisposeAsync().AsTask().WaitAsync(TimeSpan.FromSeconds(3));
+                }
+                finally
+                {
+                    f.Transport.ReleaseHistory.TrySetResult();
+                    foreach (var item in items) item.Dispose();
+                    await recovery.WaitAsync(TimeSpan.FromSeconds(3));
+                    if (stop is not null) await stop.WaitAsync(TimeSpan.FromSeconds(3));
+                }
+            }
+        });
         await test("Copilot recovery history cannot delay verified Stop or change inactive state", async () =>
         {
             foreach (var (historyFirst, failure, complete, longHistory) in new[]
