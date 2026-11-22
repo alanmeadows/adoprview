@@ -1419,7 +1419,8 @@ test('real row hit testing and action identity across refreshes', { timeout: 900
         for (const id of ['sel-rec','sel-new','sel-old']) S.runs.delete(id);
         S.runs.set('shelf-new',{...pr,runId:'shelf-new',status:'completed',mayBeRunning:false,startedAt:'2026-01-02T00:00:00Z',output:'Shelf newer\\n',outputOffset:12});
         S.runs.set('shelf-old',{...pr,runId:'shelf-old',id:0,status:'needs-attention',mayBeRunning:false,startedAt:'2026-01-01T00:00:00Z',output:'Shelf older\\n',outputOffset:12});
-        S.expanded.add('${key}');render();setSnapshot({...S.snap,orderRevision:(S.snap.orderRevision||0)+1,prs:S.snap.prs.filter(p=>p.key!=='${key}')});}`);
+        render();setSnapshot({...S.snap,orderRevision:(S.snap.orderRevision||0)+1,prs:S.snap.prs.filter(p=>p.key!=='${key}')});
+        S.expanded.add('${key}');renderRunShelf();}`);
       await frame();
       const shelfMain = () => evaluate(`[...document.querySelectorAll('#runShelf [data-key="${key}"] .copilot-run')].map(c=>[c.dataset.runId,c.classList.contains('run-earlier')])`);
       assert.deepEqual(await shelfMain(), [['shelf-new', false], ['shelf-old', true]]);
