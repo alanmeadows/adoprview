@@ -750,6 +750,7 @@ test('real row hit testing and action identity across refreshes', { timeout: 900
         const confirmed = 'Auto-complete confirmed by ADO, set by Offline Reviewer — click to cancel';
         await assertLabels(confirmed, 'cancelAuto');
         evidence.push({ state: 'confirmed', labels: await labels() });
+        assert.deepEqual(await evaluate('window.confirmations'), [], 'Setting Auto still has no confirmation');
         await evaluate(`document.querySelector('[data-key="${key}"] .detail [data-act="cancelAuto"]').focus();`);
         assert.equal(await evaluate(`document.activeElement===document.querySelector('[data-key="${key}"] .detail [data-act="cancelAuto"]')`), true);
         await keyboard(' ', 32);
@@ -760,9 +761,10 @@ test('real row hit testing and action identity across refreshes', { timeout: 900
         evidence.push({ state: 'cancelled', labels: await labels() });
         assert.deepEqual(await evaluate(`window.autoEffectsCalls.filter(c=>c.method==='autoComplete')`),
           [{ method: 'autoComplete', key, enable: true }, { method: 'autoComplete', key, enable: false }]);
-        assert.deepEqual(await evaluate('window.confirmations'), []);
+        assert.deepEqual(await evaluate('window.confirmations'), ['Cancel auto-complete on !101?']);
       } finally {
-        t.diagnostic(JSON.stringify({ scenarios: evidence, rpc: await evaluate(`window.autoEffectsCalls.filter(c=>c.method==='autoComplete')`) }));
+        t.diagnostic(JSON.stringify({ scenarios: evidence, rpc: await evaluate(`window.autoEffectsCalls.filter(c=>c.method==='autoComplete')`),
+          confirmations: await evaluate('window.confirmations') }));
         await evaluate(`MockHost.rpc=window.autoEffectsRpc;delete window.autoEffectsRpc;
           if(S.drawer)closeDrawer();S.settings=${JSON.stringify(savedSettings)};`);
         await reset();
