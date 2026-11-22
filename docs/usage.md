@@ -53,6 +53,9 @@ calls used see [DESIGN.md](DESIGN.md); for building and tests see
 - The current refresh interval is shown in the status bar and is configurable
   in Settings (default: 2 minutes; merge re-check: 10 minutes).
 
+Settings keeps keyboard focus inside the drawer and makes background controls
+inert. Closing Settings returns focus to its opener, including after theme updates.
+
 ### Themes
 
 Choose **Settings > Appearance > Theme**: **Light Mode** (the default, inspired
@@ -653,6 +656,83 @@ abandoned or no longer returned), its runs appear, collapsed, below the table in
 the unfiltered view only. **Cancel run** targets only that app-owned task.
 Changing views never cancels a run.
 
+If the dashboard browser is busy, right-click the native tray icon and select
+**Stop Copilot run → !number repository**. This bypasses the browser and does
+not wait for unrelated startup recovery. Cancellation signals the owned
+transport before durable IO; short status/stop/ownership probes have bounded
+response limits independent of transport cancellation callbacks. An explicit
+stop, including one arriving before CLI identity capture, escalates TERM to KILL only for the new
+runner's own CLI group, after verifying its captured parent/group/session and
+Linux start time; a missing or reused leader is refused. No process-name searches or global WSL
+termination are used. Already-running runners retain their original scripts.
+If descendants or ownership cannot be proven stopped (including a held
+execution lock), the app keeps the reservation and reports uncertainty rather
+than claiming success. Worktrees and supervised logs remain available.
+During blocked or failed shutdown, exact-run controls stay available until
+other service teardown succeeds. A failed exit restores browser output delivery.
+Native Stop entries include the full run ID to distinguish retained runs for
+the same PR. Unreadable history without a PR identity is not an actionable target.
+New launches capture the Linux HOME, XDG config directory and any
+`BGTASK_STATE_DIR` override. Launch, status, Stop and log access use that same
+registry even if shell configuration changes. Exact-task control and ownership
+probes do not re-source environment files for these captured runs, so a blocked
+setup cannot redirect or hold their Stop request. Recovery refuses automatic
+resume if the captured registry changed; explicit Stop still checks the original
+task identity. Older records without registry context retain ownership checks
+and report missing/ambiguous tasks as unconfirmed rather than guessing a registry.
+Private prompt removal also bypasses shell initialization and has a separate
+two-second response limit. If removal fails or times out after a verified Stop,
+the task remains truthfully stopped with its work retained and an explicit
+private-prompt cleanup warning; cleanup cannot keep Stop waiting for setup.
+Ownership/history commands likewise bypass initialization for older records,
+using the same environment as their identity-checked status command rather
+than sourcing a potentially different registry after Stop.
+Stop also interrupts pending recovery for a needs-attention record whose task
+is already confirmed stopped. It rechecks owned identity and the free execution
+lock without sending another Stop to an exited task, and preserves its real
+exit code rather than replacing it with a synthetic cancellation code.
+Recovery log replay observes Stop cancellation. Once Stop is verified, replay
+has an independent two-second limit; unavailable history reports a warning
+without changing verified stopped state or removing retained logs/work.
+An interrupted replay retains received output and its offsets instead of
+restarting the same log from the beginning. A new dashboard can replay the
+retained log again; Stop does not duplicate history in the current run.
+Native Stop includes returned cleanup/history diagnostics in its own warning
+dialog, even when the dashboard is unavailable. A warning does not undo verified
+inactive state or imply that an unconfirmed task stopped.
+An already-captured Stop action also interrupts pending terminal history after
+the task exits, even if its displayed status has already changed to completed
+or failed. Terminal status does not mean background reconciliation has finished.
+Completed-run cleanup also observes Stop and dashboard detachment. Interrupted
+cleanup retains the verified completed outcome and reports a cleanup warning;
+an abandoned late reply cannot mark the worktree removed. Normal cleanup keeps
+its existing ownership, publication and execution-lock checks.
+Recovery callbacks recheck their individual replay lifetime inside the output
+lock. A callback admitted before Stop cannot append afterward; replay closure
+also rejects deferred callbacks without resetting output accounting.
+
+Output uses a grow-on-demand tail buffer with the same retained-output limit,
+so empty or short saved histories do not each reserve the maximum buffer.
+Native delivery keeps at most one
+unacknowledged browser message plus the latest pending snapshot per run. A busy
+browser cannot accumulate an unlimited output/dispatcher queue. Updates
+retain the latest terminal/status update while acknowledgements are missing;
+pending runs are served fairly even while another run keeps streaming.
+Older lifecycle/output replay cannot replace a newer pending or in-flight
+snapshot during delivery restoration.
+Repeated errors during one unresolved delivery failure are reported once.
+A successful resynchronization post resets that suppression, so a later
+delivery failure is reported again; abandoned late posts do not reset it.
+Dashboard ready/init resynchronizes after navigation or reload. Monotonic
+lifecycle revisions reject old same-output status/worktree snapshots. The initial
+dashboard response also reads authoritative run states and the latest PR snapshot
+after asynchronous lists finish. Whole PR snapshots have a separate publication
+revision, so delayed init/refresh messages cannot replace newer displayed or
+queued state. This does not change row-order or interaction-pause behavior.
+These changes do not cap CPU/RAM or automatically kill tasks; whole-system resource exhaustion
+can still affect the app and Windows.
+
+
 **Open in Azure DevOps** and external links use the same validated HTTPS
 launcher. If Windows cannot open its default browser, the action reports an
 error instead of closing the dashboard; check Windows' default HTTPS app or
@@ -664,7 +744,7 @@ and report a native error when the dashboard cannot display one.
 
 Tracked launches are recorded atomically under
 `%LOCALAPPDATA%\AdoPrView\CopilotRuns`, separately from settings and credentials.
-Records contain captured PR/workspace/task/session identity, status and log
+Records contain captured PR/workspace/task/session identity, task-registry paths, status and log
 pointers, not the prompt, output body or credentials. WSL ownership receipts and
 supervised logs remain in their existing run/task locations. Cross-instance
 reservations and run leases prevent duplicate launches, resumes and cleanup.

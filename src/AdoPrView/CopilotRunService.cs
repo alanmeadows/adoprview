@@ -43,6 +43,7 @@ public sealed record CopilotRunState(
     public int ResumeAttempts { get; init; }
     public string? LogPath { get; init; }
     public long OutputOffset { get; init; }
+    public long Revision { get; init; }
     public bool MayBeRunning { get; init; }
     public string? PreparationLogPath { get; init; }
 }
@@ -114,6 +115,7 @@ public sealed partial class CopilotRunService : IAsyncDisposable
     readonly Timer notifications;
     bool disposed, stopping;
     Task? disposal;
+    internal Action? BeforeRunRegistration { get; set; }
 
     public CopilotRunService(ICopilotRunTransport? transport = null, string? stateDirectory = null)
     {
@@ -126,7 +128,7 @@ public sealed partial class CopilotRunService : IAsyncDisposable
     public event Action<CopilotRunState>? Changed;
     public IReadOnlyList<CopilotRunState> Runs => List();
 
-    public Task<CopilotRunState> StartAsync(CopilotRunRequest request) => Task.FromResult(Start(request));
+    public Task<CopilotRunState> StartAsync(CopilotRunRequest request) => Task.Run(() => Start(request));
 
     public CopilotRunState Start(CopilotRunRequest request)
     {
@@ -141,44 +143,89 @@ public sealed partial class CopilotRunService : IAsyncDisposable
             var id = Guid.NewGuid().ToString("N");
             entry = new(new(id, request, "preparing", Notice(request) + "\n", null, null,
                 null, null, null, "not-created", DateTimeOffset.UtcNow, null) { SessionId = Guid.NewGuid().ToString() });
-            if (store is not null)
-            {
-                entry.DriverLease = store.Reserve(Save(entry), PrIdentity);
-            }
             activePrs.Add(PrIdentity(request));
-            initial = entry.State;
-            runs.Add(id, entry);
-            // Schedule outside the caller's UI turn; even fake transports may complete synchronously.
-            entry.Completion = Task.Run(() => ExecuteAsync(entry));
+        }
+        try
+        {
+            if (store is not null) entry.DriverLease = store.Reserve(Save(entry), PrIdentity);
+            BeforeRunRegistration?.Invoke();
+            lock (gate)
+            {
+                ObjectDisposedException.ThrowIf(disposed || stopping, this);
+                initial = entry.State;
+                runs.Add(entry.State.RunId, entry);
+                // Schedule outside the caller's UI turn; even fake transports may complete synchronously.
+                entry.Completion = Task.Run(() => ExecuteAsync(entry));
+            }
+        }
+        catch
+        {
+            try
+            {
+                if (entry.DriverLease is not null)
+                {
+                    var abandoned = entry.State with { Status = "cancelled", MayBeRunning = false,
+                        FinishedAt = DateTimeOffset.UtcNow, Error = "Startup was abandoned before a task was launched." };
+                    store!.Write(Save(entry, abandoned));
+                    lock (gate) entry.State = abandoned;
+                }
+            }
+            finally
+            {
+                entry.DriverLease?.Dispose();
+                lock (gate) activePrs.Remove(PrIdentity(request));
+            }
+            throw;
         }
         return initial;
     }
 
     public CopilotRunState? Get(string runId)
     {
-        lock (gate) return runs.TryGetValue(runId, out var entry) ? entry.State : null;
+        lock (gate)
+        {
+            if (!runs.TryGetValue(runId, out var entry)) return null;
+            CaptureOutput(entry);
+            return entry.State;
+        }
     }
 
     public IReadOnlyList<CopilotRunState> List()
     {
-        lock (gate) return runs.Values.Select(e => e.State).OrderByDescending(s => s.StartedAt).ToArray();
+        lock (gate)
+        {
+            foreach (var e in runs.Values) CaptureOutput(e);
+            return runs.Values.Select(e => e.State).OrderByDescending(s => s.StartedAt).ToArray();
+        }
     }
 
-    public async Task<CopilotRunState?> CancelAsync(string runId)
+    public Task<CopilotRunState?> CancelAsync(string runId)
+    {
+        lock (gate)
+        {
+            if (!runs.TryGetValue(runId, out var entry)) return Task.FromResult<CopilotRunState?>(null);
+            if (entry.StopWork is null || entry.StopWork.IsCompleted)
+                entry.StopWork = Task.Run(() => CancelCoreAsync(runId));
+            return entry.StopWork;
+        }
+    }
+
+    async Task<CopilotRunState?> CancelCoreAsync(string runId)
     {
         Entry? entry;
         lock (gate)
         {
             if (!runs.TryGetValue(runId, out entry)) return null;
-            if (store is not null) store.RequestCancel(runId);
-            if (entry.State.IsActive)
-            {
-                Update(entry, s => s with { Status = "cancelling" });
-                entry.Cancellation.Cancel();
-            }
         }
+        // Signal first: neither durable IO nor output/notification locks may delay transport cancellation.
+        var wasActive = entry.State.IsActive;
+        if (wasActive || entry.State.MayBeRunning || entry.State.Status == "needs-attention" ||
+            !entry.Completion.IsCompleted)
+            SignalCancellation(entry, entry.Cancellation);
+        Update(entry, s => s.IsActive ? s with { Status = "cancelling" } : s);
+        if (store is not null) store.RequestCancel(runId);
         await entry.Completion.ConfigureAwait(false);
-        if (store is not null && entry.State.Status == "needs-attention")
+        if (store is not null && !wasActive && (entry.State.Status == "needs-attention" || entry.State.MayBeRunning || entry.UncertainStop))
         {
             entry.DriverLease ??= store.TryLease(entry.State.RunId);
             if (entry.DriverLease is null)
@@ -190,9 +237,11 @@ public sealed partial class CopilotRunService : IAsyncDisposable
                 entry.Environment = latest.Environment;
                 entry.RunDirectory = latest.RunDirectory;
                 entry.LaunchIntent = latest.LaunchIntent;
+                entry.TaskConfirmedStopped = latest.TaskConfirmedStopped;
                 entry.TaskIdentity = latest.TaskIdentity;
                 Update(entry, s => latest.State with { Request = s.Request, Output = s.Output, OutputOffset = s.OutputOffset });
-                if (latest.State.Status is "completed" or "cancelled" or "failed")
+                if ((latest.State.Status is "completed" or "cancelled" or "failed") && !latest.State.MayBeRunning &&
+                    (!latest.LaunchIntent || latest.TaskConfirmedStopped))
                 {
                     lock (gate) activePrs.Remove(PrIdentity(entry.State.Request));
                 }
@@ -202,13 +251,16 @@ public sealed partial class CopilotRunService : IAsyncDisposable
                 {
                     if (entry.Environment is null) throw new RunSetupException("A verified saved WSL environment is required to cancel this task.");
                     var ownership = await VerifyRunAsync(entry).ConfigureAwait(false);
-                    var task = ReadOwnedTask(entry, await Invoke("status", entry.Environment.Distribution, StatusScript,
+                    var task = ReadOwnedTask(entry, await InvokeRun("status", entry.Environment, StatusScript,
                         [entry.Environment.Bgtask, entry.TaskName]).ConfigureAwait(false));
-                    if (task.Status == "running") await StopRecoveredAsync(entry).ConfigureAwait(false);
+                    var code = task.ExitCode;
+                    if (task.Status == "running") code = await StopRecoveredAsync(entry).ConfigureAwait(false);
                     else if (task.Status is not ("exited" or "dead") || ownership[1] != "FREE")
                         throw new RunSetupException("Run liveness is uncertain; cancellation cannot safely release its reservation.");
-                    await FinishRecoveredAsync(entry, "cancelled", task.ExitCode).ConfigureAwait(false);
+                    await FinishRecoveredAsync(entry, "cancelled", code).ConfigureAwait(false);
                 }
+                if (!entry.State.MayBeRunning && (!entry.LaunchIntent || entry.TaskConfirmedStopped))
+                    lock (gate) entry.UncertainStop = false;
             }
             catch (Exception ex)
             {
@@ -236,8 +288,8 @@ public sealed partial class CopilotRunService : IAsyncDisposable
         {
             if (disposed) return runs.Values.Select(e => e.State).ToArray();
             pending = runs.Values.Where(e => e.State.IsActive || e.UncertainStop || e.State.MayBeRunning).ToArray();
-            foreach (var e in pending.Where(e => e.State.IsActive)) e.Cancellation.Cancel();
         }
+        foreach (var e in pending.Where(e => e.State.IsActive || e.State.MayBeRunning)) SignalCancellation(e, e.Cancellation);
         await Task.WhenAll(pending.Select(e => e.Completion)).ConfigureAwait(false);
         foreach (var e in pending.Where(e => e.UncertainStop || e.State.MayBeRunning))
         {
@@ -252,9 +304,9 @@ public sealed partial class CopilotRunService : IAsyncDisposable
                     continue;
                 }
                 var env = e.Environment!;
-                var result = await Invoke("stop", env.Distribution, StopScript, [env.Bgtask, e.TaskName]).ConfigureAwait(false);
+                var result = await InvokeRun("stop", env, StopScript, [env.Bgtask, e.TaskName]).ConfigureAwait(false);
                 RequireSuccess(result, "The owned task stop could not be confirmed.");
-                var status = await Invoke("status", env.Distribution, StatusScript, [env.Bgtask, e.TaskName]).ConfigureAwait(false);
+                var status = await InvokeRun("status", env, StatusScript, [env.Bgtask, e.TaskName]).ConfigureAwait(false);
                 var code = ReadExitCode(status);
                 lock (gate)
                 {
@@ -263,7 +315,7 @@ public sealed partial class CopilotRunService : IAsyncDisposable
                     e.State = e.State with
                     {
                         Status = "cancelled", ExitCode = code, Error = "Owned task stopped after retry. Its worktree is retained.",
-                        FinishedAt = DateTimeOffset.UtcNow, MayBeRunning = false
+                        FinishedAt = DateTimeOffset.UtcNow, MayBeRunning = false, Revision = e.State.Revision + 1
                     };
                     activePrs.Remove(PrIdentity(e.State.Request));
                     e.Dirty = true;
@@ -284,7 +336,7 @@ public sealed partial class CopilotRunService : IAsyncDisposable
         {
             if (disposed) return ValueTask.CompletedTask;
             stopping = true;
-            if (disposal is null || disposal.IsFaulted) disposal = DisposeCoreAsync();
+            if (disposal is null || disposal.IsFaulted) disposal = Task.Run(DisposeCoreAsync);
             return new(disposal);
         }
     }
@@ -295,12 +347,9 @@ public sealed partial class CopilotRunService : IAsyncDisposable
         lock (gate)
         {
             pending = runs.Values.ToArray();
-            foreach (var e in pending)
-            {
-                e.Detaching = true;
-                e.DetachCancellation.Cancel();
-            }
+            foreach (var e in pending) e.Detaching = true;
         }
+        foreach (var e in pending) SignalCancellation(e, e.DetachCancellation);
         await Task.WhenAll(pending.Select(e => e.Completion)).ConfigureAwait(false);
         await notifications.DisposeAsync().ConfigureAwait(false);
         lock (gate)
@@ -359,7 +408,7 @@ public sealed partial class CopilotRunService : IAsyncDisposable
                 PreparationLogPath = e.RunDirectory + "/prepare.stderr" });
             CheckCli(env.Help);
             token.ThrowIfCancellationRequested();
-            var prepared = await Invoke("prepare", env.Distribution, PrepareScript,
+            var prepared = await InvokeRun("prepare", env, PrepareScript,
                 [env.Root, env.CommonDirectory, env.Remote, env.RemoteHash, r.SourceRef, r.SourceCommit.ToLowerInvariant(),
                     e.State.RunId, r.PrId.ToString(System.Globalization.CultureInfo.InvariantCulture), e.OwnershipToken, e.State.SessionId!,
                     r.PushToSource ? env.PushHash! : ""],
@@ -380,7 +429,7 @@ public sealed partial class CopilotRunService : IAsyncDisposable
             token.ThrowIfCancellationRequested();
             var fullPrompt = AppendAdditionalInstructions(r.Prompt + PublishInstructions(r, env.Remote, env.PushHash), r.AdditionalInstructions);
             if (fullPrompt.Length > 1024 * 1024) throw new RunSetupException("The complete fix prompt exceeds 1 MiB; shorten its instructions before retrying.");
-            var staged = await Invoke("stage-prompt", env.Distribution, StagePromptScript,
+            var staged = await InvokeRun("stage-prompt", env, StagePromptScript,
                 [e.RunDirectory], fullPrompt, token: token).ConfigureAwait(false);
             RequireSuccess(staged, "Could not securely stage the prompt in the app-owned run directory.");
             token.ThrowIfCancellationRequested();
@@ -388,14 +437,14 @@ public sealed partial class CopilotRunService : IAsyncDisposable
             launchAttempted = true;
             e.LaunchIntent = true;
             Update(e, s => s with { MayBeRunning = true });
-            var launched = await Invoke("launch", env.Distribution, LaunchScript,
+            var launched = await InvokeRun("launch", env, LaunchScript,
                 LaunchArguments(e, resume: false),
                 token: CancellationToken.None).ConfigureAwait(false);
             RequireSuccess(launched, "The managed WSL task could not be launched; the worktree is retained.");
             Update(e, s => s with { Status = "running", WorktreeStatus = "in-use" });
             if (store is not null)
             {
-                var task = ReadOwnedTask(e, await Invoke("status", env.Distribution, StatusScript, [env.Bgtask, e.TaskName],
+                var task = ReadOwnedTask(e, await InvokeRun("status", env, StatusScript, [env.Bgtask, e.TaskName],
                     token: token).ConfigureAwait(false));
                 e.TaskIdentity = task.Id;
                 Update(e, s => s with { LogPath = task.Log });
@@ -443,11 +492,11 @@ public sealed partial class CopilotRunService : IAsyncDisposable
                     if (store is not null) await StopRecoveredAsync(e).ConfigureAwait(false);
                     else
                     {
-                    var stopped = await Invoke("stop", env.Distribution, StopScript, [env.Bgtask, e.TaskName],
+                    var stopped = await InvokeRun("stop", env, StopScript, [env.Bgtask, e.TaskName],
                         token: CancellationToken.None).ConfigureAwait(false);
                     RequireSuccess(stopped, "The owned task stop could not be confirmed.");
                     }
-                    var status = await Invoke("status", env.Distribution, StatusScript, [env.Bgtask, e.TaskName],
+                    var status = await InvokeRun("status", env, StatusScript, [env.Bgtask, e.TaskName],
                         token: CancellationToken.None).ConfigureAwait(false);
                     exitCode = ReadExitCode(status);
                     e.TaskConfirmedStopped = true;
@@ -475,12 +524,14 @@ public sealed partial class CopilotRunService : IAsyncDisposable
                 try
                 {
                     // This removes only the private prompt, not the worktree or user files.
-                    await Invoke("discard-prompt", env.Distribution, DiscardPromptScript, [e.RunDirectory],
+                    var discarded = await InvokeRun("discard-prompt", env, DiscardPromptScript, [e.RunDirectory],
                         token: CancellationToken.None).ConfigureAwait(false);
+                    RequireSuccess(discarded, "Private prompt cleanup could not be confirmed.");
                     if (finalStatus == "completed" && e.TaskConfirmedStopped)
                     {
-                        var cleaned = await Invoke("cleanup", env.Distribution, CleanupScript, CleanupArguments(e),
-                            token: CancellationToken.None).ConfigureAwait(false);
+                        token.ThrowIfCancellationRequested();
+                        var cleaned = await InvokeRun("cleanup", env, CleanupScript, CleanupArguments(e),
+                            token: token).ConfigureAwait(false);
                         var disposition = ProtocolFields(cleaned.StandardOutput);
                         Update(e, s => s with
                         {
@@ -493,7 +544,9 @@ public sealed partial class CopilotRunService : IAsyncDisposable
                     else if (e.State.WorktreePath is not null) Update(e, s => s with { WorktreeStatus = "retained" });
                 }
                 catch { Update(e, s => s with { WorktreeStatus = s.WorktreePath is null ? "not-created" : "retained",
-                    Error = finalStatus == "completed" ? "Completed; cleanup failed. Worktree retained; completion is not resumable." : s.Error }); }
+                    Error = finalStatus == "completed" ? "Completed; cleanup failed. Worktree retained; completion is not resumable." :
+                        (s.Error is null ? "" : s.Error + "\n") +
+                        "Private prompt cleanup could not be confirmed; the private file may remain. Any work is retained." }); }
             }
             lock (gate)
             {
@@ -507,11 +560,77 @@ public sealed partial class CopilotRunService : IAsyncDisposable
         }
     }
 
-    Task<CopilotProcessResult> Invoke(string operation, string? distribution, string script, IReadOnlyList<string> arguments,
-        string? input = null, Action<string>? stdout = null, Action<string>? stderr = null, CancellationToken token = default) =>
-        transport.ExecuteAsync(new(operation, string.IsNullOrWhiteSpace(distribution) ? null : distribution,
+    Task<CopilotProcessResult> InvokeRun(string operation, EnvironmentInfo environment, string script, IReadOnlyList<string> arguments,
+        string? input = null, Action<string>? stdout = null, Action<string>? stderr = null, CancellationToken token = default,
+        TimeSpan? responseLimit = null) =>
+        Invoke(operation, environment.Distribution, script, arguments, input, stdout, stderr, token, responseLimit, environment);
+
+    internal async Task<CopilotProcessResult> Invoke(string operation, string? distribution, string script, IReadOnlyList<string> arguments,
+        string? input = null, Action<string>? stdout = null, Action<string>? stderr = null, CancellationToken token = default,
+        TimeSpan? responseLimit = null, EnvironmentInfo? environment = null)
+    {
+        var source = new CancellationTokenSource();
+        var cancellation = source.Token;
+        var limit = responseLimit ?? (operation == "discard-prompt" ? TimeSpan.FromSeconds(2) :
+            operation == "follow" ? Timeout.InfiniteTimeSpan :
+            TimeSpan.FromSeconds(operation is "stop" or "status" or "verify-run" ? 10 : 125));
+        var cancelGate = new object();
+        Task? cancelled = null;
+        Task CancelTransport()
+        {
+            lock (cancelGate) return cancelled ??= source.CancelAsync();
+        }
+        var registration = token.Register(() => _ = CancelTransport());
+        var acceptingOutput = 1;
+        var capturedControl = operation is "status" or "stop" or "discard-prompt" or "history" or "verify-run" ||
+            environment?.XdgConfigHome is not null && operation == "follow";
+        // A disconnected transport must not hold cancellation hostage or deliver late output into a detached run.
+        var work = Task.Run(() => transport.ExecuteAsync(new(operation, string.IsNullOrWhiteSpace(distribution) ? null : distribution,
             (operation == "preflight" ? PreflightDiagnosticsScript + "\n" : "") +
-            EnvironmentScript + "\n" + script, arguments, input), stdout, stderr, token);
+            (capturedControl ? "set -euo pipefail\nexport NO_COLOR=1 TERM=dumb" : EnvironmentScript) + "\n" +
+            CapturedTaskEnvironment(environment) + script, arguments, input),
+            stdout is null ? null : text => { if (Volatile.Read(ref acceptingOutput) != 0 && !token.IsCancellationRequested && !cancellation.IsCancellationRequested) stdout(text); },
+            stderr is null ? null : text => { if (Volatile.Read(ref acceptingOutput) != 0 && !token.IsCancellationRequested && !cancellation.IsCancellationRequested) stderr(text); }, cancellation));
+        try { return await work.WaitAsync(limit, token).ConfigureAwait(false); }
+        catch (TimeoutException)
+        {
+            throw new RunSetupException($"The {operation} transport exceeded its response limit. Task liveness is unconfirmed; work and its reservation are preserved.");
+        }
+        finally
+        {
+            Volatile.Write(ref acceptingOutput, 0);
+            registration.Dispose();
+            if (!work.IsCompleted || token.IsCancellationRequested) _ = CancelTransport();
+            // Abandoned work and callback failures are observed; neither may use a disposed source.
+            _ = Task.WhenAll(work, cancelled ?? Task.CompletedTask).ContinueWith(t =>
+            { _ = t.Exception; source.Dispose(); }, CancellationToken.None,
+                TaskContinuationOptions.ExecuteSynchronously, TaskScheduler.Default);
+        }
+    }
+
+    static string CapturedTaskEnvironment(EnvironmentInfo? environment)
+    {
+        if (environment is null) return "";
+        var script = "export HOME=" + ShellQuote(environment.Home) + "\n";
+        if (environment.XdgConfigHome is null) return script;
+        if (!environment.XdgConfigHome.StartsWith('/') ||
+            environment.BgtaskStateDirectory is null ||
+            environment.BgtaskStateDirectory.Length != 0 && !environment.BgtaskStateDirectory.StartsWith('/'))
+            throw new RunSetupException("The captured task registry context is invalid. Work and its reservation are preserved.");
+        return script + "export XDG_CONFIG_HOME=" + ShellQuote(environment.XdgConfigHome) + "\n" +
+            (environment.BgtaskStateDirectory.Length == 0 ? "unset BGTASK_STATE_DIR\n" :
+                "export BGTASK_STATE_DIR=" + ShellQuote(environment.BgtaskStateDirectory) + "\n");
+    }
+
+    void SignalCancellation(Entry entry, CancellationTokenSource source)
+    {
+        _ = source.CancelAsync().ContinueWith(t =>
+        {
+            _ = t.Exception;
+            Update(entry, s => s with { Error = (s.Error is null ? "" : s.Error + "\n") +
+                "An output transport cancellation callback failed. Only verified owned-task status establishes whether the task stopped." });
+        }, CancellationToken.None, TaskContinuationOptions.OnlyOnFaulted, TaskScheduler.Default);
+    }
 
     internal static void RequirePreflightSuccess(CopilotProcessResult result)
     {
@@ -593,8 +712,8 @@ public sealed partial class CopilotRunService : IAsyncDisposable
         while (true)
         {
             token.ThrowIfCancellationRequested();
-            var result = await Invoke("status", e.Environment!.Distribution, StatusScript,
-                [e.Environment.Bgtask, e.TaskName], token: token).ConfigureAwait(false);
+            var result = await InvokeRun("status", e.Environment!, StatusScript,
+                [e.Environment!.Bgtask, e.TaskName], token: token).ConfigureAwait(false);
             if (store is not null)
             {
                 var task = ReadOwnedTask(e, result);
@@ -624,7 +743,7 @@ public sealed partial class CopilotRunService : IAsyncDisposable
     {
         try
         {
-            return await Invoke("follow", e.Environment!.Distribution, FollowScript, [e.Environment.Bgtask, e.TaskName],
+            return await InvokeRun("follow", e.Environment!, FollowScript, [e.Environment!.Bgtask, e.TaskName],
                 stdout: text => Append(e, text, false), stderr: text => Append(e, text, true), token: token).ConfigureAwait(false);
         }
         catch (Exception ex) when (ex is IOException or Win32Exception)
@@ -646,13 +765,19 @@ public sealed partial class CopilotRunService : IAsyncDisposable
         return start < 0 ? [] : output[(start + marker.Length)..].TrimEnd('\0').Split('\0');
     }
 
-    static EnvironmentInfo ParseEnvironment(string output, CopilotRunRequest request)
+    internal static EnvironmentInfo ParseEnvironment(string output, CopilotRunRequest request)
     {
         var f = ProtocolFields(output);
         if (f.Length < 9 || f.Take(7).Any(string.IsNullOrWhiteSpace))
             throw new RunSetupException("WSL preflight returned invalid environment data.");
+        var hasRegistry = f.Length >= 13 && f[^4] == "ADOPRVIEW_TASK_REGISTRY" && f[^1] == "END_TASK_REGISTRY";
+        var xdgConfigHome = hasRegistry ? f[^3] : null;
+        var bgtaskStateDirectory = hasRegistry ? f[^2] : null;
+        if (hasRegistry && (!xdgConfigHome!.StartsWith('/') ||
+            bgtaskStateDirectory!.Length != 0 && !bgtaskStateDirectory.StartsWith('/')))
+            throw new RunSetupException("WSL preflight returned invalid task registry data. No task was launched.");
         var fetchMatched = false;
-        for (var i = 9; i + 3 < f.Length; i += 4)
+        for (var i = 9; i + 3 < (hasRegistry ? f.Length - 4 : f.Length); i += 4)
         {
             if (!RemoteMatches(f[i + 1], request.Organization, request.Project, request.Repository)) continue;
             fetchMatched = true;
@@ -661,7 +786,7 @@ public sealed partial class CopilotRunService : IAsyncDisposable
                 !f[i + 2].Split('\n').All(u => RemoteMatches(u, request.Organization, request.Project, request.Repository))))
                 continue;
             var hash = Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(f[i + 1]))).ToLowerInvariant();
-            return new(f[0], f[3], f[4], f[5], f[6], f[7], f[i], hash, f[2], f[8], f[i + 3]);
+            return new(f[0], f[3], f[4], f[5], f[6], f[7], f[i], hash, f[2], f[8], f[i + 3], xdgConfigHome, bgtaskStateDirectory);
         }
         throw new RunSetupException(fetchMatched
             ? "This run is authorized to publish, but no Git remote in the configured WSL checkout has a fetch URL and every effective push URL (including pushurl and pushInsteadOf rewrites) matching this PR's exact organization, project and repository. Nothing was pushed, Git configuration was not changed, and no worktree or Copilot task was created."
@@ -722,24 +847,48 @@ public sealed partial class CopilotRunService : IAsyncDisposable
 
     void Update(Entry e, Func<CopilotRunState, CopilotRunState> update)
     {
-        lock (gate) { e.State = update(e.State); e.Dirty = true; Persist(e); }
+        lock (e.PersistenceGate)
+        {
+            CopilotRunState next;
+            SavedRun saved;
+            lock (gate) { next = update(e.State) with { Revision = e.State.Revision + 1 }; saved = Save(e, next); }
+            if (store is not null && e.DriverLease is not null) store.Write(saved);
+            lock (gate)
+            {
+                e.State = next with { Output = e.State.Output, OutputOffset = e.State.OutputOffset };
+                e.Dirty = true;
+            }
+        }
     }
 
-    void Append(Entry e, string text, bool stderr)
+    void Append(Entry e, string text, bool stderr, bool history = false, CancellationToken token = default)
     {
-        lock (gate)
+        lock (e.OutputGate)
         {
+            if (e.Detaching || token.IsCancellationRequested || !history && e.Cancellation.IsCancellationRequested) return;
             var clean = (stderr ? e.StderrFilter : e.StdoutFilter).Filter(text);
             if (clean.Length == 0) return;
-            var output = e.State.Output + clean;
-            if (output.Length > MaxOutputCharacters)
+            e.Output.Append(clean);
+            e.OutputOffset += clean.Length;
+            e.OutputDirty = true;
+        }
+    }
+
+    static void CaptureOutput(Entry e)
+    {
+        lock (e.OutputGate)
+        {
+            if (!e.OutputDirty) return;
+            var output = e.Output.ToString();
+            if (e.Output.Truncated)
             {
                 const string prefix = "[Earlier output truncated]\n";
-                var start = output.Length - MaxOutputCharacters + prefix.Length;
-                if (start < output.Length && char.IsLowSurrogate(output[start])) start++;
+                var start = prefix.Length;
+                if (char.IsLowSurrogate(output[start])) start++;
                 output = prefix + output[start..];
             }
-            e.State = e.State with { Output = output, OutputOffset = e.State.OutputOffset + clean.Length };
+            e.State = e.State with { Output = output, OutputOffset = e.OutputOffset };
+            e.OutputDirty = false;
             e.Dirty = true;
         }
     }
@@ -751,6 +900,7 @@ public sealed partial class CopilotRunService : IAsyncDisposable
             CopilotRunState[] changed;
             lock (gate)
             {
+                foreach (var e in runs.Values) CaptureOutput(e);
                 changed = runs.Values.Where(e => e.Dirty).Select(e => { e.Dirty = false; return e.State; }).ToArray();
             }
             foreach (var state in changed)
@@ -766,12 +916,18 @@ public sealed partial class CopilotRunService : IAsyncDisposable
         public readonly CancellationTokenSource Cancellation = new();
         public readonly CancellationTokenSource DetachCancellation = new();
         public readonly TerminalFilter StdoutFilter = new(), StderrFilter = new();
+        public readonly object OutputGate = new(), PersistenceGate = new();
+        public readonly OutputTail Output = new(state.Output);
+        public long OutputOffset = state.OutputOffset;
+        public bool OutputDirty;
         public Task Completion = Task.CompletedTask;
+        public Task<CopilotRunState?>? StopWork;
         public string TaskName => "ado-prview-" + State.RunId;
         public string? RunDirectory;
         public EnvironmentInfo? Environment;
         public bool TaskConfirmedStopped, UncertainStop, Dirty = true;
         public bool Detaching, LaunchIntent;
+        public bool HistoryReplayStarted, HistoryReplayCompleted;
         public string OwnershipToken = Convert.ToHexString(RandomNumberGenerator.GetBytes(32)).ToLowerInvariant();
         public FileStream? DriverLease;
         public string? TaskIdentity;
@@ -779,8 +935,51 @@ public sealed partial class CopilotRunService : IAsyncDisposable
     }
 
     internal sealed record EnvironmentInfo(string Distribution, string Root, string CommonDirectory, string Copilot,
-        string Bgtask, string Help, string Remote, string RemoteHash, string Home, string CopilotHome, string? PushHash = null);
+        string Bgtask, string Help, string Remote, string RemoteHash, string Home, string CopilotHome, string? PushHash = null,
+        string? XdgConfigHome = null, string? BgtaskStateDirectory = null);
     sealed class RunSetupException(string message) : Exception(message);
+
+    internal sealed class OutputTail
+    {
+        char[] buffer = [];
+        int start, count;
+        public bool Truncated { get; private set; }
+        public OutputTail(string initial) => Append(initial);
+        public void Append(string text)
+        {
+            if (text.Length == 0) return;
+            Truncated |= text.Length > MaxOutputCharacters - count;
+            var required = Math.Min(MaxOutputCharacters, count + Math.Min(text.Length, MaxOutputCharacters));
+            if (required > buffer.Length)
+            {
+                var next = new char[Math.Min(MaxOutputCharacters, Math.Max(required, Math.Max(256, buffer.Length * 2)))];
+                var retained = Math.Min(count, buffer.Length - start);
+                buffer.AsSpan(start, retained).CopyTo(next);
+                buffer.AsSpan(0, count - retained).CopyTo(next.AsSpan(retained));
+                buffer = next;
+                start = 0;
+            }
+            if (text.Length >= buffer.Length)
+            {
+                text.AsSpan(text.Length - buffer.Length).CopyTo(buffer);
+                start = 0; count = buffer.Length;
+                return;
+            }
+            var end = (start + count) % buffer.Length;
+            var first = Math.Min(text.Length, buffer.Length - end);
+            text.AsSpan(0, first).CopyTo(buffer.AsSpan(end));
+            text.AsSpan(first).CopyTo(buffer);
+            var overflow = Math.Max(0, count + text.Length - buffer.Length);
+            start = (start + overflow) % buffer.Length;
+            count = Math.Min(buffer.Length, count + text.Length);
+        }
+        public override string ToString() => string.Create(count, this, (span, tail) =>
+        {
+            var first = Math.Min(tail.count, tail.buffer.Length - tail.start);
+            tail.buffer.AsSpan(tail.start, first).CopyTo(span);
+            tail.buffer.AsSpan(0, tail.count - first).CopyTo(span[first..]);
+        });
+    }
 
     sealed class TerminalFilter
     {
@@ -890,6 +1089,11 @@ public sealed partial class CopilotRunService : IAsyncDisposable
           pushhash="$(git remote get-url --push --all "$remote" | sha256sum)"
           printf '%s\0%s\0%s\0%s\0' "$remote" "$url" "$push" "${pushhash%% *}"
         done <<< "$remotes"
+        xdg_config="${XDG_CONFIG_HOME:-$HOME/.config}"
+        [[ "$xdg_config" == /* ]] || xdg_config="$root/$xdg_config"
+        bg_state="${BGTASK_STATE_DIR-}"
+        if [[ -n "$bg_state" && "$bg_state" != /* ]]; then bg_state="$root/$bg_state"; fi
+        printf 'ADOPRVIEW_TASK_REGISTRY\0%s\0%s\0END_TASK_REGISTRY\0' "$xdg_config" "$bg_state"
         trap - ERR
         """;
 
@@ -983,14 +1187,39 @@ public sealed partial class CopilotRunService : IAsyncDisposable
         unset COPILOT_ALLOW_ALL
         export COPILOT_ASSISTED_APPROVAL=false NO_COLOR=1 TERM=dumb
         set +e
-        child=""; interrupted=0
+        child=""; child_identity=""; interrupted=0
+        read_cli_identity() {
+          local stat fields
+          [[ -n "$child" && -r "/proc/$child/stat" ]] || return 1
+          IFS= read -r stat < "/proc/$child/stat" || return 1
+          read -ra fields <<< "${stat##*) }"
+          [[ "${fields[1]-}" == "$$" && "${fields[2]-}" == "$child" && "${fields[3]-}" == "$child" && -n "${fields[19]-}" ]] || return 1
+          printf '%s:%s:%s:%s' "${fields[1]}" "${fields[2]}" "${fields[3]}" "${fields[19]}"
+        }
+        owns_cli_group() {
+          [[ -n "$child_identity" && "$(read_cli_identity)" == "$child_identity" ]]
+        }
         stop_cli() {
           interrupted=143
-          if [[ -n "$child" ]]; then kill -TERM -- "-$child" 2>/dev/null || true; fi
+          trap '' TERM INT
+          # Refuse PID reuse or a missing leader; the execution lock must still prove every descendant stopped.
+          if owns_cli_group; then
+            kill -TERM -- "-$child" 2>/dev/null || true
+            for attempt in {1..10}; do
+              if ! owns_cli_group; then break; fi
+              sleep 0.1
+            done
+            if owns_cli_group; then kill -KILL -- "-$child" 2>/dev/null || true; fi
+          fi
         }
         trap stop_cli TERM INT
         setsid "$cli" --stream on --no-color --no-ask-user --yolo "${sessionargs[@]}" "${denies[@]}" <&3 &
         child=$!
+        for attempt in {1..10}; do
+          child_identity="$(read_cli_identity)" && break
+          sleep 0.01
+        done
+        if [[ "$interrupted" != 0 ]]; then stop_cli; fi
         wait "$child"; code=$?
         if [[ "$interrupted" != 0 ]]; then wait "$child"; code="$interrupted"; fi
         trap - TERM INT
@@ -1073,11 +1302,18 @@ public sealed class WslCopilotRunTransport : ICopilotRunTransport
             "export ADO_PRVIEW_BASH_ENV=\"${BASH_ENV-}\"; unset BASH_ENV; exec \"$@\"", "ado-prview-env" })
             info.ArgumentList.Add(arg);
         if (request.Operation != "follow")
-            foreach (var arg in new[] { "timeout", "--signal=TERM", "--kill-after=5s", "120s" }) info.ArgumentList.Add(arg);
+            foreach (var arg in new[] { "timeout", "--signal=TERM", "--kill-after=5s",
+                request.Operation is "stop" or "status" or "verify-run" ? "10s" : "120s" }) info.ArgumentList.Add(arg);
         // Raw string literals inherit the Windows source file's line endings, unlike prompt stdin.
         foreach (var arg in new[] { "bash", "--noprofile", "--norc", "-c", request.Script.Replace("\r\n", "\n"), "ado-prview" })
             info.ArgumentList.Add(arg);
         foreach (var arg in request.Arguments) info.ArgumentList.Add(arg);
+        return await ExecuteProcessAsync(info, request.StandardInput, stdout, stderr, cancellationToken).ConfigureAwait(false);
+    }
+
+    internal static async Task<CopilotProcessResult> ExecuteProcessAsync(ProcessStartInfo info, string? input,
+        Action<string>? stdout, Action<string>? stderr, CancellationToken cancellationToken)
+    {
         using var process = new Process { StartInfo = info };
         cancellationToken.ThrowIfCancellationRequested();
         process.Start();
@@ -1108,18 +1344,29 @@ public sealed class WslCopilotRunTransport : ICopilotRunTransport
         var errTask = Drain(process.StandardError, errors, stderr);
         try
         {
-            if (request.StandardInput is not null)
-                await process.StandardInput.WriteAsync(request.StandardInput.AsMemory(), cancellationToken).ConfigureAwait(false);
+            if (input is not null)
+                await process.StandardInput.WriteAsync(input.AsMemory(), cancellationToken).ConfigureAwait(false);
             process.StandardInput.Close();
             await process.WaitForExitAsync(cancellationToken).ConfigureAwait(false);
-            await Task.WhenAll(outTask, errTask).ConfigureAwait(false);
+            await Task.WhenAll(outTask, errTask).WaitAsync(TimeSpan.FromSeconds(5), cancellationToken).ConfigureAwait(false);
             return new(process.ExitCode, output.ToString(), errors.ToString());
         }
         catch
         {
             try { if (!process.HasExited) process.Kill(entireProcessTree: true); } catch (InvalidOperationException) { }
-            await process.WaitForExitAsync(CancellationToken.None).ConfigureAwait(false);
-            await Task.WhenAll(outTask, errTask).ConfigureAwait(false);
+            try
+            {
+                await process.WaitForExitAsync(CancellationToken.None).WaitAsync(TimeSpan.FromSeconds(5)).ConfigureAwait(false);
+                await Task.WhenAll(outTask, errTask).WaitAsync(TimeSpan.FromSeconds(5)).ConfigureAwait(false);
+            }
+            catch (TimeoutException)
+            {
+                process.StandardOutput.Dispose();
+                process.StandardError.Dispose();
+                _ = Task.WhenAll(outTask, errTask).ContinueWith(t => _ = t.Exception, CancellationToken.None,
+                    TaskContinuationOptions.OnlyOnFaulted | TaskContinuationOptions.ExecuteSynchronously, TaskScheduler.Default);
+                throw new IOException("The owned WSL transport did not close within its cleanup limit. The supervised task stop remains unconfirmed.");
+            }
             throw;
         }
     }

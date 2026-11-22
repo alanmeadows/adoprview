@@ -1201,6 +1201,186 @@ test('real row hit testing and action identity across refreshes', { timeout: 900
       }
     });
 
+    await t.test('GUI settings drawer contains keyboard focus, blocks background actions and returns to its opener', async () => {
+      const key = 'sample-service-id:101';
+      for (const provider of [false, true]) {
+        const surface = provider ? 'detail' : 'row';
+        await reset();
+        try {
+          await evaluate(`(()=>{
+            const snap=structuredClone(S.snap),pr=snap.prs.find(p=>p.key==='${key}');
+            pr.approval=${provider ? "{title:'Synthetic optional provider'}" : 'null'};
+            snap.approvalProvider=${provider ? "{name:'Synthetic optional provider'}" : 'null'};
+            ${provider ? `S.expanded.add('${key}');` : ''}
+            setSnapshot(snap);render();window.calls=[];
+          })()`);
+          assert.equal(await evaluate(`!!document.querySelector('[data-key="${key}"] .${surface} [data-act="approve"]:not([disabled])')`), true);
+          assert.equal(await evaluate(`!!document.querySelector('[data-key="${key}"] .row [data-act="generateApproval"]')`), provider);
+          for (const dismissal of ['close', 'escape', 'scrim']) {
+            await evaluate(`document.querySelector('#settingsBtn').focus()`);
+            await keyboard('Enter', 13);
+            assert.equal(await evaluate(`document.activeElement.id`), 'closeDrawer');
+            assert.equal(await evaluate(`document.querySelector('main').inert && document.querySelector('header').inert`), true);
+            const count = await evaluate(`[...document.querySelector('#drawer').querySelectorAll('button,input,select,textarea,a[href],[tabindex]')]
+              .filter(el=>!el.disabled && el.tabIndex>=0 && el.getClientRects().length).length`);
+            for (const modifiers of [0, 8]) {
+              for (let i = 0; i < count; i++) {
+                await keyboard('Tab', 9, modifiers);
+                assert.equal(await evaluate(`!!document.activeElement.closest('#drawer')`), true, `provider=${provider}, traversal=${modifiers}, step=${i}`);
+              }
+              assert.equal(await evaluate(`document.activeElement.id`), 'closeDrawer', 'Traversal wraps to its starting control');
+            }
+            for (const action of ['approve', ...(provider ? ['generateApproval'] : [])]) {
+              await evaluate(`document.querySelector('[data-key="${key}"] .${action === 'approve' ? surface : 'row'} [data-act="${action}"]').focus()`);
+              assert.equal(await evaluate(`document.activeElement.id`), 'closeDrawer', 'Inert review buttons cannot take focus');
+            }
+            await keyboard('Tab', 9);
+            await keyboard('Enter', 13);
+            await keyboard('Enter', 13);
+            assert.equal(await evaluate(`!!document.activeElement.closest('#drawer')`), true, 'Tab/Enter stays in Settings rather than approving');
+            await evaluate(`document.querySelector('#closeDrawer').focus()`);
+            if (dismissal === 'close') await keyboard('Enter', 13);
+            else if (dismissal === 'escape') await keyboard('Escape', 27);
+            else await click({ x: 10, y: 500 });
+            assert.deepEqual(await evaluate(`({
+              focus:document.activeElement.id,hidden:document.querySelector('#drawer').hidden,
+              inert:document.querySelector('main').inert || document.querySelector('header').inert
+            })`), { focus: 'settingsBtn', hidden: true, inert: false });
+            await keyboard('Tab', 9);
+            assert.equal(await evaluate(`!!document.activeElement.closest('main')`), true, 'Background keyboard navigation resumes after dismissal');
+          }
+          assert.ok((await calls()).every(c => !['approve', 'generateApproval', 'startCopilot', 'autoComplete'].includes(c.method)));
+          assert.deepEqual(await evaluate(`window.confirmations`), [], 'Focus containment adds no approval confirmation');
+          await click(await point(key, `.${surface} [data-act="approve"]`)); await frame();
+          assert.equal((await calls()).filter(c => c.method === 'approve').length, 1, 'Visible ordinary approval still dispatches once');
+          if (provider) {
+            await click(await point(key, '.row [data-act="generateApproval"]')); await frame();
+            assert.equal((await calls()).filter(c => c.method === 'generateApproval').length, 1, 'Visible provider action still dispatches once');
+          }
+        } finally { await evaluate(`if(S.drawer)closeDrawer()`); }
+      }
+    });
+
+    await t.test('GUI settings drawer preserves rerender and theme focus without stealing later focus or leaving inert controls', async () => {
+      await reset();
+      const settleTheme = () => evaluate(`new Promise((resolve,reject)=>{
+        const deadline=Date.now()+5000;
+        const check=()=>!S.themeBusy?resolve():Date.now()>deadline?reject(Error('Theme save did not settle')):requestAnimationFrame(check);check();
+      })`);
+      await evaluate(`window.savedTriageInstructions=S.settings.triageInstructions;
+        S.settings.triageInstructions='Synthetic saved instructions';
+        window.settingsRpc=window.MockHost.rpc;
+        window.MockHost.rpc=async(method,p)=>{
+          if(method==='approvalSettings')return {message:'Synthetic provider settings',actions:[]};
+          if(method==='discoverRepos'){
+            window.calls.push({method,...p});
+            return [];
+          }
+          if(method==='setTheme'){
+            window.calls.push({method,...p});
+            await new Promise(resolve=>window.completeTheme=resolve);
+            if(window.failTheme)throw Error('Synthetic theme save denied');
+            return {...S.settings,theme:p.theme};
+          }
+          return window.settingsRpc(method,p);
+        };
+        document.querySelector('#settingsBtn').focus();`);
+      try {
+        await keyboard('Enter', 13);
+        await evaluate(`document.querySelector('#triageInstructions').focus();
+          document.querySelector('#triageInstructions').setSelectionRange(2,5);
+          render();`);
+        assert.deepEqual(await evaluate(`({
+          id:document.activeElement.id,start:document.activeElement.selectionStart,end:document.activeElement.selectionEnd
+        })`), { id: 'triageInstructions', start: 2, end: 5 });
+        await evaluate(`document.querySelector('#triageInstructions').value='Synthetic saved instructions with an unsaved longer draft';
+          document.querySelector('#triageInstructions').setSelectionRange(40,47);renderDrawer()`);
+        assert.deepEqual(await evaluate(`({
+          id:document.activeElement.id,value:document.activeElement.value,
+          start:document.activeElement.selectionStart,end:document.activeElement.selectionEnd
+        })`), { id: 'triageInstructions', value: 'Synthetic saved instructions with an unsaved longer draft', start: 40, end: 47 },
+        'Draft text must be restored before its focused selection');
+        await evaluate(`document.querySelector('[data-wsl-repo]').focus();renderDrawer()`);
+        assert.equal(await evaluate(`document.activeElement.dataset.wslRepo===document.querySelector('[data-wsl-repo]').dataset.wslRepo`), true);
+        await evaluate(`document.querySelector('[data-dact="discover"]').focus();renderDrawer()`);
+        assert.equal(await evaluate(`document.activeElement.id`), 'closeDrawer', 'Removed button focus falls back inside the drawer');
+        for (const outcome of ['saved', 'failed', 'moved', 'discover', 'closed']) {
+          await evaluate(`document.querySelector('#theme').focus();
+            window.previousTheme=S.settings.theme;window.failTheme=${outcome === 'failed'};
+            window.selectedTheme=S.settings.theme==='dark'?'light':'dark';`);
+          const dark = await evaluate(`window.previousTheme==='dark'`);
+          await keyboard(dark ? 'ArrowUp' : 'ArrowDown', dark ? 38 : 40);
+          assert.equal(await evaluate(`S.themeBusy && document.querySelector('#theme').disabled`), true);
+          assert.equal(await evaluate(`document.documentElement.dataset.theme===window.selectedTheme`), true, 'Theme applies immediately');
+          await evaluate(`renderDrawer()`);
+          if (outcome === 'moved') await evaluate(`document.querySelector('#repoUrl').focus()`);
+          if (outcome === 'discover') {
+            await evaluate(`document.querySelector('[data-dact="discover"]').focus()`);
+            await keyboard('Enter', 13);
+            assert.equal(await evaluate(`document.activeElement.id`), 'closeDrawer', 'Removed Discover button falls back inside Settings during a pending theme save');
+          }
+          if (outcome === 'closed') await keyboard('Escape', 27);
+          await evaluate(`window.completeTheme()`);
+          await settleTheme();
+          assert.equal(await evaluate(`document.activeElement.id`), outcome === 'moved' ? 'repoUrl' : outcome === 'closed' ? 'settingsBtn' : outcome === 'discover' ? 'closeDrawer' : 'theme');
+          assert.equal(await evaluate(`S.settings.theme===(window.failTheme?window.previousTheme:window.selectedTheme)
+            && document.documentElement.dataset.theme===S.settings.theme && !document.querySelector('#theme').disabled`), true);
+          if (outcome === 'failed') assert.match(await evaluate(`document.querySelector('#toasts').textContent`), /Theme was not saved.*Synthetic theme save denied/);
+        }
+        assert.equal(await evaluate(`[...S.drawerInert].length===0 && !document.querySelector('main').inert`), true);
+        await keyboard('Tab', 9);
+        assert.equal(await evaluate(`!!document.activeElement.closest('main')`), true);
+        assert.equal((await calls()).filter(c => c.method === 'setTheme').length, 5);
+        assert.equal((await calls()).some(c => c.method === 'saveSettings'), false, 'Theme saves remain separate from all other Settings');
+      } finally {
+        await evaluate(`if(S.themeBusy)window.completeTheme()`);
+        await settleTheme();
+        await evaluate(`if(S.drawer)closeDrawer();window.MockHost.rpc=window.settingsRpc;delete window.settingsRpc;
+          S.settings.triageInstructions=window.savedTriageInstructions;delete window.savedTriageInstructions;`);
+      }
+    });
+
+    await t.test('GUI settings drawer falls back from hidden or unfocused openers and restores preexisting inertness', async () => {
+      await reset();
+      const savedSettings = await evaluate(`structuredClone(S.settings)`);
+      try {
+        await evaluate(`S.settings.repos=[];render()`);
+        await click(await elementPoint('#empty [data-act="settings"]')); await frame();
+        assert.equal(await evaluate(`document.activeElement.id`), 'closeDrawer');
+        await evaluate(`S.settings=${JSON.stringify(savedSettings)};render()`);
+        assert.equal(await evaluate(`document.querySelector('#empty').hidden`), true);
+        await keyboard('Escape', 27);
+        assert.equal(await evaluate(`document.activeElement.id`), 'settingsBtn', 'A still-connected hidden opener is not a safe focus target');
+        await evaluate(`document.activeElement.blur();document.querySelector('#statusline').inert=true;openDrawer()`);
+        await keyboard('Escape', 27);
+        assert.equal(await evaluate(`document.activeElement.id`), 'settingsBtn', 'Unfocused opening returns to the visible Settings button');
+        assert.equal(await evaluate(`document.querySelector('#statusline').inert`), true, 'Existing inertness is restored, not cleared');
+        assert.equal(await evaluate(`document.querySelector('main').inert`), false);
+        await evaluate(`(async()=>{
+          toast('Synthetic preexisting inert action','info',{label:'Already inert',run:()=>{}});
+          window.preInertToast=document.querySelector('#toasts .toast:last-child button');window.preInertToast.inert=true;
+          await hidePr(findPr('sample-service-id:101'));
+          window.existingUndo=document.querySelector('#toasts .toast:last-child button');window.existingUndo.id='existingUndoFixture';
+        })()`);
+        await keyboard('Enter', 13);
+        await evaluate(`toast('Synthetic late Undo','info',{label:'Undo',run:()=>undoHide()});
+          window.lateUndo=document.querySelector('#toasts .toast:last-child button');window.lateUndo.id='lateUndoFixture';`);
+        assert.equal(await evaluate(`window.existingUndo.inert && window.lateUndo.inert && !document.querySelector('#toasts').inert`), true, 'Existing and new actions are inert while passive live announcements remain available');
+        await click(await elementPoint('#existingUndoFixture'));
+        await click(await elementPoint('#lateUndoFixture'));
+        assert.equal((await calls()).some(c => c.method === 'unhide'), false, 'Undo toast mouse actions cannot bypass Settings modal isolation');
+        await keyboard('Tab', 9);
+        assert.equal(await evaluate(`!!document.activeElement.closest('#drawer')`), true);
+        await keyboard('Escape', 27);
+        assert.equal(await evaluate(`!window.existingUndo.inert && !window.lateUndo.inert && window.preInertToast.inert`), true, 'Dismissal restores each toast action state');
+        await click(await elementPoint('#lateUndoFixture')); await frame();
+        assert.equal((await calls()).filter(c => c.method === 'unhide').length, 1, 'Undo is usable again after dismissal');
+      } finally {
+        await evaluate(`if(S.drawer)closeDrawer();document.querySelector('#statusline').inert=false;
+          document.querySelector('#toasts').replaceChildren();S.settings=${JSON.stringify(savedSettings)};render()`);
+      }
+    });
+
     await t.test('context menu Hide stays bound to its menu-open PR through a reorder snapshot; Escape and outside click dismiss', async () => {
       await reset(true);
       const key = 'sample-service-id:101';

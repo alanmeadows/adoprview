@@ -11,7 +11,7 @@ public sealed partial class CopilotRunService
     internal sealed record SavedRun(int Version, CopilotRunState State, EnvironmentInfo? Environment,
         string? RunDirectory, string OwnershipToken, bool LaunchIntent, bool TaskConfirmedStopped, string? TaskIdentity);
 
-    SavedRun Save(Entry e) => new(1, e.State with
+    SavedRun Save(Entry e, CopilotRunState? state = null) => new(1, (state ?? e.State) with
     {
         Request = e.State.Request with { Prompt = "", AdditionalInstructions = null }, Output = ""
     }, e.Environment is null ? null : e.Environment with { Help = "" },
@@ -19,7 +19,12 @@ public sealed partial class CopilotRunService
 
     void Persist(Entry e)
     {
-        if (store is not null && e.DriverLease is not null) store.Write(Save(e));
+        lock (e.PersistenceGate)
+        {
+            SavedRun saved;
+            lock (gate) saved = Save(e);
+            if (store is not null && e.DriverLease is not null) store.Write(saved);
+        }
     }
 
     string[] LaunchArguments(Entry e, bool resume) =>
@@ -76,7 +81,7 @@ public sealed partial class CopilotRunService
         await Task.WhenAll(ready).ConfigureAwait(false);
     }
 
-    static bool ReservesPr(SavedRun saved) => saved.State.IsActive || saved.State.Status == "needs-attention";
+    static bool ReservesPr(SavedRun saved) => saved.State.IsActive || saved.State.MayBeRunning || saved.State.Status == "needs-attention";
 
     async Task RecoverEntryAsync(Entry e, SavedRun saved)
     {
@@ -101,7 +106,8 @@ public sealed partial class CopilotRunService
             RequirePreflightSuccess(probe);
             var env = ParseEnvironment(probe.StandardOutput, e.State.Request);
             if (env.Distribution != old.Distribution || env.Root != old.Root || env.CommonDirectory != old.CommonDirectory ||
-                env.Home != old.Home || env.CopilotHome != old.CopilotHome || env.RemoteHash != old.RemoteHash)
+                env.Home != old.Home || env.CopilotHome != old.CopilotHome || env.RemoteHash != old.RemoteHash ||
+                old.XdgConfigHome is not null && (env.XdgConfigHome != old.XdgConfigHome || env.BgtaskStateDirectory != old.BgtaskStateDirectory))
                 throw new RunSetupException("The saved WSL/repository/session environment changed. Work is preserved; no automatic resume or cleanup was attempted.");
             e.Environment = env;
             var ownership = await VerifyRunAsync(e, token).ConfigureAwait(false);
@@ -117,7 +123,7 @@ public sealed partial class CopilotRunService
                 Update(e, s => s with { WorktreePath = e.RunDirectory + "/worktree", WorktreeStatus = "retained-recovery" });
             if (!saved.LaunchIntent)
                 throw new RunSetupException("Launch was never confirmed and no saved session can safely be resumed. The prepared worktree is preserved; the original prompt is not replayed.");
-            var result = await Invoke("status", env.Distribution, StatusScript, [env.Bgtask, e.TaskName], token: token).ConfigureAwait(false);
+            var result = await InvokeRun("status", env, StatusScript, [env.Bgtask, e.TaskName], token: token).ConfigureAwait(false);
             var task = ReadOwnedTask(e, result);
             e.TaskIdentity = task.Id;
             Update(e, s => s with { LogPath = task.Log });
@@ -127,8 +133,8 @@ public sealed partial class CopilotRunService
                     throw new RunSetupException("A terminal record unexpectedly has a live task. No resume or cleanup was attempted; inspect the retained worktree.");
                 if (store!.IsCancelled(e.State.RunId) && e.DriverLease is not null)
                 {
-                    await StopRecoveredAsync(e).ConfigureAwait(false);
-                    await FinishRecoveredAsync(e, "cancelled", 143).ConfigureAwait(false);
+                    var code = await StopRecoveredAsync(e).ConfigureAwait(false);
+                    await FinishRecoveredAsync(e, "cancelled", code).ConfigureAwait(false);
                     return;
                 }
                 Update(e, s => s with { Status = "running", Error = null, FinishedAt = null, MayBeRunning = true });
@@ -164,10 +170,10 @@ public sealed partial class CopilotRunService
                 MayBeRunning = true });
             e.TaskIdentity = null;
             Persist(e);
-            var launched = await Invoke("launch", env.Distribution, LaunchScript, LaunchArguments(e, resume: true),
+            var launched = await InvokeRun("launch", env, LaunchScript, LaunchArguments(e, resume: true),
                 token: CancellationToken.None).ConfigureAwait(false);
             RequireSuccess(launched, "Exact-session resume could not be launched; the worktree remains preserved.");
-            var resumed = ReadOwnedTask(e, await Invoke("status", env.Distribution, StatusScript, [env.Bgtask, e.TaskName],
+            var resumed = ReadOwnedTask(e, await InvokeRun("status", env, StatusScript, [env.Bgtask, e.TaskName],
                 token: token).ConfigureAwait(false));
             e.TaskIdentity = resumed.Id;
             Update(e, s => s with { Status = "running", LogPath = resumed.Log });
@@ -179,8 +185,8 @@ public sealed partial class CopilotRunService
         {
             try
             {
-                await StopRecoveredAsync(e).ConfigureAwait(false);
-                await FinishRecoveredAsync(e, "cancelled", 143).ConfigureAwait(false);
+                var code = await StopRecoveredAsync(e).ConfigureAwait(false);
+                await FinishRecoveredAsync(e, "cancelled", code).ConfigureAwait(false);
             }
             catch { RecoveryBlocked(e, "Could not verify cancellation of the exact owned task. Work and its reservation are retained."); }
         }
@@ -231,13 +237,34 @@ public sealed partial class CopilotRunService
             if (status == "needs-attention") activePrs.Add(PrIdentity(e.State.Request));
             else activePrs.Remove(PrIdentity(e.State.Request));
         }
-        if (e.State.Output.StartsWith("[Recovered run history", StringComparison.Ordinal))
-            await ReadHistoryAsync(e, e.DetachCancellation.Token).ConfigureAwait(false);
+        if (e.HistoryReplayStarted || e.State.Output.StartsWith("[Recovered run history", StringComparison.Ordinal))
+        {
+            var cancelling = status == "cancelled" || e.Cancellation.IsCancellationRequested;
+            var unavailable = e.HistoryReplayStarted && !e.HistoryReplayCompleted;
+            if (!e.HistoryReplayStarted)
+            {
+                using var history = CancellationTokenSource.CreateLinkedTokenSource(e.DetachCancellation.Token,
+                    cancelling ? CancellationToken.None : e.Cancellation.Token);
+                if (cancelling) history.CancelAfter(TimeSpan.FromSeconds(2));
+                try { await ReadHistoryAsync(e, history.Token).ConfigureAwait(false); }
+                catch (Exception ex) when (cancelling && !e.Detaching &&
+                    ex is OperationCanceledException or RunSetupException or IOException or System.ComponentModel.Win32Exception)
+                { unavailable = true; }
+            }
+            if (unavailable)
+            {
+                Update(e, s => s with { Error = (s.Error is null ? "" : s.Error + "\n") +
+                    "Saved task logs could not be fully replayed after Stop. Verified stopped state, retained logs and work are preserved." });
+            }
+        }
         if (status == "completed" && e.DriverLease is not null)
         {
             try
             {
-                var cleaned = await Invoke("cleanup", e.Environment!.Distribution, CleanupScript, CleanupArguments(e)).ConfigureAwait(false);
+                using var cleanup = CancellationTokenSource.CreateLinkedTokenSource(e.Cancellation.Token, e.DetachCancellation.Token);
+                cleanup.Token.ThrowIfCancellationRequested();
+                var cleaned = await InvokeRun("cleanup", e.Environment!, CleanupScript, CleanupArguments(e),
+                    token: cleanup.Token).ConfigureAwait(false);
                 var fields = ProtocolFields(cleaned.StandardOutput);
                 Update(e, s => s with { WorktreeStatus = cleaned.ExitCode == 0 && fields.FirstOrDefault() == "REMOVED" ?
                     "removed-clean" : "retained-changes", Error = fields.FirstOrDefault() == "REMOVED" ? null :
@@ -251,15 +278,24 @@ public sealed partial class CopilotRunService
     {
         if (e.Environment is null) return;
         var env = e.Environment;
-        ReadOwnedTask(e, await Invoke("status", env.Distribution, StatusScript, [env.Bgtask, e.TaskName], token: token).ConfigureAwait(false));
-        var logs = await Invoke("history", env.Distribution, "\"$1\" logs \"$2\" --tail 2000", [env.Bgtask, e.TaskName],
-            stdout: s => Append(e, s, false), stderr: s => Append(e, s, true), token: token).ConfigureAwait(false);
-        RequireSuccess(logs, "Saved task logs could not be read; terminal history and retained work remain recorded.");
+        ReadOwnedTask(e, await InvokeRun("status", env, StatusScript, [env.Bgtask, e.TaskName], token: token).ConfigureAwait(false));
+        using var replay = CancellationTokenSource.CreateLinkedTokenSource(token);
+        var replayToken = replay.Token;
+        e.HistoryReplayStarted = true;
+        try
+        {
+            var logs = await InvokeRun("history", env, "\"$1\" logs \"$2\" --tail 2000", [env.Bgtask, e.TaskName],
+                stdout: s => Append(e, s, false, history: true, token: replayToken),
+                stderr: s => Append(e, s, true, history: true, token: replayToken), token: replayToken).ConfigureAwait(false);
+            RequireSuccess(logs, "Saved task logs could not be read; terminal history and retained work remain recorded.");
+            e.HistoryReplayCompleted = true;
+        }
+        finally { replay.Cancel(); }
     }
 
     Task<CopilotProcessResult> ProbeRunAsync(Entry e, CancellationToken token = default) =>
-        Invoke("verify-run", e.Environment!.Distribution, RecoveryProbeScript,
-            [e.Environment.Root, e.Environment.CommonDirectory, e.RunDirectory!, e.State.RunId,
+        InvokeRun("verify-run", e.Environment!, RecoveryProbeScript,
+            [e.Environment!.Root, e.Environment.CommonDirectory, e.RunDirectory!, e.State.RunId,
                 e.State.Request.SourceCommit.ToLowerInvariant(), e.OwnershipToken, e.State.SessionId ?? "", e.Environment.CopilotHome], token: token);
 
     async Task<string[]> VerifyRunAsync(Entry e, CancellationToken token = default)
@@ -298,17 +334,19 @@ public sealed partial class CopilotRunService
         { throw new RunSetupException("Managed task returned incomplete/ambiguous identity or status. Work is preserved."); }
     }
 
-    async Task StopRecoveredAsync(Entry e)
+    async Task<int?> StopRecoveredAsync(Entry e)
     {
         await VerifyRunAsync(e).ConfigureAwait(false);
         var env = e.Environment!;
-        ReadOwnedTask(e, await Invoke("status", env.Distribution, StatusScript, [env.Bgtask, e.TaskName]).ConfigureAwait(false));
-        RequireSuccess(await Invoke("stop", env.Distribution, StopScript, [env.Bgtask, e.TaskName]).ConfigureAwait(false),
-            "The exact recovered task could not be stopped.");
-        var after = ReadOwnedTask(e, await Invoke("status", env.Distribution, StatusScript, [env.Bgtask, e.TaskName]).ConfigureAwait(false));
+        var before = ReadOwnedTask(e, await InvokeRun("status", env, StatusScript, [env.Bgtask, e.TaskName]).ConfigureAwait(false));
+        if (before.Status != "exited")
+            RequireSuccess(await InvokeRun("stop", env, StopScript, [env.Bgtask, e.TaskName]).ConfigureAwait(false),
+                "The exact recovered task could not be stopped.");
+        var after = ReadOwnedTask(e, await InvokeRun("status", env, StatusScript, [env.Bgtask, e.TaskName]).ConfigureAwait(false));
         var ownership = await VerifyRunAsync(e).ConfigureAwait(false);
         if (after.Status != "exited" || ownership[1] != "FREE")
             throw new RunSetupException("The recovered task or its CLI process group is still active; cancellation could not be confirmed.");
+        return after.ExitCode;
     }
 
     internal sealed class DurableStore(string directory)
