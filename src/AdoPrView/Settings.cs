@@ -144,8 +144,10 @@ public sealed class SettingsStore
     {
         lock (_gate)
         {
-            mutate(Current);
-            Save();
+            var next = JsonSerializer.Deserialize<AppSettings>(JsonSerializer.Serialize(Current, Json), Json)!;
+            mutate(next);
+            Save(next);
+            Current = next;
         }
     }
 
@@ -156,17 +158,17 @@ public sealed class SettingsStore
         {
             var previous = Current.Theme;
             Current.Theme = theme;
-            try { Save(); }
+            try { Save(Current); }
             catch { Current.Theme = previous; throw; }
         }
     }
 
-    void Save()
+    void Save(AppSettings settings)
     {
         if (_path is null) return;
         Directory.CreateDirectory(Path.GetDirectoryName(Path.GetFullPath(_path))!);
         var tmp = _path + ".tmp";
-        File.WriteAllText(tmp, JsonSerializer.Serialize(Current, Json));
+        File.WriteAllText(tmp, JsonSerializer.Serialize(settings, Json));
         File.Move(tmp, _path, true);
     }
 }

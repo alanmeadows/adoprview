@@ -153,7 +153,12 @@ public sealed partial class PrService
                         {
                             var rid = S(pr["repository"]?["id"]);
                             var pid = S(pr["repository"]?["project"]?["id"]);
-                            _store.Update(_ => { repo.RepoId = rid; repo.ProjectId = pid; });
+                            _store.Update(s =>
+                            {
+                                var storedRepo = s.Repos.FirstOrDefault(r => r.Key == repo.Key);
+                                if (storedRepo is not null) { storedRepo.RepoId = rid; storedRepo.ProjectId = pid; }
+                            });
+                            repo.RepoId = rid; repo.ProjectId = pid;
                         }
                         var key = $"{S(pr["repository"]?["id"])}:{S(pr["pullRequestId"])}";
                         if (hidden.Contains(key) || settings.IgnoreDrafts && B(pr["isDraft"]))

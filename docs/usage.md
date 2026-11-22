@@ -31,6 +31,12 @@ calls used see [DESIGN.md](DESIGN.md); for building and tests see
   repositories. An unreadable or invalid settings file is reported at startup and
   left unchanged; it is never replaced with defaults. Fields the app does not
   recognize are preserved when it saves.
+- Failed saves and unrelated Settings actions retain unsaved form edits; only
+  **Save settings** commits those edits. Closing without saving discards them;
+  immediate theme changes retain their separate save behavior. Failed writes
+  leave the committed settings unchanged, so a later unrelated action cannot
+  silently save a failed draft. Pending Save/Add responses preserve independent
+  inputs, newer edits, and drafts in a reopened Settings drawer.
 - **My PRs** are those created by your authenticated ADO identity in each
   organization. Watched authors match display name, UPN or alias. The **All /
   Mine / Watched** switch filters the table by author; ownership is not a lane.

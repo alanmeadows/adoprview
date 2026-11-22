@@ -177,6 +177,51 @@ static class SettingsTests
                 saved["refreshSeconds"]!.GetValue<int>() == 300, "Drawer save dropped other settings");
             Check(new SettingsStore(path).Current.IgnoreDrafts, "Draft setting did not survive bridge save/reload");
         }));
+        await test("failed settings drawer Save keeps committed state and unrelated author retry cannot persist its draft", () => InDir(dir =>
+        {
+            var path = Path.Combine(dir, "settings.json");
+            const string text = """
+                {"triageInstructions":"Saved Custom Ask","refreshSeconds":120,"wslDistro":"Saved distro",
+                 "wslRepoDirectories":{"contoso/sample/repo":"/home/synthetic/saved"},"whitelist":["Saved author"],
+                 "autoComplete":{"mergeStrategy":"squash","futureMerge":"KEEP"},"futureTop":{"keep":true}}
+                """;
+            File.WriteAllText(path, text);
+            var store = new SettingsStore(path);
+            var original = JsonSerializer.Serialize(store.Current, Bridge.Json);
+            using var http = new HttpClient();
+            var service = new PrService(new AdoClient(http, _ => Task.FromResult(new AuthenticationHeaderValue("Bearer", "offline"))), store);
+            string? reply = null;
+            var kicks = 0;
+            var bridge = new Bridge(service, store, value => { reply = value; return Task.CompletedTask; }, _ => kicks++);
+            var form = JsonSerializer.SerializeToNode(store.Current, Bridge.Json)!.AsObject();
+            form["triageInstructions"] = "Uncommitted Custom Ask";
+            form["refreshSeconds"] = 333;
+            form["wslDistro"] = "Uncommitted distro";
+            form["wslRepoDirectories"]!["contoso/sample/repo"] = "/home/synthetic/uncommitted";
+            form["autoComplete"]!["mergeStrategy"] = "rebase";
+            Directory.CreateDirectory(path + ".tmp");
+            bridge.HandleAsync(new JsonObject { ["id"] = 1, ["method"] = "saveSettings",
+                ["params"] = new JsonObject { ["settings"] = form } }.ToJsonString()).GetAwaiter().GetResult();
+            Check(reply is not null && reply.Contains("\"error\"") && kicks == 0, "Failed Save did not surface an error or refreshed committed state");
+            Check(JsonSerializer.Serialize(store.Current, Bridge.Json) == original && File.ReadAllText(path) == text,
+                "Failed drawer Save promoted the draft or damaged the saved file");
+            Directory.Delete(path + ".tmp");
+            var authorForm = JsonSerializer.SerializeToNode(store.Current, Bridge.Json)!.AsObject();
+            authorForm["whitelist"]!.AsArray().Add("New author");
+            bridge.HandleAsync(new JsonObject { ["id"] = 2, ["method"] = "saveSettings",
+                ["params"] = new JsonObject { ["settings"] = authorForm } }.ToJsonString()).GetAwaiter().GetResult();
+            Check(reply is not null && !reply.Contains("\"error\""), "Unrelated author Save failed");
+            var reloaded = new SettingsStore(path);
+            Check(reloaded.Current.TriageInstructions == "Saved Custom Ask" && reloaded.Current.RefreshSeconds == 120 &&
+                reloaded.Current.WslDistro == "Saved distro" && reloaded.Current.WslRepoDirectories["contoso/sample/repo"] == "/home/synthetic/saved" &&
+                reloaded.Current.AutoComplete.MergeStrategy == "squash" && reloaded.Current.Whitelist.SequenceEqual(["Saved author", "New author"]),
+                "Unrelated author Save silently committed a failed draft");
+            Check(reloaded.Current.Extra!["futureTop"].GetProperty("keep").GetBoolean(), "Transactional save dropped unknown settings");
+            bridge.HandleAsync(new JsonObject { ["id"] = 3, ["method"] = "saveSettings",
+                ["params"] = new JsonObject { ["settings"] = form.DeepClone() } }.ToJsonString()).GetAwaiter().GetResult();
+            Check(reply is not null && !reply.Contains("\"error\"") && new SettingsStore(path).Current.RefreshSeconds == 333,
+                "Explicit draft retry did not persist the corrected file");
+        }));
         await test("window placement persistence keeps unknown placement fields", () => InDir(dir =>
         {
             var path = Path.Combine(dir, "settings.json");

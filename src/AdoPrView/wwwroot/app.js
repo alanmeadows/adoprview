@@ -77,6 +77,9 @@ const S = {
   speechEpoch: 0,
   rowMenu: null,
   drawer: false,
+  drawerDraft: new Map(),
+  drawerDraftReset: false,
+  drawerEpoch: 0,
   themeBusy: false,
   discovered: null,
 };
@@ -1375,6 +1378,8 @@ async function onSpeechAction(action) {
 }
 
 async function openDrawer() {
+  ++S.drawerEpoch;
+  S.drawerDraft.clear(); S.drawerDraftReset = true;
   S.drawer = true; $('#drawer').hidden = false; $('#scrim').hidden = false; renderDrawer();
   await loadApprovalSettings();
 }
@@ -1393,12 +1398,33 @@ async function loadApprovalSettings() {
   if (S.drawer) renderDrawer();
 }
 
+const drawerFieldKey = el => el.id || `wsl:${el.dataset.wslRepo}`;
+const drawerFields = () => [...$('#drawerBody').querySelectorAll('input[id], select[id], textarea[id], input[data-wsl-repo]')];
+
+function clearSubmittedDrawerInput(id, value, epoch) {
+  const current = $('#' + id);
+  if (S.drawer && epoch === S.drawerEpoch && current?.value === value) {
+    current.value = '';
+    S.drawerDraft.delete(id);
+  }
+}
+
 function renderDrawer() {
   const st = S.settings;
   if (!st) return;
   const titles = new Map(S.snap.prs.map((p) => [p.key.toLowerCase(), p]));
   const disc = S.discovered;
-  $('#drawerBody').innerHTML = `
+  const body = $('#drawerBody');
+  const fields = drawerFields();
+  if (S.drawerDraftReset) { S.drawerDraft.clear(); S.drawerDraftReset = false; }
+  else for (const el of fields) {
+    if (el.id === 'theme') continue;
+    const initial = el.tagName === 'SELECT' ? [...el.options].find(o => o.defaultSelected)?.value ?? el.options[0]?.value : el.defaultValue;
+    const dirty = el.type === 'checkbox' ? el.checked !== el.defaultChecked : el.value !== initial;
+    if (dirty) S.drawerDraft.set(drawerFieldKey(el), { value: el.value, checked: el.checked });
+    else S.drawerDraft.delete(drawerFieldKey(el));
+  }
+  body.innerHTML = `
     <div class="section">
       <h4>Appearance</h4>
       <p class="help" id="themeHelp">Changes apply and save immediately. Light Mode is the default.</p>
@@ -1469,11 +1495,36 @@ function renderDrawer() {
       <div class="field"><textarea id="triageInstructions" placeholder="Default instructions">${esc(st.triageInstructions || '')}</textarea></div>
     </div>
     <div class="section"><button class="btn primary" data-dact="save">${svg('check')} Save settings</button></div>`;
+
+  const current = drawerFields();
+  for (const el of current) {
+    const draft = S.drawerDraft.get(drawerFieldKey(el));
+    if (draft) { el.value = draft.value; if (el.type === 'checkbox') el.checked = draft.checked; }
+  }
 }
 
-async function saveSettings(patch) {
+async function saveSettings(patch, commitDraft = false) {
+  const epoch = S.drawerEpoch;
+  const submitted = commitDraft ? new Map(drawerFields()
+    .filter(el => !['theme', 'repoUrl', 'wlInput'].includes(el.id))
+    .map(el => [drawerFieldKey(el), { value: el.value, checked: el.checked }])) : null;
   const st = { ...S.settings, ...patch };
   S.settings = await rpc('saveSettings', { settings: st });
+  if (submitted && S.drawer && epoch === S.drawerEpoch) {
+    // Rebase capture to the submission so newer edits reverted to old defaults stay dirty.
+    for (const el of drawerFields()) {
+      const value = submitted.get(drawerFieldKey(el));
+      if (!value) continue;
+      const current = { value: el.value, checked: el.checked };
+      if (current.value === value.value && current.checked === value.checked) S.drawerDraft.delete(drawerFieldKey(el));
+      else S.drawerDraft.set(drawerFieldKey(el), current);
+      if (el.type === 'checkbox') el.defaultChecked = value.checked;
+      else if (el.tagName === 'SELECT') for (const option of el.options) option.defaultSelected = option.value === value.value;
+      else el.defaultValue = value.value;
+      el.value = current.value;
+      if (el.type === 'checkbox') el.checked = current.checked;
+    }
+  }
   render();
 }
 
@@ -1528,9 +1579,11 @@ async function onDrawerAction(act, el) {
   try {
     switch (act) {
       case 'addRepo': {
-        const url = $('#repoUrl').value.trim();
+        const value = $('#repoUrl').value, epoch = S.drawerEpoch;
+        const url = value.trim();
         if (!url) return;
         S.settings = await rpc('addRepo', { url });
+        clearSubmittedDrawerInput('repoUrl', value, epoch);
         toast('Repository added — refreshing');
         break;
       }
@@ -1551,9 +1604,11 @@ async function onDrawerAction(act, el) {
         toast('Repositories added — refreshing');
         break;
       case 'addWl': {
-        const v = $('#wlInput').value.trim();
+        const value = $('#wlInput').value, epoch = S.drawerEpoch;
+        const v = value.trim();
         if (!v) return;
         await saveSettings({ whitelist: [...S.settings.whitelist, v] });
+        clearSubmittedDrawerInput('wlInput', value, epoch);
         toast(`Watching PRs by ${v}`);
         break;
       }
@@ -1571,11 +1626,11 @@ async function onDrawerAction(act, el) {
           notifications: $('#notifications').checked,
           sound: $('#sound').checked,
           ignoreDrafts: $('#ignoreDrafts').checked,
-          autoComplete: { mergeStrategy: $('#mergeStrategy').value, deleteSourceBranch: $('#deleteSourceBranch').checked, transitionWorkItems: $('#transitionWorkItems').checked },
+          autoComplete: { ...S.settings.autoComplete, mergeStrategy: $('#mergeStrategy').value, deleteSourceBranch: $('#deleteSourceBranch').checked, transitionWorkItems: $('#transitionWorkItems').checked },
           triageInstructions: $('#triageInstructions').value,
           wslDistro: $('#wslDistro').value.trim(),
           wslRepoDirectories: Object.fromEntries([...document.querySelectorAll('[data-wsl-repo]')].map(e => [e.dataset.wslRepo, e.value.trim()]).filter(([, value]) => value)),
-        });
+        }, true);
         toast('Settings saved');
         break;
     }
