@@ -191,8 +191,10 @@ lane of active PRs. Each full refresh makes one extra list call per repository
 100 raw results add a "may be missing" warning; a denied, timed-out or
 malformed response (no `value` array) adds a repo-labeled "Completed history
 unavailable" warning instead of an error. A PR detail/re-check that reports
-completed with an in-window closed date moves it into history in the same
-snapshot. Find, actions, notifications and the Fix shelf use active PRs only.
+completed with a closed date between the 7-day cutoff and now (invariant-culture
+wire format) moves it into history in the same snapshot, only while its repository
+and author are still watched; a terminal detail is recorded before any
+active-only enrichment, so a policy/thread failure cannot keep it active. Find, actions, notifications and the Fix shelf use active PRs only.
 
 The optional review bot is identified only by the configured `reviewBot`
 identity ID; its display name is a label. It applies only to PRs in its

@@ -161,11 +161,13 @@ main { flex: 1; overflow: auto; padding: 0 20px 28px; }
 /* Positioned by syncIdCues at the scroller's visible left edge while the table is panned. */
 .id-cue { position: absolute; top: 0; left: 0; z-index: 2; pointer-events: none; }
 .id-cue span {
-  display: none; position: relative; top: 2px; margin-left: 6px; padding: 0 5px;
+  display: none; position: relative; top: 2px; margin-left: 6px; padding: 0 5px; max-width: 200px; overflow: hidden;
   font-size: 10px; line-height: 12px; white-space: nowrap; color: var(--text2);
   background: var(--surface); border: 1px solid var(--border); border-radius: 4px;
 }
-.pr.id-panned .id-cue span { display: block; }
+.pr.id-panned .id-cue span { display: flex; }
+.id-cue b { flex: none; font-weight: inherit; white-space: pre; }
+.id-cue i { min-width: 0; overflow: hidden; text-overflow: ellipsis; font-style: normal; }
 .row-lane { color: var(--c); font-size: 10px; font-weight: 650; }
 .pr:hover { border-color: var(--border2); }
 .pr.open { border-color: color-mix(in srgb, var(--c) 45%, var(--border)); }

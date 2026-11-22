@@ -1217,23 +1217,94 @@ test('real row hit testing and action identity across refreshes', { timeout: 900
         assert.equal(await evaluate(`(()=>{const c=document.querySelector('#rows [data-key="${key}"] .copilot-run:not(.run-earlier)');
           return c.dataset.runId==='layout-live-run' && !c.querySelector('[data-act="cancelRun"]').hidden &&
             c.nextElementSibling?.dataset.runId==='layout-earlier-run';})()`), true, 'Cancel stays visible and run cards stay adjacent');
-        await evaluate(`document.querySelector('main').scrollTop=0`);
-        await click(await point(key, '.detail [data-act="triage"]'));
-        await frame();
-        const shown = await evaluate(`(()=>{const main=document.querySelector('main').getBoundingClientRect();
-          const card=document.querySelector('#rows [data-key="${key}"] .copilot-run:not(.run-earlier)');
-          const inside=e=>{const r=e.getBoundingClientRect();return r.top>=main.top-.5&&r.bottom<=main.bottom+.5;};
-          return {run:card.dataset.runId,status:inside(card.querySelector('.run-status')),cancel:inside(card.querySelector('[data-act="cancelRun"]')),
-            focused:document.activeElement===card.querySelector('.run-output')};})()`);
-        assert.deepEqual(shown, { run: 'layout-live-run', status: true, cancel: true, focused: true });
+        for (const via of ['pointer', 'keyboard']) {
+          await evaluate(`document.querySelector('main').scrollTop=0`);
+          await frame();
+          if (via === 'pointer') await click(await point(key, '.detail [data-act="triage"]'));
+          else {
+            await evaluate(`document.querySelector('#rows [data-key="${key}"] .detail [data-act="triage"]').focus({preventScroll:true})`);
+            await keyboard('Enter', 13);
+          }
+          await frame();
+          // Below the sticky header and actually hit-testable, not merely inside main.
+          const shown = await evaluate(`(()=>{const main=document.querySelector('main').getBoundingClientRect(),head=document.querySelector('.thead').getBoundingClientRect();
+            const card=document.querySelector('#rows [data-key="${key}"] .copilot-run:not(.run-earlier)');
+            const clear=e=>{const r=e.getBoundingClientRect();return r.top>=head.bottom-.5&&r.bottom<=main.bottom+.5;};
+            const cancel=card.querySelector('[data-act="cancelRun"]'),r=cancel.getBoundingClientRect(),hit=document.elementFromPoint(r.left+r.width/2,r.top+r.height/2);
+            return {run:card.dataset.runId,status:clear(card.querySelector('.run-status')),cancel:clear(cancel),hit:!!hit&&cancel.contains(hit),
+              focused:document.activeElement===card.querySelector('.run-output')};})()`);
+          assert.deepEqual(shown, { run: 'layout-live-run', status: true, cancel: true, hit: true, focused: true }, `Show run via ${via}`);
+        }
         assert.equal((await calls()).filter(c => c.method === 'startCopilot').length, 0, 'Show run never launches another run');
+      }
+    });
+
+    await t.test('layout run lifecycle relocates the run group without a manual render and defers while rows are in use', async () => {
+      await send('Emulation.setDeviceMetricsOverride', { width: 1600, height: 1000, deviceScaleFactor: 1, mobile: false });
+      await reset();
+      const key = 'sample-service-id:105';
+      await evaluate(`{const key='${key}',pr=S.snap.prs.find(p=>p.key===key);
+        S.runs.set('lc-new',{...pr,runId:'lc-new',id:0,status:'completed',mayBeRunning:false,startedAt:'2026-01-02T00:00:00Z',output:'New\\n',outputOffset:4});
+        S.runs.set('lc-old',{...pr,runId:'lc-old',id:0,status:'needs-attention',mayBeRunning:false,startedAt:'2026-01-01T00:00:00Z',output:'Old\\n',outputOffset:4});
+        S.expanded.add(key);renderRows();}`);
+      await frame();
+      const place = async () => {
+        const layout = await layoutCards(key);
+        const runs = layout.cards.map((c, i) => c.run ? i : -1).filter(i => i >= 0);
+        return { lead: await evaluate(`document.querySelector('#rows [data-key="${key}"] .detail').dataset.runLead`),
+          ids: await evaluate(`[...document.querySelectorAll('#rows [data-key="${key}"] .copilot-run')].map(c=>c.dataset.runId+(c.classList.contains('run-earlier')?':earlier':''))`),
+          beforeContext: runs.every(i => i < cardIndex(layout, 'Description')), adjacent: runs[1] === runs[0] + 1,
+          label: await evaluate(`document.querySelector('#rows [data-key="${key}"] .detail [data-act="triage"]').textContent.trim()`) };
+      };
+      assert.deepEqual(await place(), { lead: '0', ids: ['lc-new', 'lc-old:earlier'], beforeContext: false, adjacent: true, label: 'Fix PR' });
+      await evaluate(`updateCopilotRun({...S.runs.get('lc-old'),status:'running',mayBeRunning:true})`);
+      await frame();
+      assert.deepEqual(await place(), { lead: '1', ids: ['lc-old', 'lc-new:earlier'], beforeContext: true, adjacent: true, label: 'Show run' },
+        'Promoted earlier run leads with its sibling and no manual render');
+      // Uncertain but not maybe-running: still cancelable, so the in-place label must stay Show run.
+      await evaluate(`updateCopilotRun({...S.runs.get('lc-old'),status:'needs-attention',mayBeRunning:false,id:7})`);
+      await frame();
+      assert.equal((await place()).label, 'Show run');
+      const inRow = await point(key, '.detail .copilot-run:not(.run-earlier) .run-output');
+      await move(inRow.x, inRow.y);
+      await evaluate(`window.lcCard=document.querySelector('#rows [data-key="${key}"] .copilot-run:not(.run-earlier)');
+        updateCopilotRun({...S.runs.get('lc-old'),status:'completed',mayBeRunning:false,id:0})`);
+      await frame();
+      assert.deepEqual([(await place()).lead, await evaluate('window.lcCard.isConnected && S.rowsPending')], ['1', true], 'Placement waits while rows are in use');
+      assert.equal((await place()).label, 'Fix PR', 'Label still updates in place while deferred');
+      await move(10, 10);
+      await frame();
+      assert.deepEqual(await place(), { lead: '0', ids: ['lc-new', 'lc-old:earlier'], beforeContext: false, adjacent: true, label: 'Fix PR' },
+        'Finished run group moves behind PR context once rows are idle');
+      for (let i = 0; i < 3; i++) await evaluate(`updateCopilotRun({...S.runs.get('lc-new'),output:S.runs.get('lc-new').output+'tick\\n',outputOffset:S.runs.get('lc-new').outputOffset+5,revision:${i + 1}})`);
+      assert.equal(await evaluate(`document.querySelector('#rows [data-key="${key}"] .copilot-run').isConnected && !S.rowsPending`), true);
+    });
+
+    await t.test('layout a leading run never buries conflicts or required reviews that no leading card conveys', async () => {
+      await send('Emulation.setDeviceMetricsOverride', { width: 1600, height: 1000, deviceScaleFactor: 1, mobile: false });
+      for (const c of [{ blockers: ['Merge conflicts'], humanActions: [], expect: 'Merge conflicts' },
+        { blockers: [], humanActions: ['reviews'], expect: 'Human reviewer approval needed (+1)' }]) {
+        await reset();
+        const key = 'sample-service-id:105';
+        await evaluate(`{const key='${key}',pr=S.snap.prs.find(p=>p.key===key);
+          Object.assign(pr,{failedBuilds:[],error:null,approval:null,blockers:${JSON.stringify(c.blockers)},humanActions:${JSON.stringify(c.humanActions)}});
+          S.approvals.delete(key);
+          S.runs.set('lead-live',{...pr,runId:'lead-live',status:'running',mayBeRunning:true,startedAt:'2026-01-02T00:00:00Z',output:'Live\\n'.repeat(200),outputOffset:1000});
+          S.expanded.add(key);renderRows();}`);
+        await frame();
+        const layout = await layoutCards(key);
+        const blocking = cardIndex(layout, 'Blocking'), run = layout.cards.findIndex(x => x.run);
+        assert.ok(blocking < run && run < cardIndex(layout, 'Description'), layout.cards.map(x => x.head).join(' | '));
+        assert.equal(await evaluate(`document.querySelector('#rows [data-key="${key}"] .lead-blockers').textContent.includes(${JSON.stringify(c.expect)})`), true);
+        assertOneStatusScope(layout);
       }
     });
 
     await t.test('layout narrow-window identity cue names the panned row without covering gates or actions', async () => {
       await send('Emulation.setDeviceMetricsOverride', { width: 900, height: 500, deviceScaleFactor: 1, mobile: false });
       await reset();
-      await evaluate(`S.expanded.add('sample-service-id:105');renderRows();document.querySelector('main').scrollTop=0;`);
+      await evaluate(`S.snap.prs.find(p=>p.key!=='sample-service-id:101'&&p.key!=='sample-service-id:105').repo='an-exceptionally-long-repository-name-for-the-compact-identity-cue';
+        S.expanded.add('sample-service-id:105');renderRows();document.querySelector('main').scrollTop=0;`);
       const cues = () => evaluate(`(()=>{document.querySelector('#toasts').replaceChildren();const main=document.querySelector('main'),m=main.getBoundingClientRect();
         const left=m.left+main.clientLeft,right=left+main.clientWidth,top=m.top+main.clientTop,bottom=top+main.clientHeight;
         const byKey=new Map(S.snap.prs.map(p=>[p.key,p])),headBottom=Math.max(top,document.querySelector('.thead').getBoundingClientRect().bottom);
@@ -1249,7 +1320,10 @@ test('real row hit testing and action identity across refreshes', { timeout: 900
             return !hit||(hit!==e&&!e.contains(hit));}).map(e=>{const r=e.getBoundingClientRect(),hit=document.elementFromPoint(r.left+r.width/2,r.top+r.height/2);
             return e.className+'@'+Math.round(r.left+r.width/2)+','+Math.round(r.top+r.height/2)+'->'+(hit?(hit.id||hit.className||hit.tagName):'none');});
           const p=byKey.get(row.dataset.key);
-          return {key:row.dataset.key,shown,text:chip.textContent,expected:'!'+p.id+' · '+p.repo,
+          const id=chip.querySelector('b').getBoundingClientRect(),repo=chip.querySelector('i');
+          const bounded=!shown||(c.width>0&&c.width<=200.5&&c.height>0&&id.width>0&&id.left>=c.left-.5&&id.right<=c.right+.5&&repo.getBoundingClientRect().right<=c.right+.5&&
+            (repo.scrollWidth<=repo.clientWidth||getComputedStyle(repo).textOverflow==='ellipsis'));
+          return {key:row.dataset.key,shown,bounded,text:chip.textContent,expected:'!'+p.id+' · '+p.repo,
             inside:!shown||(c.left>=left-.5&&c.right<=right+.5),overlap,misses,onScreen:visible(row.getBoundingClientRect()),
             prRight:row.querySelector('.row > .c-pr').getBoundingClientRect().right-left};});})()`);
       const geometry = await evaluate(`(()=>{const main=document.querySelector('main');
@@ -1264,7 +1338,7 @@ test('real row hit testing and action identity across refreshes', { timeout: 900
         for (const c of state.filter(r => r.onScreen)) {
           assert.deepEqual(c.misses, [], `Hit testing changed in ${c.key} at ${x}`);
           if (x < threshold) { assert.equal(c.shown, c.prRight <= 0, `Cue before PR cell left ${c.key}`); continue; }
-          assert.deepEqual([c.shown, c.text, c.inside, c.overlap], [true, c.expected, true, false], `Cue for ${c.key} at ${x}`);
+          assert.deepEqual([c.shown, c.bounded, c.text, c.inside, c.overlap], [true, true, c.expected, true, false], `Cue for ${c.key} at ${x}`);
         }
         if (x === geometry.max && process.env.ADOPRVIEW_LAYOUT_SCREENSHOTS) {
           const shot = await send('Page.captureScreenshot', { format: 'png' });
@@ -1277,6 +1351,13 @@ test('real row hit testing and action identity across refreshes', { timeout: 900
       assert.deepEqual((await calls()).at(-1), { method: 'openUrl', url: expectedUrl(open) }, 'Panned actions keep their row target');
       assert.equal(await evaluate(`document.querySelector('[data-key="sample-service-id:101"]').classList.contains('id-panned')`),
         await evaluate(`document.querySelector('main').scrollLeft>0`), 'Cue state follows the scroll after pointer actions');
+      // Resizing while panned re-measures; long repositories stay ellipsized inside the bounded chip.
+      await send('Emulation.setDeviceMetricsOverride', { width: 860, height: 560, deviceScaleFactor: 1, mobile: false });
+      await frame();
+      const resized = await pan(await evaluate(`(()=>{const m=document.querySelector('main');return m.scrollWidth-m.clientWidth;})()`));
+      assert.ok(resized.some(c => c.onScreen && c.shown), 'Cue still shows after resizing while panned');
+      for (const c of resized.filter(r => r.onScreen && r.shown))
+        assert.deepEqual([c.bounded, c.text, c.inside, c.overlap, c.misses], [true, c.expected, true, false, []], `Resized cue for ${c.key}`);
       await send('Emulation.setDeviceMetricsOverride', { width: 1600, height: 1000, deviceScaleFactor: 1, mobile: false });
       await frame(); await frame();
       const wide = await cues();

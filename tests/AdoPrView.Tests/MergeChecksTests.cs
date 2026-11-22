@@ -756,7 +756,70 @@ static class MergeChecksTests
                 var s = f.Service.Current;
                 Check(s.Error is null && s.RepoErrors.Count == 0 && s.Prs.Single().Key == p.Key && s.Prs[0].Error is null, "History failure harmed active results");
                 Check(s.Completed.Count == 0 && s.CompletedWarnings.Single().StartsWith("repo-one: Completed history unavailable"), "History failure was hidden as an empty success");
-            });    }
+            });
+
+        await test("completed history: dated terminal detail wins even when active-only enrichment fails or the PR is an ignored draft", async () =>
+        {
+            using var f = new Fixture();
+            f.Store.Current.IgnoreDrafts = true;
+            var p = f.Add(); var draft = f.Add(id: 2); draft.Draft = true; var live = f.Add(id: 3);
+            f.CompletedResponse = ("""{"value":[]}""", HttpStatusCode.OK);
+            f.FailEnrichment = true;
+            // Listed as active, then the detail read sees a dated completion.
+            f.BeforePrRead = (pr, _) => { if (pr == p) { pr.Status = "completed"; pr.Closed = "2026-10-31T00:00:00Z"; } };
+            await f.Service.RefreshAsync();
+            var s = f.Service.Current;
+            Check(s.Completed.Single().Key == p.Key && s.Prs.All(x => x.Key != p.Key) && s.Prs.Any(x => x.Key == live.Key),
+                "Terminal detail fell back to an active row: " + string.Join(",", s.Prs.Select(x => x.Key)));
+            Check(f.View(live).Error is not null, "Fixture did not fail active enrichment");
+            try { f.Service.Find(p.Key); throw new Exception("Completed PR stayed actionable"); } catch (InvalidOperationException) { }
+            f.BeforePrRead = null;
+            live.Status = "completed"; live.Closed = "2026-10-31T01:00:00Z";
+            await f.Service.RefreshOneAsync(live.Key);
+            draft.Status = "completed"; draft.Closed = "2026-10-31T02:00:00Z";
+            await f.Service.RefreshOneAsync(draft.Key);
+            var keys = f.Service.Current.Completed.Select(x => x.Key).ToList();
+            Check(keys.SequenceEqual(new[] { draft.Key, live.Key, p.Key }) && f.Service.Current.Prs.Count == 0,
+                "Single refresh enrichment failure or ignored draft blocked the move: " + string.Join(",", keys));
+        });
+
+        await test("completed history: detail or retained PoP re-check outside the current watch scope never enters history", async () =>
+        {
+            using var f = new Fixture();
+            f.Store.Current.Whitelist.Add("Friend");
+            var p = f.Add(); var friend = f.Add(id: 2); friend.Author = "Friend";
+            f.CompletedResponse = ("""{"value":[]}""", HttpStatusCode.OK);
+            await f.Service.RefreshAsync();
+            var target = PopTarget.FromPr(f.View(p));
+            f.Store.Current.Whitelist.Clear();
+            friend.Status = "completed"; friend.Closed = "2026-10-31T00:00:00Z";
+            await f.Service.RefreshOneAsync(friend.Key);
+            f.Store.Current.Repos.Clear();
+            p.Status = "completed"; p.Closed = "2026-10-31T00:00:00Z";
+            var result = await f.Service.RefreshPopAsync(target);
+            Check(result is not null && f.Service.Current.Completed.Count == 0, "Unwatched author or repository was reinserted into history");
+        });
+
+        await test("completed history: wire cutoff is invariant under a non-Gregorian culture and future closed dates are rejected", async () =>
+        {
+            var culture = System.Globalization.CultureInfo.CurrentCulture;
+            System.Globalization.CultureInfo.CurrentCulture = new System.Globalization.CultureInfo("th-TH");
+            try
+            {
+                using var f = new Fixture();
+                var listed = f.Add(); listed.Status = "completed"; listed.Closed = "2026-10-31T00:00:00Z";
+                var future = f.Add(id: 2); future.Status = "completed"; future.Closed = "2026-11-02T00:00:00Z";
+                var detail = f.Add(id: 3);
+                await f.Service.RefreshAsync();
+                Check(f.CompletedQueries.Single().Contains("searchCriteria.minTime=2026-10-25T00:00:00Z"), "Culture changed the wire cutoff: " + f.CompletedQueries.Single());
+                Check(f.Service.Current.Completed.Single().Key == listed.Key, "Culture parse or future date changed history: " + string.Join(",", f.Service.Current.Completed.Select(x => x.Key)));
+                detail.Status = "completed"; detail.Closed = "2026-11-03T00:00:00Z";
+                await f.Service.RefreshOneAsync(detail.Key);
+                Check(f.Service.Current.Completed.Single().Key == listed.Key, "Future-dated detail entered history");
+            }
+            finally { System.Globalization.CultureInfo.CurrentCulture = culture; }
+        });
+    }
 
     sealed class Clock : TimeProvider
     {
@@ -814,6 +877,7 @@ static class MergeChecksTests
         public string? PatchFailureKey;
         public bool ReturnQueued = true;
         public int CompletedNoise;
+        public bool FailEnrichment;
         public (string Body, HttpStatusCode Status)? CompletedResponse;
         public readonly List<string> CompletedQueries = [];
         public Action<PullRequest, int>? BeforePrRead;
@@ -852,6 +916,8 @@ static class MergeChecksTests
             JsonNode result;
             if (path.EndsWith("/connectionData"))
                 result = JsonNode.Parse("""{"authenticatedUser":{"id":"me","providerDisplayName":"Offline"}}""")!;
+            else if (path.Contains("/policy/evaluations") && FailEnrichment)
+                return Response("""{"message":"policy read denied"}""", HttpStatusCode.Forbidden);
             else if (path.Contains("/policy/evaluations"))
                 result = new JsonObject { ["value"] = Policies.DeepClone() };
             else

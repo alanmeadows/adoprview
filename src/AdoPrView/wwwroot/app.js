@@ -408,7 +408,7 @@ function renderCompletedRows() {
   const shown = completedVisible();
   const notes = (S.snap.completedWarnings || []).map(w => `<div class="completed-note" role="status">⚠ ${esc(w)}</div>`).join('');
   rows.innerHTML = notes + shown.map(c => `<div class="pr completed" data-key="${esc(c.key)}" data-completed style="--c:var(--ready)">
-    <div class="id-cue" aria-hidden="true"><span>!${c.id} · ${esc(c.repo)}</span></div>
+    <div class="id-cue" aria-hidden="true"><span><b>!${c.id} · </b><i>${esc(c.repo)}</i></span></div>
     <div class="row">
       <div class="c-pr"><div class="prmain">
         <div class="title" title="${esc(c.title)}">${esc(c.title)}</div>
@@ -444,6 +444,8 @@ const runCancelable = r => runActive(r) || (r?.status === 'needs-attention' && r
 const runsForPr = key => [...S.runs.values()].reverse().filter(r => r.key === key)
   .sort((a, b) => (Date.parse(b.startedAt) || 0) - (Date.parse(a.startedAt) || 0));
 const runForPr = key => runsForPr(key).find(runActive) || runsForPr(key).at(0);
+// Live/uncertain or starting runs lead the expanded detail; finished runs follow the PR context.
+const runLeads = key => runCancelable(runForPr(key)) || isBusy(key, 'triage');
 
 const explanationActive = r => !!r && ['preparing', 'running', 'cancelling'].includes(r.status);
 const explanationLabel = r => r?.status === 'failed' || r?.status === 'cancelled' ? 'Retry Explain' : r ? 'Explain again' : 'Explain this PR';
@@ -931,19 +933,22 @@ function updateCopilotRun(r) {
     cancel.disabled = isBusy(r.key, 'cancelRun');
     cancel.dataset.runId = r.runId;
   }
-  if (!old) { renderRunShelf(true); renderRows(true); restoreRunOutputs(previousSelection); }
+  if (!old) { renderRunShelf(true); renderRows(true); restoreRunOutputs(previousSelection); return; }
+  // Render (deferred while rows are in use) only when the run group's leading/trailing placement changes.
+  const detail = [...document.querySelectorAll('#rows > .pr')].find(el => el.dataset.key === r.key)?.querySelector(':scope > .detail[data-run-lead]');
+  if (detail && detail.dataset.runLead !== String(+runLeads(r.key))) renderRows(true);
 }
 
 function syncCopilotButton(key) {
   for (const button of document.querySelectorAll('[data-act="triage"]')) {
     if (button.closest('.pr')?.dataset.key !== key) continue;
-    const active = runActive(runForPr(key)), busy = isBusy(key, 'triage');
+    const active = runActive(runForPr(key)), cancelable = runCancelable(runForPr(key)), busy = isBusy(key, 'triage');
     const expanded = button.classList.contains('mini');
     button.classList.toggle('running', active);
     button.classList.toggle('busy', busy);
     button.disabled = busy;
-    button.innerHTML = svg(active || busy ? 'refresh' : 'spark') + (expanded ? ` ${active ? 'Show run' : 'Fix PR'}` : '');
-    button.title = active ? runForPr(key)?.status === 'needs-attention'
+    button.innerHTML = svg(active || busy ? 'refresh' : 'spark') + (expanded ? ` ${cancelable ? 'Show run' : 'Fix PR'}` : '');
+    button.title = cancelable ? runForPr(key)?.status === 'needs-attention'
       ? 'Copilot task may still be active; show status and cancellation controls'
       : 'Show the active inline Copilot run for this PR' : 'Fix PR with Copilot in an isolated WSL worktree; output stays inline';
     button.setAttribute('aria-label', button.title);
@@ -1118,7 +1123,7 @@ function renderPr(p, meta) {
   if (!p.isMine) tags.push(`<span class="tag watch" title="${esc(p.author?.uniqueName || '')}">${avatar(p.author?.name)} ${esc(p.author?.name)}</span>`);
   if (p.error) tags.push(`<span class="tag err" title="${esc(p.error)}">load error</span>`);
   return `<div class="pr ${open ? 'open' : ''}" data-key="${esc(p.key)}" style="--c:${meta.c}">
-    <div class="id-cue" aria-hidden="true"><span>!${p.id} · ${esc(p.repo)}</span></div>
+    <div class="id-cue" aria-hidden="true"><span><b>!${p.id} · </b><i>${esc(p.repo)}</i></span></div>
     <div class="row" data-act="toggle">
       <div class="c-pr" data-act="toggle" role="button" tabindex="0" aria-expanded="${open}">${svg('chev').replace('<svg', '<svg class="chev"')}
         <div class="prmain">
@@ -1145,8 +1150,9 @@ function renderDetail(p) {
   const full = [];
   // Blockers and actionable runs lead; results, idle tools and finished runs follow the PR context.
   const runGroup = renderRunCard(p.key) + earlierRunCards(p.key);
-  const runLeads = runCancelable(runForPr(p.key)) || isBusy(p.key, 'triage');
-  const trailing = [renderExplanation(p.key), renderVideo(p.key), ...(runLeads ? [] : [runGroup])];
+  const lead = runLeads(p.key);
+  const trailing = [renderExplanation(p.key), renderVideo(p.key), ...(lead ? [] : [runGroup])];
+  const humanText = a => ({ reviews: 'Human reviewer approval needed (+1)', pop: 'Proof of Presence — tap your security key', autocomplete: 'Auto-complete not set', publish: 'Draft — publish when ready' }[a] || a);
 
   if (p.approval || S.approvals.has(p.key)) {
     const outcome = S.approvals.get(p.key);
@@ -1192,7 +1198,16 @@ function renderDetail(p) {
       ${fb.evaluationId ? `<button class="mini" data-act="requeue" data-eval="${esc(fb.evaluationId)}">${svg('play')} Re-queue</button>` : ''}
       <button class="mini" data-act="url" data-url="${esc(fb.url)}">${svg('ext')} Open logs</button></h3>${tasks}</div>`);
   }
-  if (runLeads) full.push(runGroup);
+  if (lead) {
+    // A leading run must not bury blockers that no leading card above already conveys (e.g. conflicts, required reviews).
+    const approvalCard = !!(p.approval || S.approvals.has(p.key));
+    const reasons = p.error || (p.failedBuilds || []).length ? [] : [
+      ...(p.blockers || []).map(x => ['fail', x]),
+      ...(p.humanActions || []).filter(a => a !== 'reviews' || !approvalCard).map(a => ['human', humanText(a)]),
+    ];
+    if (reasons.length) full.push(`<div class="card lead-blockers"><h3>Blocking</h3><div class="body"><ul class="list blockers">${reasons.map(([c, t]) => `<li><span class="dot ${c}"></span><span class="k">${esc(t)}</span></li>`).join('')}</ul></div></div>`);
+    full.push(runGroup);
+  }
 
   left.push(`<div class="card"><h3>Description</h3><div class="body md clamp">${md(p.description)}</div></div>`);
 
@@ -1211,7 +1226,7 @@ function renderDetail(p) {
   // Right column: what's blocking
   const items = [
     ...(p.blockers || []).map((x) => ['fail', x]),
-    ...(p.humanActions || []).map((a) => ['human', { reviews: 'Human reviewer approval needed (+1)', pop: 'Proof of Presence — tap your security key', autocomplete: 'Auto-complete not set', publish: 'Draft — publish when ready' }[a] || a]),
+    ...(p.humanActions || []).map((a) => ['human', humanText(a)]),
     ...(p.waiting || []).map((x) => ['pending', x]),
   ];
   const fixActive = runActive(runForPr(p.key)), fixBusy = isBusy(p.key, 'triage');
@@ -1262,7 +1277,7 @@ function renderDetail(p) {
       <span class="vote v${r.vote}">${vl[r.vote] ?? r.vote}</span></li>`).join('')}</ul></div></div>`);
   }
 
-  return `<div class="detail">${full.length ? `<div class="full stack">${full.join('')}</div>` : ''}<div class="stack">${left.join('')}</div><div class="stack">${right.join('')}</div><div class="full stack">${trailing.join('')}</div></div>`;
+  return `<div class="detail" data-run-lead="${+lead}">${full.length ? `<div class="full stack">${full.join('')}</div>` : ''}<div class="stack">${left.join('')}</div><div class="stack">${right.join('')}</div><div class="full stack">${trailing.join('')}</div></div>`;
 }
 
 function formatLog(text, showTs) {
@@ -1503,7 +1518,11 @@ async function onAction(act, el, key) {
         renderRows();
         // Reveal the exact live/uncertain run (status, Cancel, output) past any tall failed-gate logs.
         const card = [...document.querySelectorAll('#rows .copilot-run:not(.run-earlier)')].find(c => c.dataset.runKey === key);
-        if (card) { card.scrollIntoView({ block: 'start' }); $('.run-output', card)?.focus({ preventScroll: true }); }
+        if (card) {
+          // Clear the sticky column header so the run status and Cancel stay visible and clickable.
+          card.style.scrollMarginTop = `${($('.thead')?.getBoundingClientRect().height || 0) + 8}px`;
+          card.scrollIntoView({ block: 'start' }); $('.run-output', card)?.focus({ preventScroll: true });
+        }
         break;
       }
       await runAction(key, 'triage', async () => {

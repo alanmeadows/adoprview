@@ -232,16 +232,20 @@ their votes. Build policies have **Re-queue** and a link to the build.
 
 Expanded details lead with what needs action: approval, load errors and failed
 gates come first. A Fix run that is live, recovering, possibly still running or
-needs attention comes next, with its status, **Cancel run** and output. The
+needs attention comes next, with its status, **Cancel run** and output; any
+merge conflict or required review not already shown above it is listed first in
+a short **Blocking** card. The run group moves behind the PR context when the
+run finishes (after you stop interacting with the rows). The
 description and Status/Merge cards follow. Explain, the video card and finished
 or not-started Fix runs come after that context; their launchers and readable
 output stay visible. The Status card shows the Fix PR execution scope (`--yolo`,
 worktree, push limits) once per PR beside **Fix PR**. Retained runs below the
 table and ignored drafts with runs show it once above their run cards. While a
-run is live, **Show run** scrolls to that run and focuses its output.
+run is live, **Show run** scrolls to that run, below the column header, and
+focuses its output.
 
 In a narrow window the table scrolls sideways. Once a row's PR title column is
-out of view, a small `!id · repo` cue appears at the top-left of each row so you
+out of view, a small `!id · repo` cue (long repository names are shortened with …) appears at the top-left of each row so you
 can still tell rows apart. It is display-only and does not take clicks or
 keyboard focus.
 
