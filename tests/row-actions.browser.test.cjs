@@ -7,6 +7,147 @@ const path = require('node:path');
 const os = require('node:os');
 const { pathToFileURL } = require('node:url');
 
+test('Additional Fix fields are independently editable and restored in the real source GUI', { timeout: 60000 }, async () => {
+  const profile = await mkdtemp(path.join(os.tmpdir(), 'ado-fix-fields-'));
+  const browser = process.env.ROW_TEST_BROWSER || 'C:\\Program Files (x86)\\Microsoft\\Edge\\Application\\msedge.exe';
+  const child = spawn(browser, [
+    '--headless=new', '--remote-debugging-port=0', '--no-first-run', '--disable-extensions',
+    '--no-default-browser-check', `--user-data-dir=${profile}`, 'about:blank',
+  ], { stdio: ['ignore', 'ignore', 'pipe'] });
+  const exited = once(child, 'exit');
+  let socket;
+  try {
+    const url = await new Promise((resolve, reject) => {
+      const timer = setTimeout(() => reject(new Error('Browser startup timed out')), 15000);
+      child.once('error', error => { clearTimeout(timer); reject(error); });
+      child.stderr.on('data', chunk => {
+        const match = chunk.toString().match(/DevTools listening on (ws:\/\/\S+)/);
+        if (match) { clearTimeout(timer); resolve(match[1]); }
+      });
+    });
+    socket = new WebSocket(url);
+    await once(socket, 'open');
+    let id = 0, session;
+    const pending = new Map();
+    socket.addEventListener('message', event => {
+      const message = JSON.parse(event.data), request = pending.get(message.id);
+      if (!request) return;
+      pending.delete(message.id);
+      message.error ? request.reject(new Error(JSON.stringify(message.error))) : request.resolve(message.result);
+    });
+    const send = (method, params = {}, useSession = true) => new Promise((resolve, reject) => {
+      const n = ++id;
+      pending.set(n, { resolve, reject });
+      socket.send(JSON.stringify({ id: n, method, params, ...(useSession && session ? { sessionId: session } : {}) }));
+    });
+    const target = await send('Target.createTarget', { url: 'about:blank' }, false);
+    session = (await send('Target.attachToTarget', { targetId: target.targetId, flatten: true }, false)).sessionId;
+    const evaluate = async expression => {
+      const result = await send('Runtime.evaluate', { expression, awaitPromise: true, returnByValue: true });
+      if (result.exceptionDetails) throw new Error(JSON.stringify(result.exceptionDetails));
+      return result.result.value;
+    };
+    const click = async selector => {
+      const point = await evaluate(`(()=>{
+        document.querySelector('#toasts').replaceChildren();
+        const el=document.querySelector(${JSON.stringify(selector)});
+        if(!el)throw Error('Missing control');
+        el.scrollIntoView({block:'center'});
+        const r=el.getBoundingClientRect(),x=r.x+r.width/2,y=r.y+r.height/2;
+        const hit=document.elementFromPoint(x,y);
+        if(!el.contains(hit))throw Error('Control is not hit-testable: '+${JSON.stringify(selector)}+' covered by '+(hit?.className||hit?.tagName||'none'));
+        return {x,y};
+      })()`);
+      for (const type of ['mousePressed', 'mouseReleased'])
+        await send('Input.dispatchMouseEvent', { type, ...point, button: 'left', clickCount: 1 });
+    };
+    await send('Page.enable');
+    await send('Emulation.setDeviceMetricsOverride', { width: 1280, height: 900, deviceScaleFactor: 1, mobile: false });
+    const root = path.resolve(__dirname, '..', 'src', 'AdoPrView', 'wwwroot', 'index.html');
+    await send('Page.navigate', { url: pathToFileURL(root).href + '?mock=1' });
+    await evaluate(`new Promise((resolve,reject)=>{
+      const deadline=Date.now()+10000;
+      const check=()=>window.__ready?resolve():Date.now()>deadline?reject(Error('UI did not boot')):setTimeout(check,20);check();
+    })`);
+    await evaluate(`
+      S.snap.approvalProvider=null;
+      S.settings.triageInstructions=null;S.settings.additionalTriageInstructions=null;
+      S.settings.futureSetting='SYNTHETIC-KEEP';
+      window.fixSaved=[];
+      window.fixExisting=['running','recovering','completed'].map((status,i)=>({
+        key:'offline:'+i,runId:'existing-'+i,status,output:'Captured session '+i
+      }));
+      for(const run of window.fixExisting)S.runs.set(run.runId,run);
+      window.MockHost.rpc=async(method,p)=>{
+        if(method!=='saveSettings')throw Error('Unexpected host call '+method);
+        window.fixSaved.push(structuredClone(p.settings));
+        return structuredClone(p.settings);
+      };
+    `);
+    await click('#settingsBtn');
+    const labels = await evaluate(`['triageInstructions','additionalTriageInstructions'].map(id=>
+      document.querySelector('label[for="'+id+'"]').textContent)`);
+    assert.deepEqual(labels, ['Custom Ask (override)', 'Additional instructions (append)']);
+    const ask = 'CUSTOM ASK: fix only the synthetic issue';
+    const extra = '\n  EXTRA GUIDANCE\nKeep the final newline.\n';
+    await click('#triageInstructions');
+    await send('Input.insertText', { text: ask });
+    await click('#additionalTriageInstructions');
+    await send('Input.insertText', { text: extra });
+    await click('[data-dact="save"]');
+    assert.equal(await evaluate('window.fixSaved.length'), 1);
+    const saved = await evaluate('window.fixSaved[0]');
+    assert.equal(saved.triageInstructions, ask);
+    assert.equal(saved.additionalTriageInstructions, extra);
+    assert.equal(saved.futureSetting, 'SYNTHETIC-KEEP');
+    await evaluate('closeDrawer();S.settings=structuredClone(window.fixSaved[0]);');
+    await click('#settingsBtn');
+    assert.deepEqual(await evaluate(`['triageInstructions','additionalTriageInstructions'].map(id=>
+      document.getElementById(id).value)`), [ask, extra]);
+    await click('[data-dact="save"]');
+    assert.equal(await evaluate('window.fixSaved[1].additionalTriageInstructions'), extra);
+    await evaluate(`document.querySelector('#triageInstructions').closest('.section').scrollIntoView({block:'center'});`);
+    if (process.env.ADOPRVIEW_FIX_SCREENSHOT) {
+      await evaluate('new Promise(resolve=>setTimeout(resolve,250))');
+      const screenshot = await send('Page.captureScreenshot', { format: 'png' });
+      await writeFile(process.env.ADOPRVIEW_FIX_SCREENSHOT, Buffer.from(screenshot.data, 'base64'));
+    }
+    await click('#additionalTriageInstructions');
+    await send('Input.dispatchKeyEvent', { type: 'keyDown', key: 'a', code: 'KeyA', windowsVirtualKeyCode: 65, modifiers: 2 });
+    await send('Input.dispatchKeyEvent', { type: 'keyUp', key: 'a', code: 'KeyA', windowsVirtualKeyCode: 65, modifiers: 2 });
+    await send('Input.dispatchKeyEvent', { type: 'keyDown', key: 'Backspace', code: 'Backspace', windowsVirtualKeyCode: 8 });
+    await send('Input.dispatchKeyEvent', { type: 'keyUp', key: 'Backspace', code: 'Backspace', windowsVirtualKeyCode: 8 });
+    await click('[data-dact="save"]');
+    assert.equal(await evaluate('window.fixSaved[2].additionalTriageInstructions'), '');
+    assert.equal(await evaluate('window.fixSaved[2].triageInstructions'), ask);
+    for (const original of ['\n  CRLF guidance\r\nverbatim\n', '\r  CR guidance\rverbatim\r']) {
+      const normalized = original.replace(/\r\n?/g, '\n');
+      await evaluate(`S.settings.additionalTriageInstructions=${JSON.stringify(original)};renderDrawer();`);
+      assert.equal(await evaluate("document.querySelector('#additionalTriageInstructions').value"), normalized);
+      await click('[data-dact="save"]');
+      assert.equal(await evaluate('window.fixSaved.at(-1).additionalTriageInstructions'), original);
+      await evaluate('closeDrawer();S.settings=structuredClone(window.fixSaved.at(-1));');
+      await click('#settingsBtn');
+      assert.equal(await evaluate("document.querySelector('#additionalTriageInstructions').value"), normalized);
+      await click('#additionalTriageInstructions');
+      await send('Input.dispatchKeyEvent', { type: 'keyDown', key: 'a', code: 'KeyA', windowsVirtualKeyCode: 65, modifiers: 2 });
+      await send('Input.dispatchKeyEvent', { type: 'keyUp', key: 'a', code: 'KeyA', windowsVirtualKeyCode: 65, modifiers: 2 });
+      const edited = normalized + 'EDITED';
+      await send('Input.insertText', { text: edited });
+      await click('[data-dact="save"]');
+      assert.equal(await evaluate('window.fixSaved.at(-1).additionalTriageInstructions'), edited);
+      assert.equal(await evaluate('window.fixSaved.at(-1).triageInstructions'), ask);
+    }
+    assert.equal(await evaluate('window.fixExisting.every(run=>S.runs.get(run.runId)===run)'), true);
+    await send('Browser.close', {}, false);
+  } finally {
+    socket?.close();
+    if (child.exitCode === null) child.kill();
+    await exited;
+    await rm(profile, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
+  }
+});
+
 // No browser packages required: Node 22+ and a local Chromium browser.
 test('real row hit testing and action identity across refreshes', { timeout: 90000 }, async t => {
   if (process.env.ROW_TEST_FILTER) {

@@ -10,6 +10,46 @@ static class SettingsTests
 
     public static async Task Run(Func<string, Func<Task>, Task> test)
     {
+        await test("settings additional Fix instructions round-trip independently and older clients preserve them", () => InDir(dir =>
+        {
+            var path = Path.Combine(dir, "settings.json");
+            File.WriteAllText(path, """{"triageInstructions":"CUSTOM","refreshSeconds":45,"hidden":["offline:123"],"approvalProvider":{"enabled":false,"futureProvider":"KEEP"},"futureTop":"KEEP"}""");
+            var store = new SettingsStore(path);
+            using var http = new HttpClient();
+            var prs = new PrService(new AdoClient(http, _ => Task.FromResult(new AuthenticationHeaderValue("Bearer", "offline"))), store);
+            string? reply = null;
+            var bridge = new Bridge(prs, store, text => { reply = text; return Task.CompletedTask; }, _ => { });
+            const string extra = "  Extra\r\nverbatim\n";
+            var form = JsonSerializer.SerializeToNode(store.Current, Bridge.Json)!.AsObject();
+            form["additionalTriageInstructions"] = extra;
+            void Save() => bridge.HandleAsync(new JsonObject { ["id"] = 1, ["method"] = "saveSettings",
+                ["params"] = new JsonObject { ["settings"] = form.DeepClone() } }.ToJsonString()).GetAwaiter().GetResult();
+            Save();
+            var reloaded = new SettingsStore(path);
+            Check(reply is not null && !reply.Contains("\"error\"") && reloaded.Current.TriageInstructions == "CUSTOM" &&
+                reloaded.Current.AdditionalTriageInstructions == extra &&
+                reloaded.Current.ApprovalProvider!.Extra!["futureProvider"].GetString() == "KEEP" &&
+                reloaded.Current.Extra!["futureTop"].GetString() == "KEEP", "Suffix save lost Ask, whitespace or private/future fields");
+            form.Remove("additionalTriageInstructions");
+            Save();
+            reloaded = new SettingsStore(path);
+            Check(reloaded.Current.AdditionalTriageInstructions == extra &&
+                reloaded.Current.ApprovalProvider!.Extra!["futureProvider"].GetString() == "KEEP" &&
+                reloaded.Current.Extra!["futureTop"].GetString() == "KEEP", "Older client erased suffix or integration fields");
+            foreach (var cleared in new string?[] { null, "", " \r\n\t" })
+            {
+                form["additionalTriageInstructions"] = extra;
+                Save();
+                form["additionalTriageInstructions"] = cleared;
+                Save();
+                reloaded = new SettingsStore(path);
+                Check(reloaded.Current.AdditionalTriageInstructions is null &&
+                    reloaded.Current.TriageInstructions == "CUSTOM" && reloaded.Current.RefreshSeconds == 45 &&
+                    reloaded.Current.Hidden.SequenceEqual(["offline:123"]) &&
+                    reloaded.Current.ApprovalProvider!.Extra!["futureProvider"].GetString() == "KEEP" &&
+                    reloaded.Current.Extra!["futureTop"].GetString() == "KEEP", "Clearing suffix changed unrelated settings");
+            }
+        }));
         await test("settings missing file starts empty without seeded repos, authors or bot", () => InDir(dir =>
         {
             var path = Path.Combine(dir, "settings.json");

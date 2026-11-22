@@ -49,6 +49,35 @@ function setup(search = '?mock=1') {
   return { hooks, pr, window, elements, dialogs, document, context, element };
 }
 
+test('Fix drawer saves additional instructions independently without changing captured running sessions', async () => {
+  const { hooks, window, elements } = setup();
+  hooks.S.settings.triageInstructions = 'CUSTOM ASK';
+  hooks.S.settings.additionalTriageInstructions = '  MORE\r\nfinal\n';
+  hooks.S.settings.futureSetting = 'KEEP';
+  const existing = { key: 'repo:123', runId: 'captured', status: 'running', output: 'retained' };
+  hooks.S.runs.set(existing.runId, existing);
+  hooks.renderDrawer();
+  assert.match(elements.get('#drawerBody').innerHTML, /Custom Ask \(override\)/);
+  assert.match(elements.get('#drawerBody').innerHTML, /Additional instructions \(append\)/);
+  for (const id of ['refreshSeconds', 'mergeCheckMinutes', 'triageInstructions', 'additionalTriageInstructions',
+    'wslDistro', 'mergeStrategy', 'notifications', 'sound', 'deleteSourceBranch', 'transitionWorkItems'])
+    elements.set('#' + id, { value: '', checked: false });
+  elements.get('#triageInstructions').value = 'CUSTOM ASK';
+  elements.get('#additionalTriageInstructions').value = '  UPDATED\r\nfinal\n';
+  const calls = [];
+  window.MockHost.rpc = async (method, p) => {
+    calls.push({ method, settings: { ...p.settings } });
+    return p.settings;
+  };
+  await hooks.onDrawerAction('save', {});
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].method, 'saveSettings');
+  assert.equal(calls[0].settings.triageInstructions, 'CUSTOM ASK');
+  assert.equal(calls[0].settings.additionalTriageInstructions, '  UPDATED\r\nfinal\n');
+  assert.equal(calls[0].settings.futureSetting, 'KEEP');
+  assert.equal(hooks.S.runs.get(existing.runId), existing);
+});
+
 test('first video requires explicit Azure setup and missing az stays an actionable setup error without starting generation', async () => {
   const { hooks, pr, window, elements } = setup();
   hooks.S.settings.videoSpeech = null;

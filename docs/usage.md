@@ -516,6 +516,20 @@ alternative. Fix is optional: viewing PRs needs neither WSL nor Copilot.
 
 The generated Fix/Copy prompt is configurable in settings:
 
+- `additionalTriageInstructions` adds optional text at the **end** without
+  replacing the default/custom Ask. The drawer labels these separately as
+  **Custom Ask (override)** and **Additional instructions (append)**. Copy
+  prompt includes the suffix after its generated boundaries; a new inline launch
+  includes it once after the captured source and verified publish target.
+  Ask, additional guidance, skill and reviewer choices are captured together
+  before asynchronous source/log reads; later settings saves apply to future prompts.
+  Saving an unchanged drawer preserves the stored guidance's original line endings.
+  Copy prompt and Fix reject NUL or effective prompts over 1,048,576 characters.
+  Launch also checks the complete prompt after adding verified publication context;
+  instructions are never silently truncated.
+  Blank leaves existing behavior unchanged. Saving does not modify running or
+  recovered sessions, their prompts or history; all existing gates still apply.
+
 - `triageInstructions` replaces the default "Ask" text verbatim.
 - `fixSkill` names an optional local Copilot skill for the default Ask. It is not
   installed by the app.
