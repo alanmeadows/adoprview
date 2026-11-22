@@ -145,6 +145,8 @@ public sealed partial class PrService
             var repoErrors = new ConcurrentBag<string>();
             var completed = new ConcurrentBag<CompletedPr>();
             var completedWarnings = new ConcurrentBag<string>();
+            // Error also covers enrichment failures after a successful detail read; only a failed detail read may yield to history.
+            var detailFailed = new ConcurrentDictionary<string, byte>(StringComparer.OrdinalIgnoreCase);
             // The lower bound is fixed at refresh start; each projection compares against the clock when it runs.
             var since = _time.GetUtcNow() - CompletedWindow;
             if (ReviewBotUnscoped(settings.ReviewBot))
@@ -186,9 +188,11 @@ public sealed partial class PrService
                         var id = I(pr["pullRequestId"])!.Value;
                         work.Add(Task.Run(async () =>
                         {
-                            try { results.Add(await BuildAsync(repo, id, me.Id, heads)); }
+                            var read = false;
+                            try { results.Add(await BuildAsync(repo, id, me.Id, heads, detailRead: () => read = true)); }
                             catch (Exception ex)
                             {
+                                if (!read) detailFailed.TryAdd(key, 0);
                                 var m = Minimal(repo, pr, me.Id, hidden: false);
                                 m.Error = ex.Message;
                                 m.Lane = Lane.Waiting;
@@ -208,7 +212,7 @@ public sealed partial class PrService
             var listed = completed.Where(c => Watched(c.Org, c.Project, c.Repo, c.IsMine, c.Author)).ToList();
             var listedKeys = listed.Select(c => c.Key).ToHashSet(StringComparer.OrdinalIgnoreCase);
             // A dated completion outranks an active projection whose detail read failed, never an obtained active detail.
-            var active = Sort(prs.Where(p => p.IsActive && !(p.Error is not null && listedKeys.Contains(p.Key))));
+            var active = Sort(prs.Where(p => p.IsActive && !(detailFailed.ContainsKey(p.Key) && listedKeys.Contains(p.Key))));
             // Only an obtained detail/re-check that says completed moves a watched PR into history.
             var now = _time.GetUtcNow();
             var moved = prs.Where(p => !p.IsActive).Select(p => ToCompleted(p, since, now)).OfType<CompletedPr>().ToList();
@@ -388,7 +392,7 @@ public sealed partial class PrService
 
     // ------------------------------------------------------------ build view
 
-    async Task<PrView> BuildAsync(RepoRef repo, int prId, string meId, ConcurrentDictionary<string, Lazy<Task<string>>> heads, PopTarget? expected = null)
+    async Task<PrView> BuildAsync(RepoRef repo, int prId, string meId, ConcurrentDictionary<string, Lazy<Task<string>>> heads, PopTarget? expected = null, Action? detailRead = null)
     {
         var api = Api(repo.Org, repo.Project);
         var prBase = $"{api}git/repositories/{Esc(repo.RepoId ?? repo.Repo)}/pullrequests/{prId}";
@@ -397,6 +401,7 @@ public sealed partial class PrService
             !S(pr["repository"]?["id"]).Equals(expected.RepoId, StringComparison.OrdinalIgnoreCase) ||
             !S(pr["repository"]?["project"]?["id"]).Equals(expected.ProjectId, StringComparison.OrdinalIgnoreCase)))
             throw new InvalidOperationException("ADO returned a different PR identity; the result was not applied.");
+        detailRead?.Invoke();
         // A terminal detail is final evidence; active-only enrichment must not be able to discard it.
         if (S(pr["status"]) != "active" || _store.Current.IgnoreDrafts && B(pr["isDraft"]))
             return Minimal(repo, pr, meId, hidden: _store.Current.Hidden.Contains($"{S(pr["repository"]?["id"])}:{prId}", StringComparer.OrdinalIgnoreCase));

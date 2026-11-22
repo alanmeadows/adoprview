@@ -1413,7 +1413,36 @@ test('real row hit testing and action identity across refreshes', { timeout: 900
       assert.deepEqual([await lead(), await runs(), await evaluate('[S.runRelocations.size, S.rowsPending]'),
         await evaluate(`[...document.querySelectorAll('#rows [data-key="${key}"] .copilot-run:not(.run-earlier)')].map(c=>c.dataset.runId)`)],
         ['1', ['sel-rec', 'sel-new', 'sel-old'], [0, false], ['sel-rec']], 'The recovered run leads and the deferred render applies once the selection clears');
-    });
+      // On the shelf, a selection from the execution notice into an older run's output holds that run's recovery promotion,
+      // which is queued and replayed once the selection clears.
+      await evaluate(`{const pr=S.snap.prs.find(p=>p.key==='${key}');
+        for (const id of ['sel-rec','sel-new','sel-old']) S.runs.delete(id);
+        S.runs.set('shelf-new',{...pr,runId:'shelf-new',status:'completed',mayBeRunning:false,startedAt:'2026-01-02T00:00:00Z',output:'Shelf newer\\n',outputOffset:12});
+        S.runs.set('shelf-old',{...pr,runId:'shelf-old',id:0,status:'needs-attention',mayBeRunning:false,startedAt:'2026-01-01T00:00:00Z',output:'Shelf older\\n',outputOffset:12});
+        S.expanded.add('${key}');render();setSnapshot({...S.snap,orderRevision:(S.snap.orderRevision||0)+1,prs:S.snap.prs.filter(p=>p.key!=='${key}')});}`);
+      await frame();
+      const shelfMain = () => evaluate(`[...document.querySelectorAll('#runShelf [data-key="${key}"] .copilot-run')].map(c=>[c.dataset.runId,c.classList.contains('run-earlier')])`);
+      assert.deepEqual(await shelfMain(), [['shelf-new', false], ['shelf-old', true]]);
+      await evaluate(`{const row=document.querySelector('#runShelf [data-key="${key}"]'),a=row.querySelector('.run-scope'),
+          b=row.querySelector('.copilot-run[data-run-id="shelf-old"] .run-output'),r=document.createRange();
+        const w=e=>document.createTreeWalker(e,NodeFilter.SHOW_TEXT),s=w(a).nextNode(),bw=w(b);let t=null,n;while((n=bw.nextNode()))t=n;
+        r.setStart(s,0);r.setEnd(t,t.length);window.getSelection().removeAllRanges();window.getSelection().addRange(r);
+        window.selNodes=[r.startContainer,r.endContainer];window.shelfOld=b.closest('.copilot-run');}`);
+      const shelfAttached = () => evaluate(`{const s=window.getSelection(),r=s.rangeCount&&s.getRangeAt(0);
+        !!r && r.startContainer===window.selNodes[0] && r.endContainer===window.selNodes[1] && window.selNodes.every(n=>n.isConnected) &&
+        window.shelfOld.isConnected && s.toString().trimEnd().endsWith('Shelf older')}`);
+      assert.equal(await shelfAttached(), true, 'The shelf crossing selection baseline is intact before promotion');
+      await evaluate(`updateCopilotRun({...S.runs.get('shelf-old'),status:'recovering',mayBeRunning:true,revision:1})`);
+      await frame();
+      assert.deepEqual([await shelfAttached(), await shelfMain(), await evaluate(`S.runRelocations.has('${key}')`)],
+        [true, [['shelf-new', false], ['shelf-old', true]], true], 'A selection-held shelf promotion is queued, not dropped');
+      assert.deepEqual(await evaluate(`renderRows(true); flushRowUpdates(); [S.runRelocations.has('${key}'), window.shelfOld.isConnected]`), [true, true],
+        'Deferred renders do not rebuild the selected shelf cards');
+      assert.equal(await shelfAttached(), true);
+      await evaluate('window.getSelection().removeAllRanges()');
+      await frame(); await frame();
+      assert.deepEqual([await shelfMain(), await evaluate('[S.runRelocations.size, S.rowsPending]')],
+        [[['shelf-old', false], ['shelf-new', true]], [0, false]], 'The recovered shelf run becomes the main card once the selection clears');    });
 
     await t.test('layout narrow-window identity cue names the panned row without covering gates or actions', async () => {
       await send('Emulation.setDeviceMetricsOverride', { width: 900, height: 500, deviceScaleFactor: 1, mobile: false });

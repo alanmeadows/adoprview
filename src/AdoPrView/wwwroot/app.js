@@ -362,7 +362,7 @@ function restoreExpansionFocus(control) {
 
 function renderRowsContent(whenIdle = false) {
   if (S.rowPointerDown || (whenIdle && (rowsInUse() || crossRunOutputSelection() ||
-    selectionBlocksMove([...document.querySelectorAll('#rows .copilot-run, #rows .lead-blockers')])))) { S.rowsPending = true; renderStatus(); return; }
+    selectionBlocksMove([...document.querySelectorAll('#rows .copilot-run, #rows .lead-blockers, #runShelf .copilot-run')])))) { S.rowsPending = true; renderStatus(); return; }
   S.rowsPending = false;
   S.runRelocations.clear();
   const vis = baseVisible();
@@ -839,7 +839,8 @@ function earlierRunCards(key) {
 // run entries here (unless hidden), only in the unfiltered view.
 function renderRunShelf(whenIdle = false) {
   if (!$('#runShelf')) return;
-  if (whenIdle && (rowsInUse() || crossRunOutputSelection()?.card.closest('#runShelf'))) { S.rowsPending = true; renderStatus(); return; }
+  if (whenIdle && (rowsInUse() || crossRunOutputSelection()?.card.closest('#runShelf') ||
+    selectionBlocksMove([...document.querySelectorAll('#runShelf .copilot-run')]))) { S.rowsPending = true; renderStatus(); return; }
   const selection = captureRunOutputs();
   renderRunShelfContent();
   restoreRunOutputs(selection);
@@ -968,6 +969,7 @@ function selectionBlocksMove(elements) {
 // Move the existing run group (same nodes, reading and selection) when its leading/trailing placement or main run changes.
 function relocateRunGroup(key) {
   const detail = [...document.querySelectorAll('#rows > .pr')].find(el => el.dataset.key === key)?.querySelector(':scope > .detail[data-run-lead]');
+  if (!detail) return relocateShelfRuns(key);
   const p = S.snap.prs.find(x => x.key === key), lead = runLeads(key);
   const cards = detail ? [...detail.querySelectorAll('.copilot-run')] : [];
   const latestId = runForPr(key)?.runId;
@@ -1001,6 +1003,25 @@ function relocateRunGroup(key) {
   }
   restoreRunOutputSelection(outputSelection);
   detail.dataset.runLead = String(+lead);
+  renderStatus();
+}
+
+// Shelf cards have no leading placement; only a held main-run promotion is queued and replayed in place.
+function relocateShelfRuns(key) {
+  const cards = [...(document.querySelector('#runShelf')?.querySelectorAll('.copilot-run') || [])].filter(el => el.dataset.runKey === key);
+  const latestId = runForPr(key)?.runId;
+  if (!cards.some(el => el.dataset.runId === latestId) || cards.find(el => !el.classList.contains('run-earlier'))?.dataset.runId === latestId) {
+    S.runRelocations.delete(key); return;
+  }
+  if (rowsInUse() || crossRunOutputSelection() || selectionBlocksMove(cards)) { S.runRelocations.add(key); renderStatus(); return; }
+  S.runRelocations.delete(key);
+  const outputSelection = captureRunOutputs();
+  reorderRunCards(key, cards);
+  for (const card of cards) {
+    const view = S.runOutputs.get(card.dataset.runId);
+    if (view) { view.element.scrollTop = view.top; view.element.scrollLeft = view.left; view.top = view.element.scrollTop; }
+  }
+  restoreRunOutputSelection(outputSelection);
   renderStatus();
 }
 
