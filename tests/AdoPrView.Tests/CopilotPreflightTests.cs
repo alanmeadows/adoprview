@@ -135,7 +135,7 @@ static class CopilotPreflightTests
                     env.BgtaskStateDirectory == (state.Length == 0 ? "" : checkout + "/" + state),
                     "Actual preflight did not capture absolute XDG/override registry context");
                 var run = home + "/run-" + variant;
-                Check((await Shell("mkdir -- \"$1\"; touch -- \"$1/ownership\"", run)).ExitCode == 0,
+                Check((await Shell("mkdir -- \"$1\"; touch -- \"$1/ownership\"; printf 'private fixture prompt' > \"$1/prompt\"", run)).ExitCode == 0,
                     "Could not create fake launch receipt");
                 var name = "registry-" + variant;
                 var launched = await service.Invoke("launch", "Ubuntu", CopilotRunService.LaunchScript,
@@ -169,6 +169,21 @@ static class CopilotPreflightTests
                 Check(logs.ExitCode == 0 && logs.StandardOutput == "PRESERVED-REGISTRY-OUTPUT\n" &&
                     (await Shell("[[ ! -e \"$1/poison-read\" && -f \"$2/worktree/preserved\" ]]", home, checkout)).ExitCode == 0,
                     "Control sourced changed environment or lost synthetic work/logs");
+                var discarded = await service.Invoke("discard-prompt", "Ubuntu", CopilotRunService.DiscardPromptScript,
+                    [run], token: deadline.Token, environment: env);
+                Check(discarded.ExitCode == 0 &&
+                    (await Shell("[[ ! -e \"$1/prompt\" && ! -e \"$2/poison-read\" && -f \"$3/worktree/preserved\" ]]",
+                        run, home, checkout)).ExitCode == 0,
+                    "Private prompt cleanup sourced changed environment or did not preserve synthetic work");
+                if (variant == "default")
+                {
+                    var legacy = env with { XdgConfigHome = null, BgtaskStateDirectory = null };
+                    var oldLogs = await service.Invoke("history", "Ubuntu", "\"$1\" logs \"$2\" --tail 2000",
+                        [env.Bgtask, name], token: deadline.Token, environment: legacy);
+                    Check(oldLogs.ExitCode == 0 && oldLogs.StandardOutput == logs.StandardOutput &&
+                        (await Shell("[[ ! -e \"$1/poison-read\" ]]", home)).ExitCode == 0,
+                        "Legacy history switched environment after verified task status");
+                }
                 Console.WriteLine($"REGISTRY variant={variant} stopMs={stopMs:F1} captured=true workAndLogPreserved=true");
             }
         }

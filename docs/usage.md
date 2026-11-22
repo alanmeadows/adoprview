@@ -632,6 +632,13 @@ setup cannot redirect or hold their Stop request. Recovery refuses automatic
 resume if the captured registry changed; explicit Stop still checks the original
 task identity. Older records without registry context retain ownership checks
 and report missing/ambiguous tasks as unconfirmed rather than guessing a registry.
+Private prompt removal also bypasses shell initialization and has a separate
+two-second response limit. If removal fails or times out after a verified Stop,
+the task remains truthfully stopped with its work retained and an explicit
+private-prompt cleanup warning; cleanup cannot keep Stop waiting for setup.
+Ownership/history commands likewise bypass initialization for older records,
+using the same environment as their identity-checked status command rather
+than sourcing a potentially different registry after Stop.
 
 Output uses a grow-on-demand tail buffer with the same retained-output limit,
 so empty or short saved histories do not each reserve the maximum buffer.

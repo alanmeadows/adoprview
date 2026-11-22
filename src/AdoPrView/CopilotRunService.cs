@@ -510,8 +510,9 @@ public sealed partial class CopilotRunService : IAsyncDisposable
                 try
                 {
                     // This removes only the private prompt, not the worktree or user files.
-                    await InvokeRun("discard-prompt", env, DiscardPromptScript, [e.RunDirectory],
+                    var discarded = await InvokeRun("discard-prompt", env, DiscardPromptScript, [e.RunDirectory],
                         token: CancellationToken.None).ConfigureAwait(false);
+                    RequireSuccess(discarded, "Private prompt cleanup could not be confirmed.");
                     if (finalStatus == "completed" && e.TaskConfirmedStopped)
                     {
                         var cleaned = await InvokeRun("cleanup", env, CleanupScript, CleanupArguments(e),
@@ -528,7 +529,9 @@ public sealed partial class CopilotRunService : IAsyncDisposable
                     else if (e.State.WorktreePath is not null) Update(e, s => s with { WorktreeStatus = "retained" });
                 }
                 catch { Update(e, s => s with { WorktreeStatus = s.WorktreePath is null ? "not-created" : "retained",
-                    Error = finalStatus == "completed" ? "Completed; cleanup failed. Worktree retained; completion is not resumable." : s.Error }); }
+                    Error = finalStatus == "completed" ? "Completed; cleanup failed. Worktree retained; completion is not resumable." :
+                        (s.Error is null ? "" : s.Error + "\n") +
+                        "Private prompt cleanup could not be confirmed; the private file may remain. Any work is retained." }); }
             }
             lock (gate)
             {
@@ -553,7 +556,8 @@ public sealed partial class CopilotRunService : IAsyncDisposable
     {
         var source = new CancellationTokenSource();
         var cancellation = source.Token;
-        var limit = responseLimit ?? (operation == "follow" ? Timeout.InfiniteTimeSpan :
+        var limit = responseLimit ?? (operation == "discard-prompt" ? TimeSpan.FromSeconds(2) :
+            operation == "follow" ? Timeout.InfiniteTimeSpan :
             TimeSpan.FromSeconds(operation is "stop" or "status" or "verify-run" ? 10 : 125));
         var cancelGate = new object();
         Task? cancelled = null;
@@ -563,8 +567,8 @@ public sealed partial class CopilotRunService : IAsyncDisposable
         }
         var registration = token.Register(() => _ = CancelTransport());
         var acceptingOutput = 1;
-        var capturedControl = operation is "status" or "stop" ||
-            environment?.XdgConfigHome is not null && operation is "follow" or "history" or "verify-run";
+        var capturedControl = operation is "status" or "stop" or "discard-prompt" or "history" or "verify-run" ||
+            environment?.XdgConfigHome is not null && operation == "follow";
         // A disconnected transport must not hold cancellation hostage or deliver late output into a detached run.
         var work = Task.Run(() => transport.ExecuteAsync(new(operation, string.IsNullOrWhiteSpace(distribution) ? null : distribution,
             (operation == "preflight" ? PreflightDiagnosticsScript + "\n" : "") +

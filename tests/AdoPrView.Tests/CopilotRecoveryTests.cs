@@ -23,6 +23,35 @@ static class CopilotRecoveryTests
 
     public static async Task Run(Func<string, Func<Task>, Task> test)
     {
+        await test("Copilot private prompt cleanup cannot hold verified Stop behind a hung transport", async () =>
+        {
+            foreach (var hung in new[] { true, false })
+            {
+                using var f = new Fixture();
+                await using var service = f.Service();
+                var run = await service.StartAsync(Request());
+                await Wait(service, run.RunId, s => s.Output.Contains("FAKE-READY"));
+                f.Transport.BlockDiscard = hung;
+                if (!hung) f.Transport.Failure = "discard-prompt";
+                var stop = service.CancelAsync(run.Key, run.RunId);
+                try
+                {
+                    if (hung) await f.Transport.DiscardEntered.Task.WaitAsync(TimeSpan.FromSeconds(3));
+                    var final = await stop.WaitAsync(TimeSpan.FromSeconds(3));
+                    Check(final!.Status == "cancelled" && !final.MayBeRunning && final.WorktreeRetained &&
+                        final.Error!.Contains("prompt cleanup") && final.Output.Contains("FAKE-READY"),
+                        "Verified stop lost truthful liveness, preserved work/output or explicit cleanup warning");
+                    var call = f.Transport.Calls.Single(c => c.Operation == "discard-prompt");
+                    Check(!call.Script.Contains("source ") && !call.Script.Contains("nvm"),
+                        "Private prompt cleanup re-entered blocking shell initialization");
+                }
+                finally
+                {
+                    f.Transport.ReleaseDiscard.TrySetResult();
+                    await stop.WaitAsync(TimeSpan.FromSeconds(3));
+                }
+            }
+        });
         await test("Copilot task registry context stays captured across launch stop and recovery", async () =>
         {
             foreach (var stateOverride in new[] { "", "/home/offline/task registry 'override" })
@@ -411,6 +440,9 @@ static class CopilotRecoveryTests
                     Check(stopped is { Status: "cancelled", MayBeRunning: false, WorktreeRetained: true } &&
                         stopped.Output.Contains("SUPERVISED HISTORY") && f.Transport.Launches == 1 && f.Transport.Stops == 1,
                         "Cancelling before follow attachment discarded owned supervised history or relaunched");
+                    Check(f.Transport.Calls.Where(c => c.Operation is "verify-run" or "history")
+                        .All(c => !c.Script.Contains("source ") && !c.Script.Contains("nvm")),
+                        "Legacy cancellation re-entered shell setup after owned stop verification");
                 }
                 finally
                 {
@@ -485,12 +517,14 @@ static class CopilotRecoveryTests
         public string? Failure;
         public string Cleanup = "REMOVED";
         public bool SessionAvailable = true, LockHeld, WorkspaceRemoved;
-        public bool BlockPreflight, BlockFollowers;
+        public bool BlockPreflight, BlockFollowers, BlockDiscard;
         public string? RegistryConfig;
         public string RegistryOverride = "";
         public readonly TaskCompletionSource RecoveryEntered = new(TaskCreationOptions.RunContinuationsAsynchronously);
         public readonly TaskCompletionSource ReleasePreflight = new(TaskCreationOptions.RunContinuationsAsynchronously);
         public readonly TaskCompletionSource ReleaseFollowers = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        public readonly TaskCompletionSource DiscardEntered = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        public readonly TaskCompletionSource ReleaseDiscard = new(TaskCreationOptions.RunContinuationsAsynchronously);
         static TaskCompletionSource<int> NewEnd() => new(TaskCreationOptions.RunContinuationsAsynchronously);
         public void Emit(string value) { lock (gate) { log += value; foreach (var read in readers.ToArray()) read(value); } }
         public void End(int code, bool outcome = true)
@@ -502,6 +536,12 @@ static class CopilotRecoveryTests
             Calls.Enqueue(r);
             token.ThrowIfCancellationRequested();
             if (Failure == r.Operation) return new(1, "", "never expose this transport detail");
+            if (r.Operation == "discard-prompt" && BlockDiscard)
+            {
+                DiscardEntered.TrySetResult();
+                await ReleaseDiscard.Task;
+                return new(0, "", "");
+            }
             string Protocol(params string[] values) => "ADOPRVIEW1\0" + string.Join('\0', values) + "\0";
             switch (r.Operation)
             {

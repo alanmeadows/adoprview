@@ -231,6 +231,15 @@ The fixture has a 25-second host deadline and removes its exact temporary
 directory. Its fake supervisor never launches the runner or kills a process;
 this is production-transport registry proof, not live bgtask/model integration,
 kernel escalation or an installed/native UI rerun.
+It also checks private prompt deletion after replacing the environment file,
+without sourcing that file or deleting synthetic work. `Copilot private prompt
+cleanup` holds a fake discard transport past its two-second response limit and
+separately returns a failed discard: both preserve verified stopped state,
+work/output and an explicit cleanup warning within three seconds. The hanging
+fake is deliberately released in `finally`; no live process is involved.
+The existing pre-follow cancellation case also asserts that legacy records'
+ownership/history commands do not re-source environment files. Actual transport
+proof checks default-registry legacy log access with the same failing sentinel.
 
 The smaller kernel-control opt-in executes the exact production runner in an
 explicitly selected, already-responsive WSL distribution:
