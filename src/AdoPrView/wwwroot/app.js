@@ -78,6 +78,7 @@ const S = {
   runs: new Map(),
   runOutputs: new Map(),
   explanations: new Map(),
+  explanationPrs: new Map(),
   investigations: new Map(),
   videos: new Map(),
   speechSetup: null,
@@ -334,15 +335,28 @@ function laneVisible(prs) {
 
 function renderRows(whenIdle = false) {
   const focused = expansionControl(document.activeElement);
+  const explainFocus = document.activeElement?.closest('.explanation') ? {
+    key: document.activeElement.closest('.explanation').dataset.explainKey,
+    requestId: document.activeElement.dataset.requestId,
+    action: document.activeElement.dataset.act,
+    element: document.activeElement,
+  } : null;
   const selection = captureRunOutputs();
   const players = new Map([...document.querySelectorAll('video[data-video-media]')].map(v => [v.dataset.videoMedia, v]));
   renderRowsContent(whenIdle);
+  renderExplanationShelf();
   restoreRunOutputs(selection);
   for (const placeholder of document.querySelectorAll('video[data-video-media]')) {
     const existing = players.get(placeholder.dataset.videoMedia);
     if (existing && existing !== placeholder) placeholder.replaceWith(existing);
   }
   restoreExpansionFocus(focused);
+  if (explainFocus?.action === 'cancelExplanation' && !explainFocus.element.isConnected) {
+    const card = [...document.querySelectorAll('.explanation')].find(c => c.dataset.explainKey === explainFocus.key);
+    const cancel = card && $('[data-act="cancelExplanation"]', card);
+    if (cancel?.dataset.requestId === explainFocus.requestId && !cancel.hidden && !cancel.disabled)
+      cancel.focus({ preventScroll: true });
+  }
 }
 
 function expansionControl(target) {
@@ -534,6 +548,39 @@ function updateExplanation(r) {
     cancel.hidden = !active;
     cancel.disabled = r.status === 'cancelling';
     cancel.dataset.requestId = r.requestId;
+  }
+  renderExplanationShelf();
+}
+
+function explanationIdentity(r) {
+  if (!S.explanationPrs.has(r.key)) {
+    const p = findPr(r.key);
+    if (p) S.explanationPrs.set(r.key, { id: p.id, repo: p.repo, title: p.title });
+  }
+  const p = S.explanationPrs.get(r.key) || r.revision;
+  return `Explain for ${p?.repo || r.key}${p?.id ? ` !${p.id}` : ''}${p?.title ? `: ${p.title}` : ''} outside the expanded view`;
+}
+
+function renderExplanationShelf() {
+  const shelf = $('#explanationShelf');
+  if (!shelf) return;
+  const inline = new Set([...document.querySelectorAll('#rows .explanation')].map(c => c.dataset.explainKey));
+  const outside = [...S.explanations.values()].filter(r => explanationActive(r) && !inline.has(r.key));
+  const missing = new Set(outside.map(r => r.key));
+  for (const entry of shelf.querySelectorAll('.explanation-only')) {
+    if (missing.has(entry.dataset.key)) missing.delete(entry.dataset.key);
+    else entry.remove();
+  }
+  shelf.insertAdjacentHTML('beforeend', outside.filter(r => missing.has(r.key)).map(r => `<div class="pr explanation-only" data-key="${esc(r.key)}"><div class="detail"><div class="full">
+    <p class="small explanation-identity">${esc(explanationIdentity(r))}</p>
+    ${renderExplanation(r.key)}</div></div></div>`).join(''));
+  for (const card of shelf.querySelectorAll('.explanation')) {
+    const key = card.dataset.explainKey;
+    $('.explanation-identity', card.closest('.explanation-only')).textContent = explanationIdentity(S.explanations.get(key));
+    for (const action of ['explainPr', 'askPr', 'lensPr']) {
+      $('[data-act="' + action + '"]', card).disabled = !canExplain(key) ||
+        action === 'explainPr' && (explanationActive(S.explanations.get(key)) || isBusy(key, action));
+    }
   }
 }
 
@@ -1634,6 +1681,7 @@ async function onAction(act, el, key) {
       break;
     case 'explainPr':
       if (!canExplain(key) || isBusy(key, act) || explanationActive(S.explanations.get(key))) return;
+      S.explanationPrs.set(key, { id: p.id, repo: p.repo, title: p.title });
       S.busy.add(`${key}:${act}`);
       for (const card of document.querySelectorAll('.explanation')) {
         if (card.dataset.explainKey === key) $('[data-act="explainPr"]', card).disabled = true;
@@ -1648,13 +1696,15 @@ async function onAction(act, el, key) {
         }
       }
       break;
-    case 'cancelExplanation':
-      if (!p || isBusy(key, act)) return;
+    case 'cancelExplanation': {
+      const r = S.explanations.get(key);
+      if (!explanationActive(r) || r.status === 'cancelling' || r.requestId !== el.dataset.requestId || isBusy(key, act)) return;
       S.busy.add(`${key}:${act}`);
-      try { updateExplanation(await rpc('cancelExplanation', { key, requestId: el.dataset.requestId })); }
+      try { updateExplanation(await rpc('cancelExplanation', { key, requestId: r.requestId })); }
       catch (e) { toast(e.message || String(e), 'error'); }
       finally { S.busy.delete(`${key}:${act}`); }
       break;
+    }
     case 'tiktokPr':
       if (!canVideo(key) || isBusy(key, act) || videoActive(S.videos.get(key))) return;
       if (!S.settings.videoSpeech) { await openSpeechSetup(key); return; }
@@ -2149,7 +2199,7 @@ function wire() {
   document.addEventListener('contextmenu', openRowMenu);
   $('main').addEventListener('scroll', queueIdCues, { capture: true, passive: true });
   window.addEventListener('resize', queueIdCues);
-  const rowRegions = [rows, $('#runShelf')];
+  const rowRegions = [rows, $('#runShelf'), $('#explanationShelf')];
   for (const region of rowRegions) {
     region.addEventListener('pointerenter', () => { S.pointerInRows = true; });
     region.addEventListener('pointerleave', e => {

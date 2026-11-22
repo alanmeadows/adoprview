@@ -372,6 +372,13 @@ Partial or failed responses are labeled and must not be treated as completed.
 Results stay in memory until the app exits; **Explain again** starts a fresh session.
 After a failure or cancellation, choose **Retry Explain** to start over.
 
+If the PR leaves the snapshot, is filtered or hidden, or its row is collapsed,
+the active Explain card stays below the table with its captured PR identity,
+status and **Cancel**. Cancellation targets that exact request even without a
+current PR. The retained card disappears when the request finishes or returns
+to an expanded row; its in-memory output remains available inline when the PR
+returns. Removed PRs cannot start another explanation.
+
 The displayed source, common-base and target commits identify the code being explained;
 the target is the PR's actual captured target, not an assumed `main`.
 If the PR changes during the request, the result is marked failed. Copilot sees

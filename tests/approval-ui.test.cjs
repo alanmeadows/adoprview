@@ -454,10 +454,29 @@ test('ignored drafts disable Explain but still allow cancelling an in-flight exp
   pr.isDraft = true;
   assert.match(hooks.renderExplanation(pr.key), /data-act="explainPr" disabled/);
   const calls = [];
+  hooks.S.explanations.set(pr.key, { key: pr.key, requestId: 'one', sequence: 1, status: 'running', output: '', coverage: [] });
   window.MockHost.rpc = async (method, p) => { calls.push(method); return { key: pr.key, requestId: p.requestId, sequence: 2, status: 'cancelled' }; };
   await assert.rejects(hooks.onAction('explainPr', {}, pr.key), /Draft PRs are ignored/);
   await hooks.onAction('cancelExplanation', { dataset: { requestId: 'one' } }, pr.key);
   assert.deepEqual(calls, ['cancelExplanation']);
+});
+
+test('Explain cancellation needs the exact active request, not current PR membership', async () => {
+  const { hooks, pr, window } = setup();
+  const state = { key: pr.key, requestId: 'replacement', sequence: 3, status: 'running', output: '', coverage: [] };
+  hooks.S.explanations.set(pr.key, state);
+  hooks.S.snap.prs = [];
+  const calls = [];
+  window.MockHost.rpc = async (method, p) => {
+    calls.push({ method, ...p });
+    return { ...state, sequence: 4, status: 'cancelled' };
+  };
+  await hooks.onAction('cancelExplanation', { dataset: { requestId: 'obsolete' } }, pr.key);
+  assert.equal(calls.length, 0);
+  await hooks.onAction('cancelExplanation', { dataset: { requestId: 'replacement' } }, pr.key);
+  assert.deepEqual(calls, [{ method: 'cancelExplanation', key: pr.key, requestId: 'replacement' }]);
+  await hooks.onAction('cancelExplanation', { dataset: { requestId: 'replacement' } }, pr.key);
+  assert.equal(calls.length, 1);
 });
 
 test('Explain sanitizes completed Markdown without remote media/links/controls and labels partial errors', () => {
