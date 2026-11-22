@@ -151,7 +151,7 @@ public sealed partial class PrService
         if (json["isDraft"] is not null) pr.IsDraft = B(json["isDraft"]);
         pr.IsIgnoredDraft = _store.Current.IgnoreDrafts && pr.IsDraft;
         if (json["mergeStatus"] is not null) pr.MergeStatus = S(json["mergeStatus"]);
-        if (json["status"] is not null) pr.IsActive = S(json["status"]) == "active";
+        if (json["status"] is not null) { pr.IsActive = S(json["status"]) == "active"; pr.CompletedAt = CompletedAt(json); }
         if (json.AsObject().ContainsKey("lastMergeTargetCommit")) pr.LastMergeTargetCommit = S(json["lastMergeTargetCommit"]?["commitId"]);
         pr.MergeFailure = json["mergeFailureMessage"] is null ? null : S(json["mergeFailureMessage"]);
         SetMergeStaleness(pr);

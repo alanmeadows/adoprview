@@ -1,4 +1,5 @@
 using System.Collections.Concurrent;
+using System.Globalization;
 using System.Text;
 using System.Text.Json.Nodes;
 using System.Text.RegularExpressions;
@@ -9,6 +10,9 @@ public sealed partial class PrService
 {
     const string PopTypeId = "67ed70bd-2a6b-4006-af44-be590463f46d";
     const string BuildTypeId = "0609b952-1397-4640-95ec-e00a01b2c241";
+    internal const string AutoCompleteWaiting = "Auto-complete is set; waiting for Azure DevOps to complete the PR.";
+    internal static readonly TimeSpan CompletedWindow = TimeSpan.FromDays(7);
+    internal const int CompletedTop = 100;
 
     readonly AdoClient _ado;
     readonly SettingsStore _store;
@@ -85,6 +89,12 @@ public sealed partial class PrService
     static DateTimeOffset D(JsonNode? n) => DateTimeOffset.TryParse(S(n), out var d) ? d : DateTimeOffset.MinValue;
     static string Branch(string refName) => refName.StartsWith("refs/heads/") ? refName["refs/heads/".Length..] : refName;
     static IEnumerable<JsonNode> Arr(JsonNode? n) => (n as JsonArray)?.Where(x => x != null).Select(x => x!) ?? [];
+    static DateTimeOffset? CompletedAt(JsonNode pr) =>
+        S(pr["status"]) == "completed" && WireDate(pr["closedDate"]) is { } closed ? closed : null;
+    // ADO dates are ISO 8601; the user's culture/calendar must not reinterpret them.
+    static DateTimeOffset? WireDate(JsonNode? n) =>
+        DateTimeOffset.TryParse(S(n), CultureInfo.InvariantCulture, DateTimeStyles.AssumeUniversal, out var d) ? d : null;
+    static bool InWindow(DateTimeOffset closed, DateTimeOffset since, DateTimeOffset now) => closed >= since && closed <= now;
 
     public async Task<(string Id, string Name)> GetMeAsync(string org)
     {
@@ -124,7 +134,8 @@ public sealed partial class PrService
         var prev = Current;
         try
         {
-            Publish(new Snapshot { Prs = prev.Prs, LastRefresh = prev.LastRefresh, Refreshing = true, Me = prev.Me, RepoErrors = prev.RepoErrors, MergeCheckStatus = prev.MergeCheckStatus, OrderRevision = prev.OrderRevision });
+            Publish(new Snapshot { Prs = prev.Prs, LastRefresh = prev.LastRefresh, Refreshing = true, Me = prev.Me, RepoErrors = prev.RepoErrors, MergeCheckStatus = prev.MergeCheckStatus, OrderRevision = prev.OrderRevision,
+                Completed = prev.Completed, CompletedWarnings = prev.CompletedWarnings });
             var settings = _store.Current;
             var repos = settings.Repos.ToList();
             var whitelist = settings.Whitelist.ToList();
@@ -132,16 +143,24 @@ public sealed partial class PrService
             var heads = new ConcurrentDictionary<string, Lazy<Task<string>>>(StringComparer.Ordinal);
             var results = new ConcurrentBag<PrView>();
             var repoErrors = new ConcurrentBag<string>();
+            var completed = new ConcurrentBag<CompletedPr>();
+            var completedWarnings = new ConcurrentBag<string>();
+            // Error also covers enrichment failures after a successful detail read; only a failed detail read may yield to history.
+            var detailFailed = new ConcurrentDictionary<string, byte>(StringComparer.OrdinalIgnoreCase);
+            // The lower bound is fixed at refresh start; each projection compares against the clock when it runs.
+            var since = _time.GetUtcNow() - CompletedWindow;
             if (ReviewBotUnscoped(settings.ReviewBot))
                 repoErrors.Add("Review bot is configured without reviewBot.organization; its gate is off until the organization is set.");
             string? meName = null;
 
             await Task.WhenAll(repos.Select(async repo =>
             {
+                var history = Task.CompletedTask;
                 try
                 {
                     var me = await GetMeAsync(repo.Org);
                     meName = me.Name;
+                    history = CompletedHistoryAsync(repo, me.Id, whitelist, hidden, since, completed, completedWarnings);
                     var list = await _ado.GetAsync($"{Api(repo.Org, repo.Project)}git/repositories/{Esc(repo.Repo)}/pullrequests?searchCriteria.status=active&$top=1000&api-version=7.1");
                     var work = new List<Task>();
                     foreach (var pr in Arr(list["value"]))
@@ -169,9 +188,11 @@ public sealed partial class PrService
                         var id = I(pr["pullRequestId"])!.Value;
                         work.Add(Task.Run(async () =>
                         {
-                            try { results.Add(await BuildAsync(repo, id, me.Id, heads)); }
+                            var read = false;
+                            try { results.Add(await BuildAsync(repo, id, me.Id, heads, detailRead: () => read = true)); }
                             catch (Exception ex)
                             {
+                                if (!read) detailFailed.TryAdd(key, 0);
                                 var m = Minimal(repo, pr, me.Id, hidden: false);
                                 m.Error = ex.Message;
                                 m.Lane = Lane.Waiting;
@@ -182,20 +203,86 @@ public sealed partial class PrService
                     await Task.WhenAll(work);
                 }
                 catch (Exception ex) { repoErrors.Add($"{repo.Repo}: {ex.Message}"); }
+                await history;
             }));
 
             var prs = Sort(results);
             var mergeStatus = await RecheckMergesAsync(prs, heads, repoErrors, Interlocked.Exchange(ref _forceMergeRequested, 0) != 0);
+            // Settings may change while reads are in flight: every candidate must still be in the current watch scope.
+            var listed = completed.Where(c => Watched(c.Org, c.Project, c.Repo, c.IsMine, c.Author)).ToList();
+            var listedKeys = listed.Select(c => c.Key).ToHashSet(StringComparer.OrdinalIgnoreCase);
+            // A dated completion outranks an active projection whose detail read failed, never an obtained active detail.
+            var active = Sort(prs.Where(p => p.IsActive && !(detailFailed.ContainsKey(p.Key) && listedKeys.Contains(p.Key))));
+            // Only an obtained detail/re-check that says completed moves a watched PR into history.
+            var now = _time.GetUtcNow();
+            var moved = prs.Where(p => !p.IsActive).Select(p => ToCompleted(p, since, now)).OfType<CompletedPr>().ToList();
 
-            Publish(new Snapshot { Prs = Sort(prs.Where(p => p.IsActive)), LastRefresh = _time.GetUtcNow(), Me = meName ?? prev.Me,
+            Publish(new Snapshot { Prs = active, LastRefresh = _time.GetUtcNow(), Me = meName ?? prev.Me,
                 RepoErrors = repoErrors.ToList(), MergeCheckStatus = mergeStatus,
+                Completed = MergeCompleted(listed.Concat(moved), active),
+                CompletedWarnings = completedWarnings.Order(StringComparer.OrdinalIgnoreCase).ToList(),
                 OrderRevision = prev.OrderRevision + (Interlocked.Exchange(ref _orderRequested, 0) != 0 ? 1 : 0) });
         }
         catch (Exception ex)
         {
-            Publish(new Snapshot { Prs = prev.Prs, LastRefresh = prev.LastRefresh, Error = ex.Message, Me = prev.Me, RepoErrors = prev.RepoErrors, MergeCheckStatus = prev.MergeCheckStatus, OrderRevision = prev.OrderRevision });
+            Publish(new Snapshot { Prs = prev.Prs, LastRefresh = prev.LastRefresh, Error = ex.Message, Me = prev.Me, RepoErrors = prev.RepoErrors, MergeCheckStatus = prev.MergeCheckStatus, OrderRevision = prev.OrderRevision,
+                Completed = prev.Completed, CompletedWarnings = prev.CompletedWarnings });
         }
         finally { _refreshGate.Release(); }
+    }
+
+    async Task CompletedHistoryAsync(RepoRef repo, string meId, IReadOnlyList<string> whitelist, HashSet<string> hidden,
+        DateTimeOffset since, ConcurrentBag<CompletedPr> completed, ConcurrentBag<string> warnings)
+    {
+        try
+        {
+            // ADO does not guarantee closed-date order, so a capped page is a sample, not "the latest" completions.
+            var list = await _ado.GetAsync($"{Api(repo.Org, repo.Project)}git/repositories/{Esc(repo.Repo)}/pullrequests" +
+                $"?searchCriteria.status=completed&searchCriteria.queryTimeRangeType=closed&searchCriteria.minTime={Esc(since.UtcDateTime.ToString("yyyy-MM-ddTHH:mm:ssZ", CultureInfo.InvariantCulture))}" +
+                $"&$top={CompletedTop}&api-version=7.1");
+            if (list["value"] is not JsonArray values)
+                throw new AdoException("ADO did not return a completed pull request list.");
+            var now = _time.GetUtcNow();
+            if (values.Count >= CompletedTop)
+                warnings.Add($"{repo.Repo}: Checked {CompletedTop} completions in this repository; watched PRs may be missing.");
+            foreach (var pr in values.OfType<JsonNode>())
+            {
+                if (CompletedAt(pr) is not { } closed || !InWindow(closed, since, now)) continue;
+                var createdBy = pr["createdBy"];
+                var mine = S(createdBy?["id"]).Equals(meId, StringComparison.OrdinalIgnoreCase);
+                if (!mine && !MatchesWhitelist(createdBy, whitelist) || I(pr["pullRequestId"]) is not int id) continue;
+                var repoId = S(pr["repository"]?["id"]);
+                var key = $"{repoId}:{id}";
+                var closedBy = S(pr["closedBy"]?["displayName"]);
+                completed.Add(new(key, id, S(pr["title"]), $"{repo.WebUrl}/pullrequest/{id}", repo.Org, repo.Project,
+                    S(pr["repository"]?["name"]), repoId, new Person(S(createdBy?["displayName"]), S(createdBy?["uniqueName"]), S(createdBy?["id"])),
+                    mine, hidden.Contains(key), closed, closedBy.Length == 0 ? null : closedBy));
+            }
+        }
+        catch (Exception ex) { warnings.Add($"{repo.Repo}: Completed history unavailable: {ex.Message}"); }
+    }
+
+    // Detail and re-check results apply the same current watched-repository and author scope as the history list.
+    CompletedPr? ToCompleted(PrView pr, DateTimeOffset since, DateTimeOffset now) =>
+        pr.IsActive || pr.CompletedAt is not { } closed || !InWindow(closed, since, now) || !Watched(pr.Org, pr.Project, pr.Repo, pr.IsMine, pr.Author) ? null
+            : new(pr.Key, pr.Id, pr.Title, pr.Url, pr.Org, pr.Project, pr.Repo, pr.RepoId, pr.Author, pr.IsMine,
+                _store.Current.Hidden.Contains(pr.Key, StringComparer.OrdinalIgnoreCase), closed, null);
+
+    bool Watched(string org, string project, string repo, bool isMine, Person author)
+    {
+        var settings = _store.Current;
+        var repoKey = $"{org}/{project}/{repo}".ToLowerInvariant();
+        return settings.Repos.Any(r => r.Key == repoKey) &&
+               (isMine || MatchesWhitelist(author.Name, author.UniqueName ?? "", settings.Whitelist.ToList()));
+    }
+
+    static List<CompletedPr> MergeCompleted(IEnumerable<CompletedPr> completed, IEnumerable<PrView> active)
+    {
+        var activeKeys = active.Select(p => p.Key).ToHashSet(StringComparer.OrdinalIgnoreCase);
+        return completed.Where(c => !activeKeys.Contains(c.Key))
+            .GroupBy(c => c.Key, StringComparer.OrdinalIgnoreCase)
+            .Select(g => g.OrderByDescending(c => c.ClosedBy is not null).First())
+            .OrderByDescending(c => c.Closed).ToList();
     }
 
     public async Task RefreshOneAsync(string key)
@@ -221,9 +308,13 @@ public sealed partial class PrService
     void ReplaceOne(PrView updated)
     {
         var current = Current;
-        var list = current.Prs.Select(p => p.Key == updated.Key ? updated : p).Where(p => p.IsActive);
-        Publish(new Snapshot { Prs = Sort(list), LastRefresh = current.LastRefresh, Refreshing = current.Refreshing,
-            Me = current.Me, RepoErrors = current.RepoErrors, MergeCheckStatus = current.MergeCheckStatus, OrderRevision = current.OrderRevision });
+        var list = Sort(current.Prs.Select(p => p.Key == updated.Key ? updated : p).Where(p => p.IsActive));
+        var now = _time.GetUtcNow();
+        var moved = ToCompleted(updated, now - CompletedWindow, now);
+        Publish(new Snapshot { Prs = list, LastRefresh = current.LastRefresh, Refreshing = current.Refreshing,
+            Me = current.Me, RepoErrors = current.RepoErrors, MergeCheckStatus = current.MergeCheckStatus, OrderRevision = current.OrderRevision,
+            Completed = moved is null ? current.Completed : MergeCompleted(current.Completed.Append(moved), list),
+            CompletedWarnings = current.CompletedWarnings });
     }
 
     static List<PrView> Sort(IEnumerable<PrView> prs) =>
@@ -279,19 +370,29 @@ public sealed partial class PrService
             IsMine = S(createdBy?["id"]).Equals(meId, StringComparison.OrdinalIgnoreCase),
             IsHidden = hidden,
             IsActive = S(pr["status"]) == "active",
+            CompletedAt = CompletedAt(pr),
             IsDraft = B(pr["isDraft"]),
             IsIgnoredDraft = _store.Current.IgnoreDrafts && B(pr["isDraft"]),
             Created = D(pr["creationDate"]),
             Updated = D(pr["creationDate"]),
             Description = S(pr["description"]),
             MergeStatus = S(pr["mergeStatus"]),
+            AutoCompleteBy = AutoCompleteBy(pr),
+            MergeStrategy = S(pr["completionOptions"]?["mergeStrategy"]),
             Lane = Lane.Waiting,
         };
     }
 
+    static string? AutoCompleteBy(JsonNode pr)
+    {
+        var id = S(pr["autoCompleteSetBy"]?["id"]);
+        var name = S(pr["autoCompleteSetBy"]?["displayName"]);
+        return string.IsNullOrWhiteSpace(id) || id == Guid.Empty.ToString() ? null : string.IsNullOrWhiteSpace(name) ? id : name;
+    }
+
     // ------------------------------------------------------------ build view
 
-    async Task<PrView> BuildAsync(RepoRef repo, int prId, string meId, ConcurrentDictionary<string, Lazy<Task<string>>> heads, PopTarget? expected = null)
+    async Task<PrView> BuildAsync(RepoRef repo, int prId, string meId, ConcurrentDictionary<string, Lazy<Task<string>>> heads, PopTarget? expected = null, Action? detailRead = null)
     {
         var api = Api(repo.Org, repo.Project);
         var prBase = $"{api}git/repositories/{Esc(repo.RepoId ?? repo.Repo)}/pullrequests/{prId}";
@@ -300,7 +401,9 @@ public sealed partial class PrService
             !S(pr["repository"]?["id"]).Equals(expected.RepoId, StringComparison.OrdinalIgnoreCase) ||
             !S(pr["repository"]?["project"]?["id"]).Equals(expected.ProjectId, StringComparison.OrdinalIgnoreCase)))
             throw new InvalidOperationException("ADO returned a different PR identity; the result was not applied.");
-        if (_store.Current.IgnoreDrafts && B(pr["isDraft"]))
+        detailRead?.Invoke();
+        // A terminal detail is final evidence; active-only enrichment must not be able to discard it.
+        if (S(pr["status"]) != "active" || _store.Current.IgnoreDrafts && B(pr["isDraft"]))
             return Minimal(repo, pr, meId, hidden: _store.Current.Hidden.Contains($"{S(pr["repository"]?["id"])}:{prId}", StringComparer.OrdinalIgnoreCase));
         var repoId = S(pr["repository"]?["id"]);
         var projectId = S(pr["repository"]?["project"]?["id"]);
@@ -317,8 +420,6 @@ public sealed partial class PrService
         try { head = await headT; } catch (Exception ex) { headError = "Cannot verify merge target: " + ex.Message; }
 
         var createdBy = pr["createdBy"];
-        var autoCompleteId = S(pr["autoCompleteSetBy"]?["id"]);
-        var autoCompleteName = S(pr["autoCompleteSetBy"]?["displayName"]);
         var view = new PrView
         {
             Key = $"{repoId}:{prId}",
@@ -336,6 +437,7 @@ public sealed partial class PrService
             IsMine = S(createdBy?["id"]).Equals(meId, StringComparison.OrdinalIgnoreCase),
             IsDraft = B(pr["isDraft"]),
             IsActive = S(pr["status"]) == "active",
+            CompletedAt = CompletedAt(pr),
             Created = D(pr["creationDate"]),
             Updated = D(pr["creationDate"]),
             Description = S(pr["description"]),
@@ -344,8 +446,7 @@ public sealed partial class PrService
             LastMergeTargetCommit = S(pr["lastMergeTargetCommit"]?["commitId"]),
             CurrentTargetCommit = head,
             MergeCheckError = headError,
-            AutoCompleteBy = string.IsNullOrWhiteSpace(autoCompleteId) || autoCompleteId == Guid.Empty.ToString() ? null
-                : string.IsNullOrWhiteSpace(autoCompleteName) ? autoCompleteId : autoCompleteName,
+            AutoCompleteBy = AutoCompleteBy(pr),
             MergeStrategy = S(pr["completionOptions"]?["mergeStrategy"]),
         };
         SetMergeStaleness(view);
@@ -691,6 +792,9 @@ public sealed partial class PrService
         if (v.Blockers.Count == 0 && v.Waiting.Count == 0 && v.HumanActions.Count == 0 &&
             v.Gates["merge"].State is "pending" or "warn")
             v.Waiting.Add("Merge preview is pending or unverified");
+        // Nothing remains for a person or automation: only Azure DevOps completion is outstanding.
+        if (v.Blockers.Count == 0 && v.Waiting.Count == 0 && v.HumanActions.Count == 0)
+            v.Waiting.Add(AutoCompleteWaiting);
 
         v.Lane = v.Blockers.Count > 0 ? Lane.Blocked
             : v.Waiting.Count > 0 ? Lane.Waiting

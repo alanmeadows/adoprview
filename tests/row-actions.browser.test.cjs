@@ -1111,7 +1111,7 @@ test('real row hit testing and action identity across refreshes', { timeout: 900
       await evaluate(`document.querySelector('#refreshBtn').click()`); await frame();
       assert.deepEqual(await keys(), [...before].reverse(), 'Main Refresh must restore Updated ordering within a lane');
       await evaluate(`(()=>{
-        const snap=structuredClone(S.snap);snap.prs.find(p=>p.key==='${target}').lane='ready';setSnapshot(snap);
+        const snap=structuredClone(S.snap);snap.prs.find(p=>p.key==='${target}').lane='waiting';setSnapshot(snap);
       })()`);
       assert.deepEqual(await keys(), [...before].reverse(), 'Background lane change must stay in place');
       await send('Input.dispatchKeyEvent', { type: 'keyDown', key: 'r', code: 'KeyR', windowsVirtualKeyCode: 82, text: 'r' });
@@ -1121,6 +1121,433 @@ test('real row hit testing and action identity across refreshes', { timeout: 900
       await evaluate(`window.MockHost.rpc=window.originalRpc;delete window.originalRpc;`);
     });
 
+    const layoutCards = key => evaluate(`(()=>{const row=document.querySelector('#rows [data-key="${key}"]'),detail=row.querySelector('.detail');
+      const box=e=>{const r=e.getBoundingClientRect();return {top:r.top,bottom:r.bottom};};
+      return {cards:[...detail.querySelectorAll('.card')].map(c=>({head:c.querySelector('h3').textContent.trim().replace(/\\s+/g,' '),
+          run:c.classList.contains('copilot-run'),earlier:c.classList.contains('run-earlier'),...box(c)})),
+        columns:[...detail.querySelectorAll(':scope > .stack:not(.full)')].map(box),trailing:box(detail.lastElementChild),
+        scopes:[...row.querySelectorAll('.run-scope')].map(p=>({inStatus:!!p.closest('.card')?.querySelector('[data-act="triage"]'),
+          inRun:!!p.closest('.copilot-run'),visible:p.getClientRects().length>0,text:p.textContent}))};})()`);
+    const cardIndex = (layout, head) => {
+      const i = layout.cards.findIndex(c => c.head.startsWith(head));
+      assert.ok(i >= 0, `Missing card ${head}: ${layout.cards.map(c => c.head).join(' | ')}`);
+      return i;
+    };
+    const assertOneStatusScope = layout => {
+      assert.equal(layout.scopes.length, 1, 'One Fix PR execution notice per expanded PR');
+      assert.deepEqual([layout.scopes[0].inStatus, layout.scopes[0].inRun, layout.scopes[0].visible], [true, false, true]);
+      assert.match(layout.scopes[0].text, /^Fix PR starts in a separate PR worktree with --yolo:.*not a filesystem sandbox.*Exit 0 does not verify the PR fix\.$/s);
+    };
+
+    await t.test('layout hierarchy leads with load errors and failed gates; idle tools and finished runs follow PR context', async () => {
+      const key = 'sample-service-id:105';
+      for (const loadError of [false, true]) {
+        await send('Emulation.setDeviceMetricsOverride', { width: 1600, height: 1000, deviceScaleFactor: 1, mobile: false });
+        await reset();
+        await evaluate(`{const key='${key}';
+          ${loadError ? "setSnapshot({...S.snap,prs:S.snap.prs.map(p=>p.key===key?{...p,error:'Synthetic load error'}:p)});" : ''}
+          const pr=S.snap.prs.find(p=>p.key===key);
+          S.runs.set('layout-done-run',{...pr,runId:'layout-done-run',status:'completed',mayBeRunning:false,
+            startedAt:'2026-01-01T00:00:00Z',output:'Finished synthetic output\\n',outputOffset:26});
+          S.expanded.add(key);renderRows();}`);
+        await frame();
+        const layout = await layoutCards(key);
+        const gate = cardIndex(layout, '✕ Failed gate'), description = cardIndex(layout, 'Description'), status = cardIndex(layout, 'Status');
+        const explain = cardIndex(layout, 'What does this PR do?'), video = cardIndex(layout, 'A short PR explainer');
+        const run = layout.cards.findIndex(c => c.run);
+        if (loadError) assert.ok(cardIndex(layout, 'Load error') < gate, 'Load error leads the failed gate');
+        assert.ok(gate < description && description < status && status < explain && explain < video && video < run,
+          `Unexpected detail order: ${layout.cards.map(c => c.head).join(' | ')}`);
+        const g = layout.cards[gate], contextBottom = Math.max(...layout.columns.map(c => c.bottom));
+        assert.ok(g.bottom <= layout.cards[description].top && g.bottom <= layout.cards[status].top, 'Failed gate renders above PR context');
+        assert.ok(layout.trailing.top >= contextBottom - .5, 'Idle tools and finished runs render below Description and Status');
+        assert.ok(layout.cards[run].top >= layout.cards[status].bottom, 'A finished run renders after Status');
+        assertOneStatusScope(layout);
+        if (loadError) {
+          assert.equal(await evaluate(`document.querySelector('#rows [data-key="${key}"] .explanation [data-act="explainPr"]').disabled`), true);
+          continue;
+        }
+        await click(await point(key, '.explanation [data-act="explainPr"]'));
+        await frame();
+        assert.equal((await calls()).filter(c => c.method === 'explainPr').length, 1, 'Explain launches exactly once');
+        await evaluate(`new Promise((resolve,reject)=>{const deadline=Date.now()+3000;
+          const check=()=>document.querySelector('#rows [data-key="${key}"] pre.log[data-log]')?resolve():
+            Date.now()>deadline?reject(Error('Failed log tail did not load')):setTimeout(check,20);check();})`);
+        await evaluate(`{const row=document.querySelector('#rows [data-key="${key}"]');window.layoutRow=row;
+          window.layoutLog=row.querySelector('pre.log[data-log]');const range=document.createRange();range.selectNodeContents(window.layoutLog);
+          window.getSelection().removeAllRanges();window.getSelection().addRange(range);window.layoutSelected=window.getSelection().toString();
+          const r=S.explanations.get('${key}');
+          updateExplanation({...r,sequence:r.sequence+1,output:'Streaming synthetic explanation',message:'Still reading'});}`);
+        await frame();
+        assert.equal(await evaluate(`window.layoutRow===document.querySelector('#rows [data-key="${key}"]') &&
+          window.layoutLog===window.layoutRow.querySelector('pre.log[data-log]') && window.layoutLog.isConnected`), true,
+          'Explanation streaming updates in place without rebuilding the failed log');
+        assert.equal(await evaluate('window.getSelection().toString()'), await evaluate('window.layoutSelected'));
+        assert.equal(await evaluate(`window.layoutRow.querySelector('.explain-output').textContent.includes('Streaming synthetic explanation')`), true);
+        if (process.env.ADOPRVIEW_LAYOUT_SCREENSHOTS) {
+          await evaluate(`window.getSelection().removeAllRanges();document.querySelector('#rows [data-key="${key}"]').scrollIntoView({block:'start'});`);
+          await frame();
+          const shot = await send('Page.captureScreenshot', { format: 'png' });
+          await writeFile(path.join(process.env.ADOPRVIEW_LAYOUT_SCREENSHOTS, 'after-expanded-1600.png'), Buffer.from(shot.data, 'base64'));
+        }
+      }
+    });
+
+    await t.test('layout actionable and uncertain Fix runs lead after blockers and Show run reveals that exact run', async () => {
+      const key = 'sample-service-id:105';
+      for (const live of [{ status: 'running' }, { status: 'needs-attention', mayBeRunning: true }]) {
+        await send('Emulation.setDeviceMetricsOverride', { width: 1600, height: 600, deviceScaleFactor: 1, mobile: false });
+        await reset();
+        await evaluate(`{const key='${key}',pr=S.snap.prs.find(p=>p.key===key);
+          S.runs.set('layout-earlier-run',{...pr,runId:'layout-earlier-run',status:'completed',mayBeRunning:false,
+            startedAt:'2026-01-01T00:00:00Z',output:'Earlier synthetic output\\n',outputOffset:25});
+          const output='Live synthetic output line\\n'.repeat(400);
+          S.runs.set('layout-live-run',{...pr,runId:'layout-live-run',...${JSON.stringify(live)},
+            startedAt:'2026-01-02T00:00:00Z',output,outputOffset:output.length});
+          S.expanded.add(key);renderRows();}`);
+        await frame();
+        const layout = await layoutCards(key);
+        const gate = cardIndex(layout, '✕ Failed gate'), description = cardIndex(layout, 'Description');
+        const runs = layout.cards.map((c, i) => c.run ? i : -1).filter(i => i >= 0);
+        assert.deepEqual(runs.map(i => layout.cards[i].earlier), [false, true]);
+        assert.ok(gate < runs[0] && runs[1] < description, 'The live run group follows blockers and precedes PR context');
+        assert.ok(layout.cards[runs[0]].top >= layout.cards[gate].bottom && layout.cards[runs[1]].bottom <= layout.cards[description].top);
+        assert.ok(cardIndex(layout, 'What does this PR do?') > cardIndex(layout, 'Status'));
+        assertOneStatusScope(layout);
+        assert.equal(await evaluate(`(()=>{const c=document.querySelector('#rows [data-key="${key}"] .copilot-run:not(.run-earlier)');
+          return c.dataset.runId==='layout-live-run' && !c.querySelector('[data-act="cancelRun"]').hidden &&
+            c.nextElementSibling?.dataset.runId==='layout-earlier-run';})()`), true, 'Cancel stays visible and run cards stay adjacent');
+        for (const via of ['pointer', 'keyboard']) {
+          await evaluate(`document.querySelector('main').scrollTop=0`);
+          await frame();
+          if (via === 'pointer') await click(await point(key, '.detail [data-act="triage"]'));
+          else {
+            await evaluate(`document.querySelector('#rows [data-key="${key}"] .detail [data-act="triage"]').focus({preventScroll:true})`);
+            await keyboard('Enter', 13);
+          }
+          await frame();
+          // Below the sticky header and actually hit-testable, not merely inside main.
+          const shown = await evaluate(`(()=>{const main=document.querySelector('main').getBoundingClientRect(),head=document.querySelector('.thead').getBoundingClientRect();
+            const card=document.querySelector('#rows [data-key="${key}"] .copilot-run:not(.run-earlier)');
+            const clear=e=>{const r=e.getBoundingClientRect();return r.top>=head.bottom-.5&&r.bottom<=main.bottom+.5;};
+            const cancel=card.querySelector('[data-act="cancelRun"]'),r=cancel.getBoundingClientRect(),hit=document.elementFromPoint(r.left+r.width/2,r.top+r.height/2);
+            return {run:card.dataset.runId,status:clear(card.querySelector('.run-status')),cancel:clear(cancel),hit:!!hit&&cancel.contains(hit),
+              focused:document.activeElement===card.querySelector('.run-output')};})()`);
+          assert.deepEqual(shown, { run: 'layout-live-run', status: true, cancel: true, hit: true, focused: true }, `Show run via ${via}`);
+        }
+        assert.equal((await calls()).filter(c => c.method === 'startCopilot').length, 0, 'Show run never launches another run');
+      }
+    });
+
+    await t.test('layout run lifecycle relocates the run group without a manual render and defers while rows are in use', async () => {
+      await send('Emulation.setDeviceMetricsOverride', { width: 1600, height: 1000, deviceScaleFactor: 1, mobile: false });
+      await reset();
+      const key = 'sample-service-id:105';
+      await evaluate(`{const key='${key}',pr=S.snap.prs.find(p=>p.key===key);
+        S.runs.set('lc-new',{...pr,runId:'lc-new',id:0,status:'completed',mayBeRunning:false,startedAt:'2026-01-02T00:00:00Z',output:'New\\n',outputOffset:4});
+        S.runs.set('lc-old',{...pr,runId:'lc-old',id:0,status:'needs-attention',mayBeRunning:false,startedAt:'2026-01-01T00:00:00Z',output:'Old\\n',outputOffset:4});
+        S.expanded.add(key);renderRows();}`);
+      await frame();
+      const place = async () => {
+        const layout = await layoutCards(key);
+        const runs = layout.cards.map((c, i) => c.run ? i : -1).filter(i => i >= 0);
+        return { lead: await evaluate(`document.querySelector('#rows [data-key="${key}"] .detail').dataset.runLead`),
+          ids: await evaluate(`[...document.querySelectorAll('#rows [data-key="${key}"] .copilot-run')].map(c=>c.dataset.runId+(c.classList.contains('run-earlier')?':earlier':''))`),
+          beforeContext: runs.every(i => i < cardIndex(layout, 'Description')), adjacent: runs[1] === runs[0] + 1,
+          label: await evaluate(`document.querySelector('#rows [data-key="${key}"] .detail [data-act="triage"]').textContent.trim()`) };
+      };
+      assert.deepEqual(await place(), { lead: '0', ids: ['lc-new', 'lc-old:earlier'], beforeContext: false, adjacent: true, label: 'Fix PR' });
+      await evaluate(`updateCopilotRun({...S.runs.get('lc-old'),status:'running',mayBeRunning:true})`);
+      await frame();
+      assert.deepEqual(await place(), { lead: '1', ids: ['lc-old', 'lc-new:earlier'], beforeContext: true, adjacent: true, label: 'Show run' },
+        'Promoted earlier run leads with its sibling and no manual render');
+      const inRow = await point(key, '.detail .copilot-run:not(.run-earlier) .run-output');
+      await move(inRow.x, inRow.y);
+      await evaluate(`window.lcCard=document.querySelector('#rows [data-key="${key}"] .copilot-run:not(.run-earlier)');
+        updateCopilotRun({...S.runs.get('lc-old'),status:'completed',mayBeRunning:false,id:0})`);
+      await frame();
+      assert.deepEqual([(await place()).lead, await evaluate(`window.lcCard.isConnected && S.runRelocations.has('${key}')`)], ['1', true], 'Placement waits while rows are in use');
+      assert.equal((await place()).label, 'Fix PR', 'Label still updates in place while deferred');
+      await move(10, 10);
+      await frame();
+      assert.deepEqual(await place(), { lead: '0', ids: ['lc-new', 'lc-old:earlier'], beforeContext: false, adjacent: true, label: 'Fix PR' },
+        'Finished run group moves behind PR context once rows are idle');
+      for (let i = 0; i < 3; i++) await evaluate(`updateCopilotRun({...S.runs.get('lc-new'),output:S.runs.get('lc-new').output+'tick\\n',outputOffset:S.runs.get('lc-new').outputOffset+5,revision:${i + 1}})`);
+      assert.equal(await evaluate(`document.querySelector('#rows [data-key="${key}"] .copilot-run').isConnected && !S.rowsPending && !S.runRelocations.size`), true);
+      // Latest run uncertain but not maybe-running is still cancelable: it leads and the label is Show run.
+      await evaluate(`updateCopilotRun({...S.runs.get('lc-new'),status:'needs-attention',mayBeRunning:false,id:7,revision:9})`);
+      await frame();
+      assert.deepEqual(await place(), { lead: '1', ids: ['lc-new', 'lc-old:earlier'], beforeContext: true, adjacent: true, label: 'Show run' });
+    });
+
+    await t.test('layout a leading run never buries conflicts or required reviews that no leading card conveys', async () => {
+      await send('Emulation.setDeviceMetricsOverride', { width: 1600, height: 1000, deviceScaleFactor: 1, mobile: false });
+      for (const c of [{ blockers: ['Merge conflicts'], humanActions: [], expect: ['Merge conflicts'] },
+        { blockers: [], humanActions: ['reviews'], cached: true, expect: ['Human reviewer approval needed (+1)'] },
+        { mixed: true, blockers: ['Merge conflicts with main'], humanActions: ['reviews'],
+          expect: ['Merge conflicts with main', 'Human reviewer approval needed (+1)'] }]) {
+        await reset();
+        const key = 'sample-service-id:105';
+        await evaluate(`{const key='${key}',pr=S.snap.prs.find(p=>p.key===key);
+          const fbs=${!!c.mixed}?[{buildId:9105,name:'Synthetic mixed build',tasks:[{logId:105,name:'Synthetic mixed task',issues:[]}]}]:[];
+          Object.assign(pr,{failedBuilds:fbs,error:null,approval:null,humanActions:${JSON.stringify(c.humanActions)},
+            blockers:[...fbs.map(f=>'Build failed: '+f.name),...${JSON.stringify(c.blockers)}]});
+          if(${!!c.cached})S.approvals.set(key,{kind:'error',message:'Synthetic cached approval outcome'});else S.approvals.delete(key);
+          S.runs.set('lead-live',{...pr,runId:'lead-live',status:'running',mayBeRunning:true,startedAt:'2026-01-02T00:00:00Z',output:'Live\\n'.repeat(200),outputOffset:1000});
+          S.expanded.add(key);renderRows();}`);
+        await frame();
+        const layout = await layoutCards(key);
+        const blocking = cardIndex(layout, 'Blocking'), run = layout.cards.findIndex(x => x.run);
+        assert.ok(blocking < run && run < cardIndex(layout, 'Description'), layout.cards.map(x => x.head).join(' | '));
+        const blockingText = await evaluate(`document.querySelector('#rows [data-key="${key}"] .lead-blockers').textContent`);
+        for (const reason of c.expect) assert.ok(blockingText.includes(reason), `Blocking card misses ${reason}: ${blockingText}`);
+        if (c.mixed) {
+          assert.ok(cardIndex(layout, '✕ Failed gate') < run, 'The failed gate still leads the live run');
+          assert.ok(!blockingText.includes('Build failed'), 'The failed-gate card already conveys its own build blocker');
+        }
+        assertOneStatusScope(layout);
+      }
+      // A selection in the Blocking card defers the run group's relocation (which removes that card) until it clears.
+      const key = 'sample-service-id:105';
+      await move(10, 10);
+      await evaluate(`{const el=document.querySelector('#rows [data-key="${key}"] .lead-blockers li .k'),r=document.createRange();r.selectNodeContents(el);
+        window.getSelection().removeAllRanges();window.getSelection().addRange(r);window.blockNode=el.firstChild;window.blockText=window.getSelection().toString();}`);
+      await evaluate(`updateCopilotRun({...S.runs.get('lead-live'),status:'completed',mayBeRunning:false,revision:5})`);
+      await frame();
+      assert.deepEqual(await evaluate(`[window.blockNode.isConnected,window.getSelection().toString()===window.blockText,S.runRelocations.has('${key}')]`), [true, true, true],
+        'A selected Blocking reason stays attached while the relocation waits');
+      await evaluate('window.getSelection().removeAllRanges()');
+      await frame(); await frame();
+      assert.deepEqual(await evaluate(`[!!document.querySelector('#rows [data-key="${key}"] .lead-blockers'),S.runRelocations.size]`), [false, 0],
+        'The finished run moves behind the context once the selection clears');
+    });
+
+    await t.test('layout run relocation leaves native text selections in failed logs and Explain prose attached', async () => {
+      await send('Emulation.setDeviceMetricsOverride', { width: 1600, height: 1000, deviceScaleFactor: 1, mobile: false });
+      await reset();
+      const key = 'sample-service-id:105', other = 'sample-service-id:101';
+      await evaluate(`{const key='${key}',pr=S.snap.prs.find(p=>p.key===key);
+        for(const k of [key,'${other}'])S.explanations.set(k,{key:k,requestId:'sel-'+k,sequence:1,status:'completed',output:'Synthetic selectable prose for '+k});
+        S.runs.set('sel-new',{...pr,runId:'sel-new',id:0,status:'completed',mayBeRunning:false,startedAt:'2026-01-02T00:00:00Z',output:'New\\n',outputOffset:4});
+        S.runs.set('sel-old',{...pr,runId:'sel-old',id:0,status:'needs-attention',mayBeRunning:false,startedAt:'2026-01-01T00:00:00Z',output:'Old\\n',outputOffset:4});
+        S.expanded.add(key);S.expanded.add('${other}');renderRows();}`);
+      await evaluate(`new Promise((resolve,reject)=>{const deadline=Date.now()+3000;
+        const check=()=>document.querySelector('#rows [data-key="${key}"] pre.log[data-log]')?resolve():
+          Date.now()>deadline?reject(Error('Failed log tail did not load')):setTimeout(check,20);check();})`);
+      await move(10, 10);
+      const lead = () => evaluate(`document.querySelector('#rows [data-key="${key}"] .detail').dataset.runLead`);
+      const runs = () => evaluate(`[...document.querySelectorAll('#rows [data-key="${key}"] .copilot-run')].map(c=>c.dataset.runId)`);
+      const select = (from, to) => evaluate(`{const a=document.querySelector(${JSON.stringify(from)}),b=document.querySelector(${JSON.stringify(to)}),r=document.createRange();
+        const w=e=>document.createTreeWalker(e,NodeFilter.SHOW_TEXT),s=w(a).nextNode(),bw=w(b);let t=null,n;while((n=bw.nextNode()))t=n;r.setStart(s,0);r.setEnd(t,t.length);
+        window.getSelection().removeAllRanges();window.getSelection().addRange(r);
+        window.selNodes=[r.startContainer,r.endContainer];window.selText=window.getSelection().toString();window.selRow=document.querySelector('#rows [data-key="${key}"]');}`);
+      const intact = () => evaluate(`window.selNodes.every(n=>n.isConnected) && window.getSelection().toString()===window.selText &&
+        window.selRow===document.querySelector('#rows [data-key="${key}"]')`);
+      for (const [name, from, status] of [['failed log', `#rows [data-key="${key}"] pre.log[data-log]`, 'running'],
+        ['another PR Explain prose', `#rows [data-key="${other}"] .explain-output`, 'completed']]) {
+        await select(from, from);
+        await evaluate(`updateCopilotRun({...S.runs.get('sel-old'),status:'${status}',mayBeRunning:${status === 'running'},revision:${status === 'running' ? 1 : 2}})`);
+        await frame();
+        assert.equal(await intact(), true, `${name} selection stays attached across run relocation`);
+        assert.deepEqual([await lead(), await runs()], status === 'running' ? ['1', ['sel-old', 'sel-new']] : ['0', ['sel-new', 'sel-old']],
+          `${name} selection outside the run cards does not delay relocation`);
+      }
+      // A selection spanning into a moving card defers the move until the selection clears.
+      await select(`#rows [data-key="${key}"] .explain-output`, `#rows [data-key="${key}"] .copilot-run .run-output`);
+      assert.equal(await intact(), true, 'The crossing selection baseline is intact before the lifecycle event');
+      await evaluate(`updateCopilotRun({...S.runs.get('sel-new'),status:'needs-attention',mayBeRunning:false,id:7,revision:3})`);
+      await frame();
+      // The truthful status label and Cancel inside this range update in place; assert range identity, not exact selected text.
+      const attached = () => evaluate(`{const s=window.getSelection(),r=s.rangeCount&&s.getRangeAt(0);
+        !!r && r.startContainer===window.selNodes[0] && r.endContainer===window.selNodes[1] && window.selNodes.every(n=>n.isConnected) &&
+        window.selRow===document.querySelector('#rows [data-key="${key}"]') &&
+        s.toString().startsWith('Synthetic selectable prose for ${key}') && s.toString().trimEnd().endsWith('New')}`);
+      assert.deepEqual([await attached(), await lead(), await evaluate(`S.runRelocations.has('${key}')`)], [true, '0', true],
+        'A selection crossing a run card keeps the group in place');
+      await evaluate('window.getSelection().removeAllRanges()');
+      await frame(); await frame();
+      assert.deepEqual([await lead(), await runs(), await evaluate('S.runRelocations.size')], ['1', ['sel-new', 'sel-old'], 0],
+        'The group moves once the selection clears');
+      // A history-only snapshot (identical active PRs) must not rebuild active rows under a held failed-log selection.
+      await select(`#rows [data-key="${key}"] pre.log[data-log]`, `#rows [data-key="${key}"] pre.log[data-log]`);
+      const chip = () => evaluate(`document.querySelector('[data-lane="completed"] .n').textContent`);
+      const before = +(await chip());
+      await evaluate(`window.selLog=document.querySelector('#rows [data-key="${key}"] pre.log[data-log]');
+        setSnapshot({...S.snap,revision:(S.snap.revision||0)+1,completedWarnings:['Synthetic history warning'],
+          completed:[{key:'history-only:1',id:1,title:'History only',url:'https://example.invalid/1',org:'o',project:'p',repo:S.snap.prs[0].repo,
+            repoId:'r',author:'a',isMine:true,isHidden:false,closed:new Date().toISOString(),closedBy:null},...(S.snap.completed||[])]});
+        updateCopilotRun({...S.runs.get('sel-new'),output:S.runs.get('sel-new').output+'live\\n',outputOffset:S.runs.get('sel-new').outputOffset+5,revision:4});`);
+      await frame();
+      assert.deepEqual([await intact(), await evaluate('window.selLog.isConnected && !S.pendingSnapshot && !S.rowsPending'), +(await chip())],
+        [true, true, before + 1], 'History-only snapshot updates the Completed count without rebuilding the selected active row');
+      assert.match(await evaluate(`document.querySelector('#rows [data-key="${key}"] .copilot-run[data-run-id="sel-new"] .run-output').textContent`), /live/,
+        'Run output keeps streaming while the unrelated selection is held');
+      await evaluate('window.getSelection().removeAllRanges()');
+      await click(await elementPoint('[data-lane="completed"]')); await frame();
+      assert.ok((await evaluate(`[...document.querySelectorAll('#rows > .pr')].map(r=>r.dataset.key)`)).includes('history-only:1'),
+        'The Completed lane shows the history change');
+      // An older run validly recovering becomes the main card; a selection from Explain into its output holds that swap.
+      await move(10, 10);
+      await evaluate(`{const pr=S.snap.prs.find(p=>p.key==='${key}');S.lane=null;
+        S.runs.set('sel-rec',{...pr,runId:'sel-rec',id:0,status:'needs-attention',mayBeRunning:false,startedAt:'2025-12-31T00:00:00Z',output:'Recovered\\n',outputOffset:10});
+        S.runs.set('sel-new',{...S.runs.get('sel-new'),status:'completed',mayBeRunning:false,revision:5});render();}`);
+      await frame();
+      assert.deepEqual([await lead(), await runs()], ['0', ['sel-new', 'sel-old', 'sel-rec']]);
+      await select(`#rows [data-key="${key}"] .explain-output`, `#rows [data-key="${key}"] .copilot-run[data-run-id="sel-rec"] .run-output`);
+      assert.equal(await intact(), true, 'The recovery-crossing selection baseline is intact before promotion');
+      await evaluate(`window.recCard=document.querySelector('#rows [data-key="${key}"] .copilot-run[data-run-id="sel-rec"]');
+        updateCopilotRun({...S.runs.get('sel-rec'),status:'recovering',mayBeRunning:true,revision:1})`);
+      await frame();
+      assert.deepEqual([await evaluate(`{const s=window.getSelection(),r=s.rangeCount&&s.getRangeAt(0);
+        !!r && r.startContainer===window.selNodes[0] && r.endContainer===window.selNodes[1] && window.selNodes.every(n=>n.isConnected) &&
+        window.selRow===document.querySelector('#rows [data-key="${key}"]') && s.toString().startsWith('Synthetic selectable prose for ${key}') && s.toString().trimEnd().endsWith('Recovered')}`),
+        await lead(), await runs(), await evaluate(`S.runRelocations.has('${key}')`)], [true, '0', ['sel-new', 'sel-old', 'sel-rec'], true],
+        'Promotion of a recovered run waits while a selection endpoint sits in its card');
+      // A queued full-row render (idle render, then flush) must not rebuild under the held relocation.
+      assert.deepEqual(await evaluate(`renderRows(true); flushRowUpdates();
+        [S.rowsPending, S.runRelocations.has('${key}'), window.selNodes.every(n=>n.isConnected), window.recCard.isConnected,
+          window.getSelection().getRangeAt(0).endContainer===window.selNodes[1]]`), [true, true, true, true, true],
+        'Full row render stays deferred while a selection holds a run relocation');
+      await evaluate('window.getSelection().removeAllRanges()');
+      await frame(); await frame();
+      assert.deepEqual([await lead(), await runs(), await evaluate('[S.runRelocations.size, S.rowsPending]'),
+        await evaluate(`[...document.querySelectorAll('#rows [data-key="${key}"] .copilot-run:not(.run-earlier)')].map(c=>c.dataset.runId)`)],
+        ['1', ['sel-rec', 'sel-new', 'sel-old'], [0, false], ['sel-rec']], 'The recovered run leads and the deferred render applies once the selection clears');
+      // On the shelf, a selection from the execution notice into an older run's output holds that run's recovery promotion,
+      // which is queued and replayed once the selection clears.
+      await evaluate(`{const pr=S.snap.prs.find(p=>p.key==='${key}');
+        for (const id of ['sel-rec','sel-new','sel-old']) S.runs.delete(id);
+        S.runs.set('shelf-new',{...pr,runId:'shelf-new',status:'completed',mayBeRunning:false,startedAt:'2026-01-02T00:00:00Z',output:'Shelf newer\\n',outputOffset:12});
+        S.runs.set('shelf-old',{...pr,runId:'shelf-old',id:0,status:'needs-attention',mayBeRunning:false,startedAt:'2026-01-01T00:00:00Z',output:'Shelf older\\n',outputOffset:12});
+        render();setSnapshot({...S.snap,orderRevision:(S.snap.orderRevision||0)+1,prs:S.snap.prs.filter(p=>p.key!=='${key}')});
+        S.expanded.add('${key}');renderRunShelf();}`);
+      await frame();
+      const shelfMain = () => evaluate(`[...document.querySelectorAll('#runShelf [data-key="${key}"] .copilot-run')].map(c=>[c.dataset.runId,c.classList.contains('run-earlier')])`);
+      assert.deepEqual(await shelfMain(), [['shelf-new', false], ['shelf-old', true]]);
+      await evaluate(`{const row=document.querySelector('#runShelf [data-key="${key}"]'),a=row.querySelector('.run-scope'),
+          b=row.querySelector('.copilot-run[data-run-id="shelf-old"] .run-output'),r=document.createRange();
+        const w=e=>document.createTreeWalker(e,NodeFilter.SHOW_TEXT),s=w(a).nextNode(),bw=w(b);let t=null,n;while((n=bw.nextNode()))t=n;
+        r.setStart(s,0);r.setEnd(t,t.length);window.getSelection().removeAllRanges();window.getSelection().addRange(r);
+        window.selNodes=[r.startContainer,r.endContainer];window.shelfOld=b.closest('.copilot-run');}`);
+      const shelfAttached = () => evaluate(`{const s=window.getSelection(),r=s.rangeCount&&s.getRangeAt(0);
+        !!r && r.startContainer===window.selNodes[0] && r.endContainer===window.selNodes[1] && window.selNodes.every(n=>n.isConnected) &&
+        window.shelfOld.isConnected && s.toString().trimEnd().endsWith('Shelf older')}`);
+      assert.equal(await shelfAttached(), true, 'The shelf crossing selection baseline is intact before promotion');
+      assert.deepEqual(await evaluate('S.rowsPending=true; flushRowUpdates(); [window.shelfOld.isConnected, S.rowsPending, S.runRelocations.size]'), [true, true, 0],
+        'A deferred rebuild with no queued relocation stays pending instead of detaching the selected shelf cards');
+      await evaluate(`updateCopilotRun({...S.runs.get('shelf-old'),status:'recovering',mayBeRunning:true,revision:1})`);
+      await frame();
+      assert.deepEqual([await shelfAttached(), await shelfMain(), await evaluate(`S.runRelocations.has('${key}')`)],
+        [true, [['shelf-new', false], ['shelf-old', true]], true], 'A selection-held shelf promotion is queued, not dropped');
+      assert.deepEqual(await evaluate(`renderRows(true); flushRowUpdates(); [S.runRelocations.has('${key}'), window.shelfOld.isConnected]`), [true, true],
+        'Deferred renders do not rebuild the selected shelf cards');
+      assert.equal(await shelfAttached(), true);
+      await evaluate('window.getSelection().removeAllRanges()');
+      await frame(); await frame();
+      assert.deepEqual([await shelfMain(), await evaluate('[S.runRelocations.size, S.rowsPending]')],
+        [[['shelf-old', false], ['shelf-new', true]], [0, false]], 'The recovered shelf run becomes the main card once the selection clears');    });
+
+    await t.test('layout narrow-window identity cue names the panned row without covering gates or actions', async () => {
+      await send('Emulation.setDeviceMetricsOverride', { width: 900, height: 500, deviceScaleFactor: 1, mobile: false });
+      await reset();
+      await evaluate(`S.snap.prs.find(p=>p.key!=='sample-service-id:101'&&p.key!=='sample-service-id:105').repo='an-exceptionally-long-repository-name-for-the-compact-identity-cue';
+        S.expanded.add('sample-service-id:105');renderRows();document.querySelector('main').scrollTop=0;`);
+      const cues = () => evaluate(`(()=>{document.querySelector('#toasts').replaceChildren();const main=document.querySelector('main'),m=main.getBoundingClientRect();
+        const left=m.left+main.clientLeft,right=left+main.clientWidth,top=m.top+main.clientTop,bottom=top+main.clientHeight;
+        const byKey=new Map(S.snap.prs.map(p=>[p.key,p])),headBottom=Math.max(top,document.querySelector('.thead').getBoundingClientRect().bottom);
+        return [...document.querySelectorAll('#rows > .pr')].map(row=>{
+          const chip=row.querySelector('.id-cue span'),c=chip.getBoundingClientRect(),shown=getComputedStyle(chip).display!=='none';
+          const visible=r=>r.width>0&&r.right>left&&r.left<right&&r.bottom>top&&r.top<bottom;
+          const targets=[...row.querySelectorAll('.row .title,.row .meta,.row .pill,.row .act')].filter(e=>visible(e.getBoundingClientRect()));
+          const overlap=shown&&targets.some(e=>{const r=e.getBoundingClientRect();
+            return Math.min(r.right,c.right)-Math.max(r.left,c.left)>0&&Math.min(r.bottom,c.bottom)-Math.max(r.top,c.top)>0;});
+          // Disabled/busy actions are intentionally pointer-events:none, so they cannot hit themselves.
+          const misses=targets.filter(e=>getComputedStyle(e).pointerEvents!=='none').filter(e=>{const r=e.getBoundingClientRect(),x=r.left+r.width/2,y=r.top+r.height/2;
+            if(x<left||x>right||y<=headBottom||y>bottom)return false;const hit=document.elementFromPoint(x,y);
+            return !hit||(hit!==e&&!e.contains(hit));}).map(e=>{const r=e.getBoundingClientRect(),hit=document.elementFromPoint(r.left+r.width/2,r.top+r.height/2);
+            return e.className+'@'+Math.round(r.left+r.width/2)+','+Math.round(r.top+r.height/2)+'->'+(hit?(hit.id||hit.className||hit.tagName):'none');});
+          const p=byKey.get(row.dataset.key);
+          const id=chip.querySelector('b').getBoundingClientRect(),repo=chip.querySelector('i');
+          const bounded=!shown||(c.width>0&&c.width<=200.5&&c.height>0&&id.width>0&&id.left>=c.left-.5&&id.right<=c.right+.5&&repo.getBoundingClientRect().right<=c.right+.5&&
+            (repo.scrollWidth<=repo.clientWidth||getComputedStyle(repo).textOverflow==='ellipsis'));
+          return {key:row.dataset.key,shown,bounded,text:chip.textContent,expected:'!'+p.id+' · '+p.repo,
+            inside:!shown||(c.left>=left-.5&&c.right<=right+.5),overlap,misses,onScreen:visible(row.getBoundingClientRect()),
+            prRight:row.querySelector('.row > .c-pr').getBoundingClientRect().right-left};});})()`);
+      const geometry = await evaluate(`(()=>{const main=document.querySelector('main');
+        return {client:main.clientWidth,content:main.scrollWidth,max:main.scrollWidth-main.clientWidth};})()`);
+      assert.ok(geometry.max > 0, `900px must pan the table (${JSON.stringify(geometry)})`);
+      const pan = async x => { await evaluate(`document.querySelector('main').scrollLeft=${x}`); await frame(); return cues(); };
+      const initial = await pan(0);
+      assert.ok(initial.every(c => !c.shown), 'No cue while the PR cell is visible');
+      const threshold = Math.ceil(Math.max(...initial.map(c => c.prRight))) + 1;
+      for (const x of [threshold - 2, threshold, geometry.max]) {
+        const state = await pan(x);
+        for (const c of state.filter(r => r.onScreen)) {
+          assert.deepEqual(c.misses, [], `Hit testing changed in ${c.key} at ${x}`);
+          if (x < threshold) { assert.equal(c.shown, c.prRight <= 0, `Cue before PR cell left ${c.key}`); continue; }
+          assert.deepEqual([c.shown, c.bounded, c.text, c.inside, c.overlap], [true, true, c.expected, true, false], `Cue for ${c.key} at ${x}`);
+        }
+        if (x === geometry.max && process.env.ADOPRVIEW_LAYOUT_SCREENSHOTS) {
+          const shot = await send('Page.captureScreenshot', { format: 'png' });
+          await writeFile(path.join(process.env.ADOPRVIEW_LAYOUT_SCREENSHOTS, 'after-panned-900.png'), Buffer.from(shot.data, 'base64'));
+        }
+      }
+      assert.equal(await evaluate(`document.querySelector('[data-key="sample-service-id:101"] .id-cue').getAttribute('aria-hidden')`), 'true');
+      const open = await point('sample-service-id:101', '.row [data-act="open"]');
+      await click(open); await frame();
+      assert.deepEqual((await calls()).at(-1), { method: 'openUrl', url: expectedUrl(open) }, 'Panned actions keep their row target');
+      assert.equal(await evaluate(`document.querySelector('[data-key="sample-service-id:101"]').classList.contains('id-panned')`),
+        await evaluate(`document.querySelector('main').scrollLeft>0`), 'Cue state follows the scroll after pointer actions');
+      // Resizing while panned re-measures; long repositories stay ellipsized inside the bounded chip.
+      await send('Emulation.setDeviceMetricsOverride', { width: 860, height: 560, deviceScaleFactor: 1, mobile: false });
+      await frame();
+      const resized = await pan(await evaluate(`(()=>{const m=document.querySelector('main');return m.scrollWidth-m.clientWidth;})()`));
+      assert.ok(resized.some(c => c.onScreen && c.shown), 'Cue still shows after resizing while panned');
+      for (const c of resized.filter(r => r.onScreen && r.shown))
+        assert.deepEqual([c.bounded, c.text, c.inside, c.overlap, c.misses], [true, c.expected, true, false, []], `Resized cue for ${c.key}`);
+      await send('Emulation.setDeviceMetricsOverride', { width: 1600, height: 1000, deviceScaleFactor: 1, mobile: false });
+      await frame(); await frame();
+      const wide = await cues();
+      assert.ok(wide.every(c => !c.shown), 'Widening the window clears every cue');
+    });
+
+    await t.test('Completed history is read-only; a PR completing during a live Fix keeps owned output and Stop but loses launchers', async () => {
+      await send('Emulation.setDeviceMetricsOverride', { width: 1600, height: 1000, deviceScaleFactor: 1, mobile: false });
+      await reset(true);
+      const key = 'sample-service-id:101';
+      await click(await point(key, '.row [data-act="triage"]')); await frame();
+      await move(10, 10); await evaluate('document.activeElement?.blur()'); await frame();
+      const chip = () => evaluate(`document.querySelector('[data-lane="completed"] .n').textContent`);
+      assert.equal(await chip(), '2');
+      assert.doesNotMatch(await evaluate(`document.querySelector('#rows').innerHTML`), /data-completed/, 'All stays active-only');
+      await evaluate(`(()=>{const p=S.snap.prs.find(p=>p.key==='${key}');
+        setSnapshot({...S.snap,orderRevision:(S.snap.orderRevision||0)+1,prs:S.snap.prs.filter(x=>x!==p),
+          completed:[{key:p.key,id:p.id,title:p.title,url:p.url,org:p.org,project:p.project,repo:p.repo,repoId:p.repoId,author:p.author,isMine:p.isMine,isHidden:false,closed:new Date().toISOString(),closedBy:null},...S.snap.completed]});})()`);
+      await frame();
+      assert.equal(await chip(), '3', 'History-only change updates the chip');
+      assert.match(await evaluate(`document.querySelector('#runShelf').textContent`), /!101/);
+      await click(await point(key, '.run-heading')); await frame();
+      const launchers = await evaluate(`[...document.querySelectorAll('[data-key="${key}"] [data-act]')].map(e=>e.dataset.act).filter(a=>['triage','pop','autocomplete','approve','explain','tiktokPr'].includes(a))`);
+      assert.deepEqual(launchers, [], 'Completed PR loses launch controls');
+      await click(await point(key, '.copilot-run [data-act="cancelRun"]')); await frame();
+      assert.deepEqual((await calls()).filter(c => c.method === 'cancelCopilot'), [{ method: 'cancelCopilot', key, runId: 'offline-101' }]);
+
+      await click(await elementPoint('[data-lane="completed"]')); await frame();
+      const rows = await evaluate(`[...document.querySelectorAll('#rows > .pr')].map(r=>[r.dataset.key,r.hasAttribute('data-completed'),[...r.querySelectorAll('[data-act]')].map(e=>e.dataset.act).join()])`);
+      assert.deepEqual(rows.map(r => r[0]), [key, 'sample-api-id:96', 'sample-operator-id:94']);
+      assert.ok(rows.every(r => r[1] && r[2] === 'open'), JSON.stringify(rows));
+      assert.match(await evaluate(`document.querySelector('#rows').textContent`), /sample-service: Checked 100 completions in this repository; watched PRs may be missing\./);
+      assert.equal(await evaluate(`document.querySelector('#runShelf').hidden || !document.querySelector('#runShelf').textContent.trim()`), true);
+      await evaluate(`document.querySelector('[data-key="sample-api-id:96"] [data-act="open"]').focus()`);
+      await send('Input.dispatchKeyEvent', { type: 'keyDown', key: 'Enter', code: 'Enter', windowsVirtualKeyCode: 13, text: '\r' });
+      await send('Input.dispatchKeyEvent', { type: 'keyUp', key: 'Enter', code: 'Enter', windowsVirtualKeyCode: 13 }); await frame();
+      assert.deepEqual((await calls()).at(-1), { method: 'openUrl', url: await evaluate(`S.snap.completed.find(c=>c.id===96).url`) });
+      if (process.env.ADOPRVIEW_LAYOUT_SCREENSHOTS) {
+        const shot = await send('Page.captureScreenshot', { format: 'png' });
+        await writeFile(path.join(process.env.ADOPRVIEW_LAYOUT_SCREENSHOTS, 'completed-lane-1600.png'), Buffer.from(shot.data, 'base64'));
+      }
+      await evaluate(`document.activeElement?.blur();S.lane=null;render()`);
+    });
     await t.test('compact table columns align and needed +1 expands without overlapping other row targets', async () => {
       for (const width of [1000, 1280, 1600]) {
         await send('Emulation.setDeviceMetricsOverride', { width, height: 1000, deviceScaleFactor: 1, mobile: false });
@@ -1479,7 +1906,7 @@ test('real row hit testing and action identity across refreshes', { timeout: 900
         shelf:document.querySelector('#runShelf').children.length,cards:cards.length,
         owners:cards.map(c=>c.closest('.pr')?.dataset.key),rowShown:!!document.querySelector('#rows [data-key="${key}"]')};})()`);
       assert.deepEqual(await where(), { shelf: 0, cards: 1, owners: [key], rowShown: true });
-      for (const view of [`S.lane='blocked'`, `S.lane='waiting'`, `S.lane='ready'`, `S.lane='needsHuman'`, `S.lane=null;S.q='no matching PR'`,
+      for (const view of [`S.lane='blocked'`, `S.lane='waiting'`, `S.lane='completed'`, `S.lane='needsHuman'`, `S.lane=null;S.q='no matching PR'`,
         `S.q='';S.repo='sample-api'`, `S.repo='';S.scope='watched'`, `S.scope='all'`]) {
         await evaluate(`S.laneRetained.clear();${view};render();`); await frame();
         const w = await where();
@@ -1902,7 +2329,8 @@ test('real row hit testing and action identity across refreshes', { timeout: 900
         await evaluate(`{const key='sample-service-id:101',pr=S.snap.prs.find(p=>p.key===key);
           const older=Array.from({length:160},(_,n)=>'Older recovered synthetic line '+n+'\\n').join('');
           const newer='Newer completed synthetic output\\n'.repeat(160);
-          S.runs.set('older-recovered-run',{...pr,runId:'older-recovered-run',status:'needs-attention',mayBeRunning:false,
+          // id:0 keeps the older run non-cancelable history until it actually recovers.
+          S.runs.set('older-recovered-run',{...pr,runId:'older-recovered-run',id:0,status:'needs-attention',mayBeRunning:false,
             startedAt:'2026-01-01T00:00:00Z',output:older,outputOffset:older.length});
           S.runs.set('newer-completed-run',{...pr,runId:'newer-completed-run',status:'completed',mayBeRunning:false,
             startedAt:'2026-01-02T00:00:00Z',output:newer,outputOffset:newer.length});
@@ -1945,6 +2373,9 @@ test('real row hit testing and action identity across refreshes', { timeout: 900
           await evaluate('window.promotionRow=document.querySelector("#rows [data-key=\\"sample-service-id:101\\"]")');
         }
         assert.deepEqual(await roles(), [['older-recovered-run', false], ['newer-completed-run', true], ['middle-completed-run', true]]);
+        assert.equal(await evaluate(`window.promotionRow.querySelectorAll('.copilot-run .run-scope').length===0 &&
+          [...window.promotionRow.querySelectorAll('.run-scope')].filter(p=>p.getClientRects().length).length===1`), true,
+          'Promotion keeps one visible execution notice outside the run cards without a full render');
         assert.equal(await evaluate('window.promotionRow.querySelector(".copilot-run:not(.run-earlier) .run-output")===window.olderOutput'), true);
         assert.equal(await evaluate('window.promotionRow.querySelector(".run-earlier .run-output")===window.newerOutput'), true);
         assert.equal(await evaluate('window.olderOutput.firstChild===window.olderNode'), true);
@@ -2059,6 +2490,10 @@ test('real row hit testing and action identity across refreshes', { timeout: 900
           render();setSnapshot({...S.snap,orderRevision:(S.snap.orderRevision||0)+1,prs:[]});}`);
         await frame();
         await click(await point('sample-service-id:101', '.run-heading')); await frame();
+        assert.equal(await evaluate(`(()=>{const row=document.querySelector('#runShelf [data-key="sample-service-id:101"]');
+          const scopes=row.querySelectorAll('.run-scope');return scopes.length===1&&!scopes[0].closest('.copilot-run')&&
+            !!(scopes[0].compareDocumentPosition(row.querySelector('.copilot-run'))&Node.DOCUMENT_POSITION_FOLLOWING);})()`), true,
+          'An open shelf run shows the execution notice once before its run cards');
         const captured = await point('sample-service-id:101', '.copilot-run:not(.run-earlier) [data-act="cancelRun"]');
         await move(captured.x, captured.y);
         if (pressed) await press(captured);

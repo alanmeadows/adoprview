@@ -49,6 +49,13 @@ static class AutoCompleteTests
             try { await f.Service.SetAutoCompleteAsync("repo-id:123", true); throw new Exception("Empty identity confirmed"); }
             catch (InvalidOperationException) { }
         });
+        await test("Auto-complete read-back of a PR completed after the PATCH still confirms its identity and strategy", async () =>
+        {
+            using var f = new Fixture { Status = "completed" };
+            var result = await f.Service.SetAutoCompleteAsync("repo-id:123", true);
+            Check(result.AutoCompleteBy == "Offline Reviewer" && result.MergeStrategy == "squash" && !result.IsActive && f.Patches == 1,
+                "Terminal read-back dropped confirmed auto-complete: " + result.AutoCompleteBy);
+        });
         await test("Auto-complete native guard blocks duplicate set or cancel while exact PR request is pending", async () =>
         {
             using var f = new Fixture { Hold = new(TaskCreationOptions.RunContinuationsAsynchronously) };
@@ -72,7 +79,7 @@ static class AutoCompleteTests
         public readonly PrService Service;
         readonly HttpClient http;
         public bool Set;
-        public string Failure = "", DisplayName = "Offline Reviewer";
+        public string Failure = "", DisplayName = "Offline Reviewer", Status = "active";
         public int Patches, Reads;
         public TaskCompletionSource? Hold;
         public readonly TaskCompletionSource Entered = new(TaskCreationOptions.RunContinuationsAsynchronously);
@@ -116,6 +123,9 @@ static class AutoCompleteTests
                     if (Failure == "get") return Json("{}", HttpStatusCode.Forbidden);
                     var pr = JsonNode.Parse("""{"pullRequestId":123,"status":"active","title":"Offline PR","sourceRefName":"refs/heads/fix","targetRefName":"refs/heads/main","mergeStatus":"succeeded","repository":{"id":"repo-id","name":"repo","project":{"id":"project-id"}}}""")!;
                     if (Failure == "identity") pr["pullRequestId"] = 999;
+                    pr["status"] = Status;
+                    if (Status != "active") pr["closedDate"] = "2026-10-31T00:00:00Z";
+                    if (Set) pr["completionOptions"] = new JsonObject { ["mergeStrategy"] = "squash" };
                     if (Set) pr["autoCompleteSetBy"] = new JsonObject { ["id"] = Failure == "empty-id" ? "" : UserId, ["displayName"] = DisplayName };
                     return Json(pr.ToJsonString());
                 }

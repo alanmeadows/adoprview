@@ -63,10 +63,12 @@ const S = {
   reviewVotes: new Map(),
   autoCompleteErrors: new Map(),
   lastSig: '',
+  lastHistorySig: '',
   pendingSnapshot: null,
   pointerInRows: false,
   rowPointerDown: false,
   rowsPending: false,
+  runRelocations: new Set(),
   rowOrder: [],
   orderRevision: null,
   hideUndo: [],
@@ -95,7 +97,7 @@ const LANES = {
   needsHuman: { label: 'Needs Human', hint: 'Human actions available; merge preview may still be pending or unverified', short: 'Reviewer · PoP · Auto', c: 'var(--needs)' },
   blocked: { label: 'Blocked', hint: 'Agent-fixable problems', short: 'Fix with agent', c: 'var(--blocked)' },
   waiting: { label: 'Waiting', hint: 'Other automated work is pending, or merge verification remains with no human actions', short: 'Pending', c: 'var(--waiting)' },
-  ready: { label: 'Ready', hint: 'No outstanding actions — completing', short: 'Completing', c: 'var(--ready)' },
+  completed: { label: 'Completed', hint: 'Watched PRs Azure DevOps completed (merged) in the last 7 days; read-only and not counted in active totals', short: 'Merged · 7 days', c: 'var(--ready)' },
 };
 const GATES = ['merge', 'build', 'checks', 'comments', 'agency'];
 
@@ -172,6 +174,8 @@ function toast(text, kind = 'ok', action) {
 }
 
 const findPr = (key) => S.snap.prs.find((p) => p.key === key);
+// Completed history is display-only: Open and Hide may use it, every other action stays on active PRs.
+const findShown = (key) => findPr(key) || (S.snap.completed || []).find((c) => c.key === key);
 
 // --------------------------------------------------------------- filtering
 function hiddenSet() { return new Set((S.settings?.hidden || []).map((h) => h.toLowerCase())); }
@@ -199,6 +203,20 @@ function baseVisible() {
   });
 }
 
+function completedVisible() {
+  const hidden = hiddenSet();
+  const q = S.q.trim().toLowerCase();
+  if (S.scope === 'drafts') return [];
+  return (S.snap.completed || []).filter((c) => {
+    if (hidden.has(c.key.toLowerCase())) return false;
+    if (S.scope === 'mine' && !c.isMine) return false;
+    if (S.scope === 'watched' && c.isMine) return false;
+    if (S.repo && c.repo !== S.repo) return false;
+    const hay = `${c.id} !${c.id} ${c.title} ${c.repo} ${c.author?.name} ${c.author?.uniqueName}`.toLowerCase();
+    return !q || q.split(/\s+/).every((t) => hay.includes(t));
+  });
+}
+
 // --------------------------------------------------------------- rendering
 function rowsInUse() {
   const focused = document.activeElement;
@@ -208,7 +226,10 @@ function rowsInUse() {
 function flushRowUpdates() {
   if (rowsInUse() || crossRunOutputSelection()) return;
   if (S.pendingSnapshot) setSnapshot(S.pendingSnapshot);
-  if (S.rowsPending) renderRows();
+  for (const key of [...S.runRelocations]) relocateRunGroup(key);
+  // A relocation still queued here is held by a text selection; a full rebuild would detach it. The idle-aware rebuild
+  // also stays pending while a crossing selection touches run cards, and selectionchange retries it once cleared.
+  if (S.rowsPending && !S.runRelocations.size) renderRows(true);
   renderStatus();
 }
 
@@ -231,8 +252,9 @@ function setSnapshot(snap) {
     ? sorted.map(p => p.key)
     : [...S.rowOrder.filter(key => byKey.has(key)), ...sorted.filter(p => !oldKeys.has(p.key)).map(p => p.key)];
   snap = { ...snap, prs: order.map(key => byKey.get(key)) };
-  const sig = JSON.stringify(snap.prs);
-  const rowsChanged = sig !== S.lastSig || revision !== S.orderRevision;
+  // History-only changes rebuild rows only while the Completed lane shows them; elsewhere the header count updates.
+  const sig = JSON.stringify(snap.prs), historySig = JSON.stringify([snap.completed || [], snap.completedWarnings || []]);
+  const rowsChanged = sig !== S.lastSig || revision !== S.orderRevision || (S.lane === 'completed' && historySig !== S.lastHistorySig);
   // Keep the displayed row and its action target together until interaction ends.
   if (rowsChanged && rowsInUse()) {
     S.pendingSnapshot = snap;
@@ -256,6 +278,7 @@ function setSnapshot(snap) {
   S.rowOrder = order;
   S.orderRevision = revision;
   S.lastSig = sig;
+  S.lastHistorySig = historySig;
   renderHeader();
   if (rowsChanged) renderRows(true);
 }
@@ -268,12 +291,12 @@ function renderHeader() {
   $('#draftFilter').hidden = !S.settings?.ignoreDrafts;
   document.querySelectorAll('#scope button').forEach(b => b.classList.toggle('on', b.dataset.scope === S.scope));
   $('#laneCounters').innerHTML = Object.entries(LANES).map(([k, m]) => {
-    const n = vis.filter((p) => !ignoredDraft(p) && p.lane === k).length;
+    const n = k === 'completed' ? completedVisible().length : vis.filter((p) => !ignoredDraft(p) && p.lane === k).length;
     return `<button class="lane-btn ${S.lane === k ? 'on' : ''} ${n ? '' : 'zero'} ${n && (k === 'needsHuman' || k === 'blocked') ? 'pulse' : ''}" data-lane="${k}" style="--c:${m.c}">
       <span class="bar"></span><span class="n">${n}</span><span class="l"><b>${m.label}</b><span>${m.short}</span></span></button>`;
   }).join('');
 
-  const repos = [...new Set(S.snap.prs.map((p) => p.repo))].sort();
+  const repos = [...new Set([...S.snap.prs, ...(S.snap.completed || [])].map((p) => p.repo))].sort();
   const sel = $('#repoFilter');
   const opts = `<option value="">All repositories</option>` + repos.map((r) => `<option ${r === S.repo ? 'selected' : ''}>${esc(r)}</option>`).join('');
   if (sel.dataset.sig !== opts) { sel.innerHTML = opts; sel.dataset.sig = opts; }
@@ -292,12 +315,12 @@ function renderStatus() {
   const hiddenCount = hiddenSet().size;
   const parts = [];
   parts.push(`<span><span class="dot ${s.refreshing ? 'busy' : ''}"></span>${s.refreshing ? 'Refreshing…' : s.lastRefresh ? 'Updated ' + ago2(s.lastRefresh) : 'Loading…'}</span>`);
-  if (s.lastRefresh) parts.push(`<span>${vis.length} PR${vis.length === 1 ? '' : 's'} across ${repoCount} repo${repoCount === 1 ? '' : 's'}</span>`);
+  if (s.lastRefresh) parts.push(`<span>${vis.length} active PR${vis.length === 1 ? '' : 's'} across ${repoCount} repo${repoCount === 1 ? '' : 's'}</span>`);
   if (hiddenCount) parts.push(`<span>${hiddenCount} hidden</span>`);
   if (S.settings) parts.push(`<span>auto-refresh ${Math.round(S.settings.refreshSeconds / 60 * 10) / 10}m · merge re-check ${S.settings.mergeCheckMinutes}m</span>`);
   parts.push('<span>Row order stays fixed until Refresh (R)</span>');
   if (s.mergeCheckStatus) parts.push(`<span>${esc(s.mergeCheckStatus)}</span>`);
-  if (S.pendingSnapshot || S.rowsPending) parts.push('<span>Table updates paused while interacting with rows</span>');
+  if (S.pendingSnapshot || S.rowsPending || S.runRelocations.size) parts.push('<span>Table updates paused while interacting with rows</span>');
   if (S.lane && vis.some(p => S.laneRetained.has(p.key) && p.lane !== S.lane))
     parts.push('<span>Rows that changed lane stay here until Refresh or a filter change</span>');
   if (s.error) parts.push(`<span class="err">⚠ ${esc(s.error)}</span>`);
@@ -339,8 +362,10 @@ function restoreExpansionFocus(control) {
 }
 
 function renderRowsContent(whenIdle = false) {
-  if (S.rowPointerDown || (whenIdle && (rowsInUse() || crossRunOutputSelection()))) { S.rowsPending = true; renderStatus(); return; }
+  if (S.rowPointerDown || (whenIdle && (rowsInUse() || crossRunOutputSelection() ||
+    selectionBlocksMove([...document.querySelectorAll('#rows .copilot-run, #rows .lead-blockers, #runShelf .copilot-run')])))) { S.rowsPending = true; renderStatus(); return; }
   S.rowsPending = false;
+  S.runRelocations.clear();
   const vis = baseVisible();
   renderRunShelfContent();
   renderVideoShelf();
@@ -360,6 +385,7 @@ function renderRowsContent(whenIdle = false) {
     empty.innerHTML = `<div class="big">📂</div><h2>No repositories yet</h2><div>Add an Azure DevOps repository URL in settings.</div><button class="btn primary" data-act="settings">Open settings</button>`;
     return;
   }
+  if (S.lane === 'completed') return renderCompletedRows();
   const shown = laneVisible(vis);
   if (S.lane) shown.forEach(p => S.laneRetained.add(p.key));
   if (!shown.length) {
@@ -382,13 +408,54 @@ function renderRowsContent(whenIdle = false) {
     const fromBottom = logScroll[el.dataset.log];
     el.scrollTop = fromBottom == null ? el.scrollHeight : el.scrollHeight - el.clientHeight - fromBottom;
   });
+  syncIdCues();
 }
+
+// Read-only rows: no expansion and no launchers, only Open (and Hide from the row menu).
+function renderCompletedRows() {
+  const rows = $('#rows'), empty = $('#empty');
+  const shown = completedVisible();
+  const notes = (S.snap.completedWarnings || []).map(w => `<div class="completed-note" role="status">⚠ ${esc(w)}</div>`).join('');
+  rows.innerHTML = notes + shown.map(c => `<div class="pr completed" data-key="${esc(c.key)}" data-completed style="--c:var(--ready)">
+    <div class="id-cue" aria-hidden="true"><span><b>!${c.id} · </b><i>${esc(c.repo)}</i></span></div>
+    <div class="row">
+      <div class="c-pr"><div class="prmain">
+        <div class="title" title="${esc(c.title)}">${esc(c.title)}</div>
+        <div class="meta">${c.isMine ? '' : `<span class="tag watch" title="${esc(c.author?.uniqueName || '')}">${avatar(c.author?.name)} ${esc(c.author?.name)}</span>`}<span class="row-lane" title="${esc(LANES.completed.hint)}">Completed</span><span class="sep">·</span><span class="id">!${c.id}</span><span class="sep">·</span><span>${esc(c.repo)}</span></div>
+      </div></div>
+      ${GATES.map(() => '<div class="gate"><span class="pill na"><span>—</span></span></div>').join('')}
+      <div class="c-upd" title="Completed ${esc(new Date(c.closed).toLocaleString())}${c.closedBy ? ' by ' + esc(c.closedBy) : ''}">${ago(c.closed)}<small>merged</small></div>
+      <div class="c-act">${['approval', 'publish', 'pop', 'auto', 'fix'].map(slot => `<span class="action-slot" data-slot="${slot}"></span>`).join('')}<span class="action-slot" data-slot="open"><button class="act" data-act="open" title="Open in Azure DevOps" aria-label="Open in Azure DevOps">${svg('ext')}</button></span></div>
+    </div>
+  </div>`).join('');
+  empty.hidden = !!shown.length;
+  if (!shown.length) empty.innerHTML = '<div class="big">✨</div><h2>Nothing here</h2><div>No completed watched PRs from the last 7 days match the current filters.</div>';
+  syncIdCues();
+}
+
+// Narrow windows pan the table; once a row's PR cell is fully out of view, show its compact id cue.
+function syncIdCues() {
+  const scroller = $('main');
+  const left = scroller.scrollLeft > 0 ? scroller.getBoundingClientRect().left + scroller.clientLeft : 0;
+  for (const row of $('#rows').children) {
+    const cell = row.matches('.pr') && scroller.scrollLeft > 0 && $('.row > .c-pr', row);
+    const panned = !!cell && cell.getBoundingClientRect().right <= left;
+    row.classList.toggle('id-panned', panned);
+    // Rows can also be scrolled internally by scrollIntoView, so measure rather than assume main.scrollLeft.
+    if (panned) $('.id-cue', row).style.transform = `translateX(${left - row.getBoundingClientRect().left - row.clientLeft + row.scrollLeft}px)`;
+  }
+}
+let idCueFrame = 0;
+const queueIdCues = () => { if (!idCueFrame) idCueFrame = requestAnimationFrame(() => { idCueFrame = 0; syncIdCues(); }); };
 
 const runActive = r => !!r && (r.mayBeRunning === true || ['preparing', 'recovering', 'running', 'cancelling'].includes(r.status));
 const runCancelable = r => runActive(r) || (r?.status === 'needs-attention' && r.id > 0);
 const runsForPr = key => [...S.runs.values()].reverse().filter(r => r.key === key)
   .sort((a, b) => (Date.parse(b.startedAt) || 0) - (Date.parse(a.startedAt) || 0));
-const runForPr = key => runsForPr(key).find(runActive) || runsForPr(key).at(0);
+// A live run, else an outstanding (cancelable) recovery run, else the newest run.
+const runForPr = key => runsForPr(key).find(runActive) || runsForPr(key).find(runCancelable) || runsForPr(key).at(0);
+// Live/uncertain or starting runs lead the expanded detail; finished runs follow the PR context.
+const runLeads = key => runCancelable(runForPr(key)) || isBusy(key, 'triage');
 
 const explanationActive = r => !!r && ['preparing', 'running', 'cancelling'].includes(r.status);
 const explanationLabel = r => r?.status === 'failed' || r?.status === 'cancelled' ? 'Retry Explain' : r ? 'Explain again' : 'Explain this PR';
@@ -750,12 +817,13 @@ function syncRunOutput(card) {
 }
 
 const runCardTitle = earlier => earlier ? 'Earlier run · Copilot in WSL' : 'Fix PR · Copilot in WSL';
+// One per PR (beside Fix PR, or atop shelf/ignored-draft runs) so card promotion never hides or duplicates it.
+const runScopeNotice = () => `<p class="small run-scope">Fix PR starts in a separate PR worktree with --yolo: tools, paths and URLs are allowed without confirmation for this run, not globally. This is not a filesystem sandbox. New runs are told to commit validated fixes and ordinary-push them only to this PR's captured source branch; that limit is a prompt instruction, not enforced. Merge/PR-update command denies and the prompt's approval/policy boundaries remain; earlier runs keep their original no-push scope. Sign-in is required beforehand; this panel is noninteractive. Exit 0 does not verify the PR fix.</p>`;
 function renderRunCard(key, r = runForPr(key), earlier = false) {
   return `<div class="card copilot-run${earlier ? ' run-earlier' : ''}" data-run-key="${esc(key)}" data-run-id="${esc(r?.runId || '')}">
     <h3><span class="grow">${runCardTitle(earlier)}</span>
       <button class="mini" data-act="cancelRun" data-run-id="${esc(r?.runId || '')}" ${runCancelable(r) ? '' : 'hidden'}>${svg('x')} Cancel run</button></h3>
     <div class="body">
-      <p class="small">Starts in a separate PR worktree with --yolo: tools, paths and URLs are allowed without confirmation for this run, not globally. This is not a filesystem sandbox. New runs are told to commit validated fixes and ordinary-push them only to this PR's captured source branch; that limit is a prompt instruction, not enforced. Merge/PR-update command denies and the prompt's approval/policy boundaries remain; earlier runs keep their original no-push scope. Sign-in is required beforehand; this panel is noninteractive. Exit 0 does not verify the PR fix.</p>
       <p class="run-status" role="status">${esc(r ? runSummary(r) : 'Not started. Use Fix PR to run the rich prompt, or Copy prompt to review it first.')}</p>
       <p class="run-worktree small">${esc(runWorktreeText(r))}</p>
       <pre class="run-output" tabindex="0" aria-label="Copilot stdout and stderr" ${r || isBusy(key, 'triage') ? '' : 'hidden'}>${esc(r?.output || '')}</pre>
@@ -772,7 +840,8 @@ function earlierRunCards(key) {
 // run entries here (unless hidden), only in the unfiltered view.
 function renderRunShelf(whenIdle = false) {
   if (!$('#runShelf')) return;
-  if (whenIdle && (rowsInUse() || crossRunOutputSelection()?.card.closest('#runShelf'))) { S.rowsPending = true; renderStatus(); return; }
+  if (whenIdle && (rowsInUse() || crossRunOutputSelection()?.card.closest('#runShelf') ||
+    selectionBlocksMove([...document.querySelectorAll('#runShelf .copilot-run')]))) { S.rowsPending = true; renderStatus(); return; }
   const selection = captureRunOutputs();
   renderRunShelfContent();
   restoreRunOutputs(selection);
@@ -796,7 +865,7 @@ function renderRunShelfContent() {
     return `<div class="pr run-only ${open ? 'open' : ''}" data-key="${esc(key)}">
       <div class="run-heading" data-act="toggle" role="button" tabindex="0" aria-expanded="${open}">${svg('chev').replace('<svg', '<svg class="chev"')}
         <div class="prmain"><div class="title">${esc(r.title)}</div><div class="meta small"><span class="id">!${esc(r.id)}</span><span class="sep"> · </span><span>${esc(r.repo)}</span><span class="sep"> · </span><span>${findPr(key) && ignoredDraft(findPr(key)) ? 'Ignored draft' : 'PR no longer in the active list'} · ${esc(runSummary(r))}</span></div></div></div>
-      ${open ? `<div class="detail"><div class="full stack">${renderRunCard(key, r)}${earlierRunCards(key)}</div></div>` : ''}
+      ${open ? `<div class="detail"><div class="full stack">${runScopeNotice()}${renderRunCard(key, r)}${earlierRunCards(key)}</div></div>` : ''}
     </div>`;
   }).join('');
   restoreExpansionFocus(focused);
@@ -827,18 +896,10 @@ function updateCopilotRun(r) {
   const deferMain = !!main?.dataset.runId && main.dataset.runId !== latestId &&
     (rowsInUse() || crossSelection?.card.dataset.runKey === r.key);
   if (deferMain) { S.rowsPending = true; renderStatus(); }
-  else if (main && promoted && main !== promoted) {
+  // A selection reaching into a moving card leaves the swap to the queued relocation below.
+  else if (main && promoted && main !== promoted && !selectionBlocksMove(runCards)) {
     const selection = captureRunOutputs();
-    main.classList.add('run-earlier'); $('h3 .grow', main).textContent = runCardTitle(true);
-    promoted.classList.remove('run-earlier'); $('h3 .grow', promoted).textContent = runCardTitle(false);
-    main.before(promoted);
-    let previous = promoted;
-    for (const run of runsForPr(r.key).filter(run => run.runId !== latestId)) {
-      const card = runCards.find(card => card.dataset.runId === run.runId);
-      if (!card) continue;
-      if (previous.nextElementSibling !== card) previous.after(card);
-      previous = card;
-    }
+    reorderRunCards(r.key, runCards);
     for (const card of runCards) {
       const view = S.runOutputs.get(card.dataset.runId);
       if (view) {
@@ -875,19 +936,121 @@ function updateCopilotRun(r) {
     cancel.disabled = isBusy(r.key, 'cancelRun');
     cancel.dataset.runId = r.runId;
   }
-  if (!old) { renderRunShelf(true); renderRows(true); restoreRunOutputs(previousSelection); }
+  if (!old) { renderRunShelf(true); renderRows(true); restoreRunOutputs(previousSelection); return; }
+  relocateRunGroup(r.key);
+}
+
+// Make the preferred run the main card and keep the rest in chronological order (same nodes).
+function reorderRunCards(key, runCards) {
+  const latestId = runForPr(key)?.runId;
+  const main = runCards.find(el => !el.classList.contains('run-earlier'));
+  const promoted = runCards.find(el => el.dataset.runId === latestId);
+  if (!main || !promoted || main === promoted) return;
+  main.classList.add('run-earlier'); $('h3 .grow', main).textContent = runCardTitle(true);
+  promoted.classList.remove('run-earlier'); $('h3 .grow', promoted).textContent = runCardTitle(false);
+  main.before(promoted);
+  let previous = promoted;
+  for (const run of runsForPr(key).filter(run => run.runId !== latestId)) {
+    const card = runCards.find(card => card.dataset.runId === run.runId);
+    if (!card) continue;
+    if (previous.nextElementSibling !== card) previous.after(card);
+    previous = card;
+  }
+}
+
+// A non-output text selection touching nodes that would move (detaching its endpoints) holds the move.
+function selectionBlocksMove(elements) {
+  const selection = window.getSelection(), range = selection?.isCollapsed === false ? selection.getRangeAt(0) : null;
+  if (!range) return false;
+  const start = range.startContainer, output = (start?.nodeType === 1 ? start : start?.parentElement)?.closest('.run-output');
+  if (output?.contains(range.endContainer)) return false;
+  return elements.some(el => range.intersectsNode(el));
+}
+
+// Move the existing run group (same nodes, reading and selection) when its leading/trailing placement or main run changes.
+function relocateRunGroup(key) {
+  const detail = [...document.querySelectorAll('#rows > .pr')].find(el => el.dataset.key === key)?.querySelector(':scope > .detail[data-run-lead]');
+  if (!detail) return relocateShelfRuns(key);
+  const p = S.snap.prs.find(x => x.key === key), lead = runLeads(key);
+  const cards = detail ? [...detail.querySelectorAll('.copilot-run')] : [];
+  const latestId = runForPr(key)?.runId;
+  const reorder = cards.some(el => el.dataset.runId === latestId) && cards.find(el => !el.classList.contains('run-earlier'))?.dataset.runId !== latestId;
+  if (!detail || !p || (detail.dataset.runLead === String(+lead) && !reorder)) { S.runRelocations.delete(key); return; }
+  if (!cards.length) { S.runRelocations.delete(key); renderRows(true); return; }
+  // Only the run cards move. Defer while rows are in use or a non-output text selection touches a moving card;
+  // selections elsewhere (failed logs, Explain, other PRs) are left attached.
+  if (rowsInUse() || crossRunOutputSelection() || selectionBlocksMove([...cards, ...detail.querySelectorAll('.lead-blockers')])) {
+    S.runRelocations.add(key); renderStatus(); return;
+  }
+  S.runRelocations.delete(key);
+  const outputSelection = captureRunOutputs();
+  reorderRunCards(key, cards);
+  if (detail.dataset.runLead !== String(+lead)) {
+    const ordered = [...detail.querySelectorAll('.copilot-run')];
+    detail.querySelector('.lead-blockers')?.remove();
+    let leading = detail.firstElementChild.classList.contains('full') ? detail.firstElementChild : null;
+    if (lead) {
+      if (!leading) { leading = document.createElement('div'); leading.className = 'full stack'; detail.prepend(leading); }
+      leading.insertAdjacentHTML('beforeend', leadBlockersCard(p));
+      leading.append(...ordered);
+    } else {
+      detail.lastElementChild.append(...ordered);
+      if (leading && !leading.children.length) leading.remove();
+    }
+  }
+  for (const card of cards) {
+    const view = S.runOutputs.get(card.dataset.runId);
+    if (view) { view.element.scrollTop = view.top; view.element.scrollLeft = view.left; view.top = view.element.scrollTop; }
+  }
+  restoreRunOutputSelection(outputSelection);
+  detail.dataset.runLead = String(+lead);
+  renderStatus();
+}
+
+// Shelf cards have no leading placement; only a held main-run promotion is queued and replayed in place.
+function relocateShelfRuns(key) {
+  const cards = [...(document.querySelector('#runShelf')?.querySelectorAll('.copilot-run') || [])].filter(el => el.dataset.runKey === key);
+  const latestId = runForPr(key)?.runId;
+  if (!cards.some(el => el.dataset.runId === latestId) || cards.find(el => !el.classList.contains('run-earlier'))?.dataset.runId === latestId) {
+    S.runRelocations.delete(key); return;
+  }
+  if (rowsInUse() || crossRunOutputSelection() || selectionBlocksMove(cards)) { S.runRelocations.add(key); renderStatus(); return; }
+  S.runRelocations.delete(key);
+  const outputSelection = captureRunOutputs();
+  reorderRunCards(key, cards);
+  for (const card of cards) {
+    const view = S.runOutputs.get(card.dataset.runId);
+    if (view) { view.element.scrollTop = view.top; view.element.scrollLeft = view.left; view.top = view.element.scrollTop; }
+  }
+  restoreRunOutputSelection(outputSelection);
+  renderStatus();
+}
+
+const humanText = a => ({ reviews: 'Human reviewer approval needed (+1)', pop: 'Proof of Presence — tap your security key', autocomplete: 'Auto-complete not set', publish: 'Draft — publish when ready' }[a] || a);
+
+// A leading run must not bury blockers that no leading card above already conveys (e.g. conflicts, required reviews).
+function leadBlockersCard(p) {
+  // Only a current approval offer conveys the required review; a cached outcome alone does not.
+  const approvalCard = !!p.approval;
+  // Exclude only reasons a leading card already shows: each failed-gate card conveys its "Build failed" blocker.
+  const shown = new Set((p.failedBuilds || []).map(fb => `Build failed: ${fb.name}`));
+  const reasons = [
+    ...(p.blockers || []).filter(x => !shown.has(x)).map(x => ['fail', x]),
+    ...(p.humanActions || []).filter(a => a !== 'reviews' || !approvalCard).map(a => ['human', humanText(a)]),
+  ];
+  return reasons.length ? `<div class="card lead-blockers"><h3>Blocking</h3><div class="body"><ul class="list blockers">${reasons.map(([c, t]) => `<li><span class="dot ${c}"></span><span class="k">${esc(t)}</span></li>`).join('')}</ul></div></div>` : '';
 }
 
 function syncCopilotButton(key) {
   for (const button of document.querySelectorAll('[data-act="triage"]')) {
     if (button.closest('.pr')?.dataset.key !== key) continue;
-    const active = runActive(runForPr(key)), busy = isBusy(key, 'triage');
+    const active = runActive(runForPr(key)), cancelable = runCancelable(runForPr(key)), busy = isBusy(key, 'triage');
     const expanded = button.classList.contains('mini');
     button.classList.toggle('running', active);
     button.classList.toggle('busy', busy);
     button.disabled = busy;
-    button.innerHTML = svg(active || busy ? 'refresh' : 'spark') + (expanded ? ` ${active ? 'Show run' : 'Fix PR'}` : '');
-    button.title = active ? runForPr(key)?.status === 'needs-attention'
+    button.innerHTML = svg(active || busy ? 'refresh' : 'spark') + (expanded ? ` ${cancelable ? 'Show run' : 'Fix PR'}` : '');
+    button.title = cancelable ? runForPr(key)?.status === 'needs-attention'
       ? 'Copilot task may still be active; show status and cancellation controls'
       : 'Show the active inline Copilot run for this PR' : 'Fix PR with Copilot in an isolated WSL worktree; output stays inline';
     button.setAttribute('aria-label', button.title);
@@ -1062,6 +1225,7 @@ function renderPr(p, meta) {
   if (!p.isMine) tags.push(`<span class="tag watch" title="${esc(p.author?.uniqueName || '')}">${avatar(p.author?.name)} ${esc(p.author?.name)}</span>`);
   if (p.error) tags.push(`<span class="tag err" title="${esc(p.error)}">load error</span>`);
   return `<div class="pr ${open ? 'open' : ''}" data-key="${esc(p.key)}" style="--c:${meta.c}">
+    <div class="id-cue" aria-hidden="true"><span><b>!${p.id} · </b><i>${esc(p.repo)}</i></span></div>
     <div class="row" data-act="toggle">
       <div class="c-pr" data-act="toggle" role="button" tabindex="0" aria-expanded="${open}">${svg('chev').replace('<svg', '<svg class="chev"')}
         <div class="prmain">
@@ -1080,15 +1244,16 @@ function renderPr(p, meta) {
 function renderDetail(p) {
   if (ignoredDraft(p)) return `<div class="detail"><div class="full">
     <p>Ignored draft: no attention notifications or automatic merge checks. Publish it in Azure DevOps or turn off Ignore draft PRs in Settings to resume monitoring.</p>
-    ${runsForPr(p.key).length ? renderRunCard(p.key) + earlierRunCards(p.key) : ''}
+    ${runsForPr(p.key).length ? runScopeNotice() + renderRunCard(p.key) + earlierRunCards(p.key) : ''}
     ${S.videos.has(p.key) ? renderVideo(p.key) : ''}
     </div></div>`;
   const left = [];
   const right = [];
   const full = [];
-  full.push(renderExplanation(p.key));
-  full.push(renderVideo(p.key));
-  full.push(renderRunCard(p.key) + earlierRunCards(p.key));
+  // Blockers and actionable runs lead; results, idle tools and finished runs follow the PR context.
+  const runGroup = renderRunCard(p.key) + earlierRunCards(p.key);
+  const lead = runLeads(p.key);
+  const trailing = [renderExplanation(p.key), renderVideo(p.key), ...(lead ? [] : [runGroup])];
 
   if (p.approval || S.approvals.has(p.key)) {
     const outcome = S.approvals.get(p.key);
@@ -1134,6 +1299,11 @@ function renderDetail(p) {
       ${fb.evaluationId ? `<button class="mini" data-act="requeue" data-eval="${esc(fb.evaluationId)}">${svg('play')} Re-queue</button>` : ''}
       <button class="mini" data-act="url" data-url="${esc(fb.url)}">${svg('ext')} Open logs</button></h3>${tasks}</div>`);
   }
+  if (lead) {
+    const blockers = leadBlockersCard(p);
+    if (blockers) full.push(blockers);
+    full.push(runGroup);
+  }
 
   left.push(`<div class="card"><h3>Description</h3><div class="body md clamp">${md(p.description)}</div></div>`);
 
@@ -1152,14 +1322,14 @@ function renderDetail(p) {
   // Right column: what's blocking
   const items = [
     ...(p.blockers || []).map((x) => ['fail', x]),
-    ...(p.humanActions || []).map((a) => ['human', { reviews: 'Human reviewer approval needed (+1)', pop: 'Proof of Presence — tap your security key', autocomplete: 'Auto-complete not set', publish: 'Draft — publish when ready' }[a] || a]),
+    ...(p.humanActions || []).map((a) => ['human', humanText(a)]),
     ...(p.waiting || []).map((x) => ['pending', x]),
   ];
   const fixActive = runActive(runForPr(p.key)), fixBusy = isBusy(p.key, 'triage');
   right.push(`<div class="card"><h3>Status <span class="grow"></span>
       <button class="mini ${fixActive ? 'running' : ''} ${fixBusy ? 'busy' : ''}" data-act="triage" ${fixBusy ? 'disabled' : ''} ${fixActive || fixBusy ? 'aria-busy="true"' : ''}>${svg(fixActive || fixBusy ? 'refresh' : 'spark')} ${runCancelable(runForPr(p.key)) ? 'Show run' : 'Fix PR'}</button>
       <button class="mini" data-act="copyPrompt">${svg('copy')} Copy prompt</button></h3>
-    <div class="body"><ul class="list blockers">${items.length ? items.map(([c, t]) => `<li><span class="dot ${c}"></span><span class="k">${esc(t)}</span></li>`).join('') : '<li><span class="dot ok"></span><span class="k">All gates satisfied</span></li>'}</ul></div></div>`);
+    <div class="body"><ul class="list blockers">${items.length ? items.map(([c, t]) => `<li><span class="dot ${c}"></span><span class="k">${esc(t)}</span></li>`).join('') : '<li><span class="dot ok"></span><span class="k">All gates satisfied</span></li>'}</ul>${runScopeNotice()}</div></div>`);
 
   const ac = autoCompleteDescription(p);
   right.push(`<div class="card"><h3>Merge <span class="grow"></span>
@@ -1203,7 +1373,7 @@ function renderDetail(p) {
       <span class="vote v${r.vote}">${vl[r.vote] ?? r.vote}</span></li>`).join('')}</ul></div></div>`);
   }
 
-  return `<div class="detail">${full.length ? `<div class="full stack">${full.join('')}</div>` : ''}<div class="stack">${left.join('')}</div><div class="stack">${right.join('')}</div></div>`;
+  return `<div class="detail" data-run-lead="${+lead}">${full.length ? `<div class="full stack">${full.join('')}</div>` : ''}<div class="stack">${left.join('')}</div><div class="stack">${right.join('')}</div><div class="full stack">${trailing.join('')}</div></div>`;
 }
 
 function formatLog(text, showTs) {
@@ -1269,7 +1439,7 @@ function openRowMenu(e) {
   if (e.target.closest('.detail, pre, a[href], input, textarea, select, [contenteditable="true"]')) return;
   const row = e.target.closest('.pr[data-key] .row');
   if (!row) return;
-  const p = findPr(row.closest('.pr').dataset.key);
+  const p = findShown(row.closest('.pr').dataset.key);
   if (!p) return;
   e.preventDefault();
   S.rowMenu = { key: p.key, id: p.id, title: p.title, repo: p.repo };
@@ -1339,7 +1509,7 @@ async function changeAutoComplete(p, enable) {
 }
 
 async function onAction(act, el, key) {
-  const p = key ? findPr(key) : null;
+  const p = key ? (['open', 'hide'].includes(act) ? findShown(key) : findPr(key)) : null;
   if (p && ignoredDraft(p) && !['toggle', 'open', 'hide', 'cancelRun', 'cancelExplanation', 'cancelVideo', 'copyVideoPath'].includes(act))
     throw new Error('Draft PRs are ignored. Publish in Azure DevOps or turn off Ignore draft PRs in Settings first.');
   switch (act) {
@@ -1439,8 +1609,20 @@ async function onAction(act, el, key) {
       await runAction(key, 'requeue', () => rpc('requeue', { key, evaluationId: el.dataset.eval }), 'Build re-queued');
       break;
     case 'triage':
+      // Launch only for an active PR; Cancel is a separate action and stays available for owned runs.
+      if (!p) return;
       S.expanded.add(key);
-      if (runCancelable(runForPr(key))) { renderRows(); break; }
+      if (runCancelable(runForPr(key))) {
+        renderRows();
+        // Reveal the exact live/uncertain run (status, Cancel, output) past any tall failed-gate logs.
+        const card = [...document.querySelectorAll('#rows .copilot-run:not(.run-earlier)')].find(c => c.dataset.runKey === key);
+        if (card) {
+          // Clear the sticky column header so the run status and Cancel stay visible and clickable.
+          card.style.scrollMarginTop = `${($('.thead')?.getBoundingClientRect().height || 0) + 8}px`;
+          card.scrollIntoView({ block: 'start' }); $('.run-output', card)?.focus({ preventScroll: true });
+        }
+        break;
+      }
       await runAction(key, 'triage', async () => {
         const r = await rpc('startCopilot', { key });
         updateCopilotRun(r);
@@ -1965,6 +2147,8 @@ function wire() {
     message.hidden = false;
   }, true);
   document.addEventListener('contextmenu', openRowMenu);
+  $('main').addEventListener('scroll', queueIdCues, { capture: true, passive: true });
+  window.addEventListener('resize', queueIdCues);
   const rowRegions = [rows, $('#runShelf')];
   for (const region of rowRegions) {
     region.addEventListener('pointerenter', () => { S.pointerInRows = true; });

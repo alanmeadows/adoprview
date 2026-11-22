@@ -180,8 +180,21 @@ real launch.
    unknown review-status waits stay Waiting;
    broken/failed automation stays Blocked. Optional reviewers with no vote do
    not create a requirement; rejecting / waiting-for-author votes stay Blocked.
-4. **Ready** — no outstanding actions or observed merge uncertainty
-   (auto-complete can complete when ADO's policies allow).
+   With nothing else outstanding (auto-complete set), the PR stays Waiting
+   with "Auto-complete is set; waiting for Azure DevOps to complete the PR."
+   The Ready enum value is kept for type stability but no longer assigned.
+
+**Completed** is a separate, read-only `completed` snapshot collection, not a
+lane of active PRs. Each full refresh makes one extra list call per repository
+(`status=completed`, `queryTimeRangeType=closed`, `minTime` 7 days ago,
+`$top=100`) and keeps watched (mine/whitelisted) matches by actual closed date.
+100 raw results add a "may be missing" warning; a denied, timed-out or
+malformed response (no `value` array) adds a repo-labeled "Completed history
+unavailable" warning instead of an error. A PR detail/re-check that reports
+completed with a closed date between the 7-day cutoff and now (invariant-culture
+wire format) moves it into history in the same snapshot, only while its repository
+and author are still watched; a terminal detail is recorded before any
+active-only enrichment, so a policy/thread failure cannot keep it active. Find, actions, notifications and the Fix shelf use active PRs only.
 
 The optional review bot is identified only by the configured `reviewBot`
 identity ID; its display name is a label. It applies only to PRs in its
@@ -295,8 +308,13 @@ older snapshot's hidden flag, determine row visibility after a restore.
   action grid reserves fixed +1 / Publish / PoP / Auto / Fix / Open slots even
   when a button is compact, busy, unavailable or absent. Buttons do not wrap,
   clip or shift neighboring actions.
-* Expanded row: rendered description · policy list · failed build log tails
-  (copy, open in ADO, re-queue) · unresolved threads · reviewers and votes.
+* Expanded row: approval/load error/failed build log tails (copy, open in ADO,
+  re-queue) first, then a live/uncertain/needs-attention Fix run, then
+  rendered description · Status (one Fix execution-scope notice) · policy list ·
+  unresolved threads · reviewers and votes, then Explain, video and
+  finished/not-started Fix runs. Cards update in place and move only on
+  existing deferred row renders. In narrow windows, a display-only pinned
+  `!id · repo` cue marks rows whose PR column is panned out of view.
   When a provider offers approval, the row also shows its action, optional
   provider link and the last outcome/error as text (kept in UI memory across
   refreshes).

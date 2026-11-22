@@ -5,7 +5,7 @@ to tell at a glance which PRs have finished all their machine validation and now
 only need a person to review, approve or finish them. ADO PR View is a small
 Windows app that shows your PRs, and those of people you choose to watch, in one
 table sorted by what they are waiting on: **Needs Human**, **Blocked**,
-**Waiting** or **Ready**.
+or **Waiting**. A **Completed** view lists watched PRs merged in the last 7 days.
 
 ![The default Light Mode dashboard: lane counters in the header, and one row per PR with its lane, gates and actions](docs/images/overview.png)
 
