@@ -13,6 +13,17 @@ installer (needs Inno Setup 6) and checksums. CI runs the native, frontend and
 install-guide tests on every push and pull request; pushing a `v<version>` tag
 that matches the project version and is on `main` publishes a release.
 
+Before tagging, update the project version and add `docs/releases/v<version>.md`
+with plain-language highlights and relevant privacy/validation caveats. Merge
+the preparation and any required review corrections through PRs first. Pin the
+intended `main` commit, then push its matching new tag; never reuse a published
+tag. The Release workflow reads curated notes from that tag, adds installation
+guidance and GitHub-generated merged-PR notes with a full compare link starting
+at the latest published release. It publishes only after package/smoke checks
+and uploaded-asset checksum/digest readback succeed. Existing releases (including
+drafts) are rejected, not overwritten. An existing unreleased tag can be retried
+using the Release workflow's `tag` dispatch input after inspecting live state.
+
 Dev flags: `--mock` (fixture data), `--screenshot out.png [--size WxH] [--eval js] [--eval-wait ms]`.
 
 The pinned `GitHub.Copilot.SDK` package downloads and verifies its matching
