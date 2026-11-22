@@ -1349,6 +1349,24 @@ test('real row hit testing and action identity across refreshes', { timeout: 900
       await frame(); await frame();
       assert.deepEqual([await lead(), await runs(), await evaluate('S.runRelocations.size')], ['1', ['sel-new', 'sel-old'], 0],
         'The group moves once the selection clears');
+      // A history-only snapshot (identical active PRs) must not rebuild active rows under a held failed-log selection.
+      await select(`#rows [data-key="${key}"] pre.log[data-log]`, `#rows [data-key="${key}"] pre.log[data-log]`);
+      const chip = () => evaluate(`document.querySelector('[data-lane="completed"] .n').textContent`);
+      const before = +(await chip());
+      await evaluate(`window.selLog=document.querySelector('#rows [data-key="${key}"] pre.log[data-log]');
+        setSnapshot({...S.snap,revision:(S.snap.revision||0)+1,completedWarnings:['Synthetic history warning'],
+          completed:[{key:'history-only:1',id:1,title:'History only',url:'https://example.invalid/1',org:'o',project:'p',repo:S.snap.prs[0].repo,
+            repoId:'r',author:'a',isMine:true,isHidden:false,closed:new Date().toISOString(),closedBy:null},...(S.snap.completed||[])]});
+        updateCopilotRun({...S.runs.get('sel-new'),output:S.runs.get('sel-new').output+'live\\n',outputOffset:S.runs.get('sel-new').outputOffset+5,revision:4});`);
+      await frame();
+      assert.deepEqual([await intact(), await evaluate('window.selLog.isConnected && !S.pendingSnapshot && !S.rowsPending'), +(await chip())],
+        [true, true, before + 1], 'History-only snapshot updates the Completed count without rebuilding the selected active row');
+      assert.match(await evaluate(`document.querySelector('#rows [data-key="${key}"] .copilot-run[data-run-id="sel-new"] .run-output').textContent`), /live/,
+        'Run output keeps streaming while the unrelated selection is held');
+      await evaluate('window.getSelection().removeAllRanges()');
+      await click(await elementPoint('[data-lane="completed"]')); await frame();
+      assert.ok((await evaluate(`[...document.querySelectorAll('#rows > .pr')].map(r=>r.dataset.key)`)).includes('history-only:1'),
+        'The Completed lane shows the history change');
     });
 
     await t.test('layout narrow-window identity cue names the panned row without covering gates or actions', async () => {

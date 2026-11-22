@@ -63,6 +63,7 @@ const S = {
   reviewVotes: new Map(),
   autoCompleteErrors: new Map(),
   lastSig: '',
+  lastHistorySig: '',
   pendingSnapshot: null,
   pointerInRows: false,
   rowPointerDown: false,
@@ -249,8 +250,9 @@ function setSnapshot(snap) {
     ? sorted.map(p => p.key)
     : [...S.rowOrder.filter(key => byKey.has(key)), ...sorted.filter(p => !oldKeys.has(p.key)).map(p => p.key)];
   snap = { ...snap, prs: order.map(key => byKey.get(key)) };
-  const sig = JSON.stringify([snap.prs, snap.completed || [], snap.completedWarnings || []]);
-  const rowsChanged = sig !== S.lastSig || revision !== S.orderRevision;
+  // History-only changes rebuild rows only while the Completed lane shows them; elsewhere the header count updates.
+  const sig = JSON.stringify(snap.prs), historySig = JSON.stringify([snap.completed || [], snap.completedWarnings || []]);
+  const rowsChanged = sig !== S.lastSig || revision !== S.orderRevision || (S.lane === 'completed' && historySig !== S.lastHistorySig);
   // Keep the displayed row and its action target together until interaction ends.
   if (rowsChanged && rowsInUse()) {
     S.pendingSnapshot = snap;
@@ -274,6 +276,7 @@ function setSnapshot(snap) {
   S.rowOrder = order;
   S.orderRevision = revision;
   S.lastSig = sig;
+  S.lastHistorySig = historySig;
   renderHeader();
   if (rowsChanged) renderRows(true);
 }
