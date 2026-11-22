@@ -582,6 +582,10 @@ unclamped bottom still resumes when cleared. Each run keeps its own
 reading position across collapse, filtering and ordinary dashboard rerenders.
 Background changes to run-shelf cards wait while you interact with their
 cancellation controls; live output continues in the existing run panel.
+When a selection crosses the log into metadata in that same run card,
+background changes that would invalidate it wait. Safe log appends, metadata
+outside the selected range and other runs continue updating; queued changes
+flush after the selection and other row interaction end.
 If the bounded tail drops the text you were reading, its truncation notice and
 remaining beginning are shown instead of silently snapping to the latest text;
 the original supervised log remains available.

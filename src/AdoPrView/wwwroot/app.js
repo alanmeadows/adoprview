@@ -195,7 +195,7 @@ function rowsInUse() {
 }
 
 function flushRowUpdates() {
-  if (rowsInUse()) return;
+  if (rowsInUse() || crossRunOutputSelection()) return;
   if (S.pendingSnapshot) setSnapshot(S.pendingSnapshot);
   if (S.rowsPending) renderRows();
   renderStatus();
@@ -308,7 +308,7 @@ function renderRows(whenIdle = false) {
 }
 
 function renderRowsContent(whenIdle = false) {
-  if (S.rowPointerDown || (whenIdle && rowsInUse())) { S.rowsPending = true; renderStatus(); return; }
+  if (S.rowPointerDown || (whenIdle && (rowsInUse() || crossRunOutputSelection()))) { S.rowsPending = true; renderStatus(); return; }
   S.rowsPending = false;
   const vis = baseVisible();
   renderRunShelfContent();
@@ -544,6 +544,18 @@ function runOutputSelected(el) {
   return selection?.isCollapsed === false && (el.contains(selection.anchorNode) || el.contains(selection.focusNode));
 }
 
+function crossRunOutputSelection() {
+  const selection = window.getSelection();
+  if (selection?.isCollapsed !== false) return null;
+  const anchor = selection.anchorNode;
+  const card = (anchor?.nodeType === 1 ? anchor : anchor?.parentElement)?.closest('.copilot-run');
+  if (!card?.contains(selection.focusNode)) return null;
+  const output = $('.run-output', card);
+  if (!output || (output.contains(anchor) && output.contains(selection.focusNode))) return null;
+  const range = selection.getRangeAt(0);
+  return range.intersectsNode(output) ? { card, output, range } : null;
+}
+
 function rememberRunOutputAnchor(view) {
   const el = view.element, node = el.firstChild;
   view.anchor = null;
@@ -649,6 +661,9 @@ function syncRunOutput(card) {
   const newPrefix = text.startsWith(notice) ? notice.length : 0;
   const removed = r.outputOffset - view.offset + before.length - oldPrefix - (text.length - newPrefix);
   const retentionMoved = newPrefix && Number.isSafeInteger(removed) && removed > 0;
+  if (crossRunOutputSelection()?.output === output && (retentionMoved || !text.startsWith(before))) {
+    S.rowsPending = true; renderStatus(); return;
+  }
   const selectionPaused = view.selectionPaused, topBeforeMutation = output.scrollTop;
   if (retentionMoved && !view.following) view.selectionPaused = false;
   if (text !== before || retentionMoved) {
@@ -716,7 +731,7 @@ function earlierRunCards(key) {
 // run entries here (unless hidden), only in the unfiltered view.
 function renderRunShelf(whenIdle = false) {
   if (!$('#runShelf')) return;
-  if (whenIdle && rowsInUse()) { S.rowsPending = true; renderStatus(); return; }
+  if (whenIdle && (rowsInUse() || crossRunOutputSelection()?.card.closest('#runShelf'))) { S.rowsPending = true; renderStatus(); return; }
   const selection = captureRunOutputs();
   renderRunShelfContent();
   restoreRunOutputs(selection);
@@ -764,7 +779,9 @@ function updateCopilotRun(r) {
     renderRows(true);
     return;
   }
-  const deferMain = !!main?.dataset.runId && main.dataset.runId !== latestId && rowsInUse();
+  const crossSelection = crossRunOutputSelection();
+  const deferMain = !!main?.dataset.runId && main.dataset.runId !== latestId &&
+    (rowsInUse() || crossSelection?.card.dataset.runKey === r.key);
   if (deferMain) { S.rowsPending = true; renderStatus(); }
   else if (main && promoted && main !== promoted) {
     const selection = captureRunOutputs();
@@ -799,11 +816,18 @@ function updateCopilotRun(r) {
     const previousView = S.runOutputs.get(card.dataset.runId);
     if (previousView) rememberRunOutput(previousView);
     card.dataset.runId = r.runId;
-    $('.run-status', card).textContent = runSummary(r);
-    $('.run-worktree', card).textContent = runWorktreeText(r);
+    for (const [element, text] of [[$('.run-status', card), runSummary(r)], [$('.run-worktree', card), runWorktreeText(r)]]) {
+      if (element.textContent === text) continue;
+      if (crossSelection?.card === card && crossSelection.range.intersectsNode(element)) {
+        S.rowsPending = true; renderStatus();
+      } else element.textContent = text;
+    }
     syncRunOutput(card);
     const cancel = $('[data-act="cancelRun"]', card);
-    cancel.hidden = !runCancelable(r);
+    const hidden = !runCancelable(r);
+    if (cancel.hidden !== hidden && crossSelection?.card === card && crossSelection.range.intersectsNode(cancel)) {
+      S.rowsPending = true; renderStatus();
+    } else cancel.hidden = hidden;
     cancel.disabled = isBusy(r.key, 'cancelRun');
     cancel.dataset.runId = r.runId;
   }
@@ -1819,6 +1843,7 @@ function wire() {
   };
   document.addEventListener('pointerup', endPointer, true);
   document.addEventListener('pointercancel', endPointer, true);
+  document.addEventListener('selectionchange', () => requestAnimationFrame(flushRowUpdates));
   window.addEventListener('blur', () => {
     closeRowMenu();
     S.pointerInRows = false;

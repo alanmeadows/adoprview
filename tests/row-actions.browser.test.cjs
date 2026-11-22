@@ -1541,6 +1541,90 @@ test('real row hit testing and action identity across refreshes', { timeout: 900
       }
     });
 
+    const crossLogSelectionFixture = async mode => {
+      await reset(true);
+      await evaluate(`{const key='sample-service-id:101',pr=S.snap.prs.find(p=>p.key===key),other=S.snap.prs.find(p=>p.id===104);
+        const output=Array.from({length:160},(_,n)=>'Cross-log synthetic line '+n+'\\n').join('');
+        S.runs.set('cross-selected-run',{...pr,runId:'cross-selected-run',status:'running',mayBeRunning:true,
+          startedAt:'2026-01-01T00:00:00Z',output,outputOffset:output.length,
+          worktreePath:'C:\\\\Synthetic\\\\selected',logPath:'C:\\\\Synthetic\\\\original.log',message:'Original run metadata'});
+        const independent='Independent run output\\n'.repeat(160);
+        S.runs.set('cross-independent-run',{...other,runId:'cross-independent-run',status:'running',mayBeRunning:true,
+          startedAt:'2026-01-01T00:00:00Z',output:independent,outputOffset:independent.length,message:'Original independent metadata'});
+        S.expanded.add(key);S.expanded.add(other.key);render();
+        window.crossRow=document.querySelector('#rows [data-key="'+key+'"]');
+        window.crossCard=window.crossRow.querySelector('.copilot-run');
+        window.crossOutput=window.crossCard.querySelector('.run-output');
+        window.crossText=window.crossOutput.firstChild;
+        window.crossWorktree=window.crossCard.querySelector('.run-worktree');
+        window.crossMetadataNode=window.crossWorktree.firstChild;
+        window.crossCancel=window.crossCard.querySelector('[data-act="cancelRun"]');
+        window.crossOutput.scrollTop=400;}`);
+      await move(10,10); await evaluate('document.activeElement?.blur()'); await frame();
+      const endpoints = mode === 'contained' ? 'window.crossText,600,window.crossText,626'
+        : mode === 'forward' ? 'window.crossMetadataNode,0,window.crossText,1000'
+          : 'window.crossText,1000,window.crossMetadataNode,0';
+      await evaluate(`window.getSelection().setBaseAndExtent(${endpoints});
+        window.crossSelected=window.getSelection().toString();window.crossTop=window.crossOutput.scrollTop;`);
+      await frame();
+      assert.equal(await evaluate('rowsInUse()'), false, 'Selection is not protected by pointer or keyboard-focus interaction');
+    };
+
+    await t.test('Fix output preserves cross-log selection during metadata updates and flushes only deferred mutations', async () => {
+      for (const mode of ['contained', 'forward', 'backward']) {
+        await crossLogSelectionFixture(mode);
+        await evaluate(`{const run=S.runs.get('cross-selected-run'),extra='Selection-safe append\\n';
+          updateCopilotRun({...run,output:run.output+extra,outputOffset:run.outputOffset+extra.length,
+            logPath:'C:\\\\Synthetic\\\\changed.log',message:'Current progress outside the selected range'});}`);
+        await frame();
+        assert.equal(await evaluate('window.getSelection().toString()'), await evaluate('window.crossSelected'));
+        assert.equal(await evaluate('window.crossOutput.firstChild===window.crossText'), true);
+        assert.equal(await evaluate('window.crossOutput.scrollTop'), await evaluate('window.crossTop'));
+        assert.match(await evaluate('window.crossOutput.textContent'), /Selection-safe append/);
+        assert.match(await evaluate('window.crossCard.querySelector(".run-status").textContent'), /Current progress outside/,
+          'Metadata outside the selected range still updates in place');
+        if (mode === 'contained') {
+          assert.match(await evaluate('window.crossWorktree.textContent'), /changed\.log/);
+          assert.equal(await evaluate('S.rowsPending'), false, 'Contained log selection does not defer unrelated metadata');
+        } else {
+          assert.equal(await evaluate('window.crossWorktree.firstChild===window.crossMetadataNode'), true);
+          assert.match(await evaluate('window.crossWorktree.textContent'), /original\.log/);
+          assert.equal(await evaluate('S.rowsPending'), true);
+        }
+        await evaluate(`{const run=S.runs.get('cross-independent-run'),extra='Independent live append\\n';
+          updateCopilotRun({...run,output:run.output+extra,outputOffset:run.outputOffset+extra.length,message:'Independent live metadata'});}`);
+        await frame();
+        assert.match(await evaluate('document.querySelector("[data-run-id=\\"cross-independent-run\\"] .run-output").textContent'), /Independent live append/);
+        assert.match(await evaluate('document.querySelector("[data-run-id=\\"cross-independent-run\\"] .run-status").textContent'), /Independent live metadata/);
+        assert.equal(await evaluate('window.crossCancel.isConnected && !window.crossCancel.disabled'), true);
+        assert.equal(await evaluate('window.crossCancel.dataset.runId'), 'cross-selected-run');
+        await evaluate('window.getSelection().removeAllRanges()'); await frame();
+        assert.equal(await evaluate('S.rowsPending'), false, 'Native selectionchange flushes the latest queued state');
+        assert.match(await evaluate('document.querySelector("[data-run-id=\\"cross-selected-run\\"] .run-worktree").textContent'), /changed\.log/);
+        assert.equal(await evaluate('document.querySelector("[data-run-id=\\"cross-selected-run\\"] .run-output")===window.crossOutput'), true);
+        assert.equal(await evaluate('window.crossOutput.scrollTop'), await evaluate('window.crossTop'));
+      }
+    });
+
+    await t.test('Fix output preserves cross-log selection through queued background row rerenders', async () => {
+      for (const mode of ['forward', 'backward']) {
+        await crossLogSelectionFixture(mode);
+        await evaluate(`setSnapshot({...S.snap,orderRevision:(S.snap.orderRevision||0)+1,
+          prs:S.snap.prs.map(p=>p.id===101?{...p,title:'Latest queued selected-row title'}:p)})`);
+        await frame();
+        assert.equal(await evaluate('window.getSelection().toString()'), await evaluate('window.crossSelected'));
+        assert.equal(await evaluate('document.querySelector("#rows [data-key=\\"sample-service-id:101\\"]")===window.crossRow'), true);
+        assert.equal(await evaluate('window.crossWorktree.firstChild===window.crossMetadataNode'), true);
+        assert.equal(await evaluate('window.crossOutput.scrollTop'), await evaluate('window.crossTop'));
+        assert.equal(await evaluate('S.rowsPending'), true);
+        await evaluate('window.getSelection().removeAllRanges()'); await frame();
+        assert.equal(await evaluate('S.rowsPending'), false);
+        assert.match(await evaluate('document.querySelector("#rows [data-key=\\"sample-service-id:101\\"] .title").textContent'), /Latest queued selected-row title/);
+        assert.equal(await evaluate('document.querySelector("[data-run-id=\\"cross-selected-run\\"] .run-output")===window.crossOutput'), true);
+        assert.equal(await evaluate('window.crossOutput.scrollTop'), await evaluate('window.crossTop'));
+      }
+    });
+
     await t.test('inline output streams without replacing rows, remains on captured PR through refresh/removal, and cancels that run', async () => {
       await send('Emulation.setDeviceMetricsOverride', { width: 1600, height: 1000, deviceScaleFactor: 1, mobile: false });
       await reset(true);
