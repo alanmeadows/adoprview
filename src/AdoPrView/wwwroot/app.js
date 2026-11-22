@@ -52,6 +52,7 @@ const S = {
   repo: '',
   q: '',
   logs: new Map(),          // logKey() -> text | Error | 'loading'
+  logLoads: new Set(),
   showTs: new Set(),
   busy: new Set(),          // "key:action"
   approvals: new Map(),    // key -> last approval provider outcome (never a credential)
@@ -877,7 +878,7 @@ function renderDetail(p) {
           ${t.logId != null ? (typeof log === 'string'
             ? `<button class="mini ${S.showTs.has(lk) ? 'on' : ''}" data-act="ts" data-log="${esc(lk)}">${svg('clock')} Timestamps</button>
                <button class="mini" data-act="copyLog" data-log="${esc(lk)}">${svg('copy')} Copy</button>`
-            : log === undefined ? `<button class="mini" data-act="loadLog" data-build="${fb.buildId}" data-logid="${t.logId}">Load log tail</button>` : '') : ''}
+            : log === undefined || log instanceof Error ? `<button class="mini" data-act="loadLog" data-build="${fb.buildId}" data-logid="${t.logId}" ${S.logLoads.has(lk) ? 'disabled aria-busy="true"' : ''}>${log instanceof Error ? 'Retry log tail' : 'Load log tail'}</button>` : '') : ''}
         </div>${issues}${logHtml}</div>`;
     }).join('') || '<div class="body small">No failed task records found in the timeline.</div>';
     full.push(`<div class="card failed"><h3>✕ Failed gate · ${esc(fb.name)} <span class="small">build ${fb.buildId}</span><span class="grow"></span>
@@ -978,13 +979,17 @@ async function loadLog(key, buildId, logId) {
   const p = findPr(key);
   if (!p) return;
   const lk = logKey(p, buildId, logId);
-  if (S.logs.get(lk) === 'loading') return;
-  S.logs.set(lk, 'loading');
+  if (S.logLoads.has(lk)) return;
+  S.logLoads.add(lk);
+  if (S.logs.get(lk) instanceof Error) renderRows(true);
+  else S.logs.set(lk, 'loading');
   try {
     const text = await rpc('logTail', { key, buildId, logId, lines: 200 });
     S.logs.set(lk, text || '(empty log)');
   } catch (e) {
     S.logs.set(lk, e);
+  } finally {
+    S.logLoads.delete(lk);
   }
   renderRows(true);
 }

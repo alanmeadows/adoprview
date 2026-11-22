@@ -749,6 +749,119 @@ test('real row hit testing and action identity across refreshes', { timeout: 900
       assert.equal(await evaluate(`document.querySelector('.pr').dataset.key`), 'sample-api-id:104');
     });
 
+    await t.test('GUI failed log Retry preserves errors, repeated failure, deduplication and task/PR isolation after refresh/reopen', async () => {
+      await reset(true);
+      const key = 'sample-service-id:101', other = 'sample-api-id:104';
+      const row = `[data-key="${key}"]`, otherRow = `[data-key="${other}"]`;
+      const selector = `${row} [data-act="loadLog"][data-build="9002"][data-logid="102"]`;
+      const task = `${row} .task:first-of-type`, additional = `${row} .task:last-of-type`;
+      await evaluate(`{
+        const snap=structuredClone(S.snap);
+        for(const pr of snap.prs){
+          pr.lane='blocked';pr.project=pr.key==='${key}'?'Sample':'Other';
+          pr.failedBuilds=[{buildId:9002,name:'Synthetic retry build',url:'https://example.invalid/build/9002',
+            tasks:[{logId:102,name:'Synthetic failed task',issues:[]},{logId:103,name:'Synthetic additional task',issues:[]}]}];
+        }
+        window.retryPrior=new Map();
+        for(const pr of snap.prs)for(const task of pr.failedBuilds[0].tasks){
+          const cache=logKey(pr,9002,task.logId);window.retryPrior.set(cache,S.logs.get(cache));S.logs.delete(cache);
+        }
+        window.logRpc=MockHost.rpc;window.retryCalls=[];window.releaseLogRetry=null;
+        MockHost.rpc=async(method,p)=>{
+          if(method==='logTail'){
+            window.retryCalls.push({method,...p});
+            if(p.key==='${key}'&&p.buildId===9002&&p.logId===102){
+              const attempt=window.retryCalls.filter(c=>c.key==='${key}'&&c.logId===102).length;
+              if(attempt===1)throw Error('Synthetic log HTTP 503 <transient>');
+              await new Promise(resolve=>window.releaseLogRetry=resolve);
+              window.releaseLogRetry=null;
+              if(attempt===2)throw Error('Synthetic log HTTP 503 again');
+              return '2026-11-21T10:00:00.123Z Recovered synthetic log tail\\n';
+            }
+            return 'Independent '+p.key+'/'+p.logId;
+          }
+          return window.logRpc(method,p);
+        };
+        setSnapshot(snap);
+      }`);
+      const idle = async () => {
+        await move(10, 10); await evaluate('document.activeElement?.blur()'); await frame();
+      };
+      const text = selector => evaluate(`document.querySelector(${JSON.stringify(selector)}).textContent`);
+      const reads = () => evaluate('window.retryCalls');
+      const reopen = async () => {
+        await click(await point(key, '.row .title')); await idle();
+        await click(await point(key, '.row .title')); await idle();
+      };
+      try {
+        await click(await point(key, '.row .title')); await idle();
+        await click(await point(other, '.row .title')); await idle();
+        assert.equal(await text(selector), 'Retry log tail');
+        assert.match(await text(task), /Synthetic log HTTP 503 <transient>/);
+        assert.match(await text(otherRow), /Independent sample-api-id:104\/102/);
+        assert.equal(await text(`${additional} [data-act="loadLog"]`), 'Load log tail');
+        await click(await elementPoint('#refreshBtn')); await idle();
+        await reopen();
+        assert.equal((await reads()).length, 2, 'Refresh/reopen does not automatically retry or reset other logs');
+        assert.equal(await text(selector), 'Retry log tail');
+
+        await click(await elementPoint(selector)); await frame();
+        await click(await elementPoint(selector)); await frame();
+        assert.equal((await reads()).filter(c => c.key === key && c.logId === 102).length, 2);
+        assert.match(await text(task), /Synthetic log HTTP 503 <transient>/);
+        await idle();
+        assert.equal(await evaluate(`document.querySelector(${JSON.stringify(selector)}).disabled`), true);
+        assert.equal(await evaluate(`document.querySelector(${JSON.stringify(selector)}).getAttribute('aria-busy')`), 'true');
+        await click(await elementPoint('#refreshBtn')); await idle();
+        await reopen();
+        assert.match(await text(task), /Synthetic log HTTP 503 <transient>/);
+        assert.equal(await evaluate(`document.querySelector(${JSON.stringify(selector)}).disabled`), true);
+        await click(await elementPoint(selector)); await idle();
+        assert.equal((await reads()).filter(c => c.key === key && c.logId === 102).length, 2);
+        await click(await elementPoint(`${additional} [data-act="loadLog"]`)); await idle();
+        assert.match(await text(additional), /Independent sample-service-id:101\/103/);
+        assert.match(await text(otherRow), /Independent sample-api-id:104\/102/);
+        await evaluate('window.releaseLogRetry()'); await idle();
+        assert.match(await text(task), /Synthetic log HTTP 503 again/);
+        assert.equal(await text(selector), 'Retry log tail');
+        assert.equal(await evaluate(`document.querySelector(${JSON.stringify(selector)}).disabled`), false);
+
+        await evaluate(`document.querySelector(${JSON.stringify(selector)}).focus()`);
+        await keyboard('Enter', 13); await idle();
+        assert.match(await text(task), /Synthetic log HTTP 503 again/);
+        await evaluate('window.releaseLogRetry()'); await idle();
+        assert.match(await text(task), /Recovered synthetic log tail/);
+        assert.doesNotMatch(await text(task), /Synthetic log HTTP 503|Retry log tail/);
+        assert.match(await text(additional), /Independent sample-service-id:101\/103/);
+        assert.match(await text(otherRow), /Independent sample-api-id:104\/102/);
+        await click(await elementPoint(`${task} [data-act="copyLog"]`)); await idle();
+        assert.equal((await calls()).filter(c => c.method === 'copy').at(-1).text, 'Recovered synthetic log tail\n');
+        await click(await elementPoint(`${task} [data-act="ts"]`)); await idle();
+        assert.match(await text(`${task} pre.log`), /10:00:00\.123/);
+        await click(await elementPoint(`${task} [data-act="copyLog"]`)); await idle();
+        assert.equal((await calls()).filter(c => c.method === 'copy').at(-1).text,
+          '2026-11-21T10:00:00.123Z Recovered synthetic log tail\n');
+        await click(await elementPoint(`${row} .card.failed [data-act="url"]`)); await idle();
+        assert.deepEqual((await calls()).filter(c => c.method === 'openUrl').at(-1),
+          {method:'openUrl',url:'https://example.invalid/build/9002'});
+        await click(await elementPoint('#refreshBtn')); await idle(); await reopen();
+        assert.match(await text(task), /Recovered synthetic log tail/);
+        assert.deepEqual(await reads(), [
+          {method:'logTail',key,buildId:9002,logId:102,lines:200},
+          {method:'logTail',key:other,buildId:9002,logId:102,lines:200},
+          {method:'logTail',key,buildId:9002,logId:102,lines:200},
+          {method:'logTail',key,buildId:9002,logId:103,lines:200},
+          {method:'logTail',key,buildId:9002,logId:102,lines:200},
+        ]);
+        t.diagnostic('Exact logTail counts: target 102=3 (503,503,success), target 103=1, other-project 102=1; lines=200 throughout. Mouse and keyboard Retry, Refresh/reopen, visible errors, busy state, timestamps/copy/open all asserted.');
+      } finally {
+        await evaluate('window.releaseLogRetry?.()'); await idle();
+        assert.equal(await evaluate('S.logLoads.size'), 0, 'No owned log request remains in flight');
+        await evaluate(`MockHost.rpc=window.logRpc;
+          for(const [cache,prior] of window.retryPrior)if(prior===undefined)S.logs.delete(cache);else S.logs.set(cache,prior);`);
+      }
+    });
+
     await t.test('automatic log loading above another targeted row cannot move its link under the pointer', async () => {
       await reset();
       await evaluate(`(()=>{

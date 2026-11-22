@@ -36,7 +36,7 @@ function setup(search = '?mock=1') {
   });
   vm.runInContext(themeSource, context);
   context.AppTheme = window.AppTheme;
-  vm.runInContext(source + '\nglobalThis.hooks = { S, onHostMessage, onAction, actionButtons, renderDetail, setSnapshot, flushRowUpdates, renderHeader, renderRows, undoHide, baseVisible, updateCopilotRun, renderRunShelf, runForPr, runActive, onDrawerAction, loadApprovalSettings, renderDrawer, renderExplanation, updateExplanation, explanationBody, renderVideo, updateVideo, videoContent, openSpeechSetup, onSpeechAction, closeSpeechSetup, changeTheme, applySavedTheme };', context);
+  vm.runInContext(source + '\nglobalThis.hooks = { S, onHostMessage, onAction, actionButtons, renderDetail, setSnapshot, flushRowUpdates, renderHeader, renderRows, undoHide, baseVisible, updateCopilotRun, renderRunShelf, runForPr, runActive, onDrawerAction, loadApprovalSettings, renderDrawer, renderExplanation, updateExplanation, explanationBody, renderVideo, updateVideo, videoContent, openSpeechSetup, onSpeechAction, closeSpeechSetup, changeTheme, applySavedTheme, loadLog, logKey };', context);
   const { hooks } = context;
   const pr = {
     key: 'repo:123', id: 123, repo: 'sample-service', title: 'Offline PR',
@@ -1325,6 +1325,77 @@ test('recovered sessions keep independent history, recovered spinner and origina
   await hooks.onAction('cancelRun', { dataset: { runId: recovered.runId } }, pr.key);
   assert.equal(hooks.runForPr(pr.key).status, 'cancelled');
   assert.equal(hooks.S.runs.get(old.runId).status, 'completed');
+});
+
+test('failed inline log Retry retains errors across refresh/reopen, deduplicates and recovers only its exact task', async () => {
+  const { hooks, pr, window, context } = setup();
+  const build = { buildId: 9002, name: 'Synthetic CI', url: 'https://example.invalid/build/9002',
+    tasks: [{ name: 'Failed task', logId: 102, issues: [] }, { name: 'Additional task', logId: 103, issues: [] }] };
+  const a = { ...pr, failedBuilds: [build] };
+  const b = { ...pr, key: 'other:123', project: 'Other', failedBuilds: [build] };
+  hooks.S.snap.prs = [a, b];
+  const calls = [], key = hooks.logKey(a, 9002, 102);
+  const firstError = vm.runInContext('new Error("Synthetic log HTTP 503 <transient>")', context);
+  const nextError = vm.runInContext('new Error("Synthetic log HTTP 503 again")', context);
+  const recovered = '2026-11-21T10:00:00.123Z Recovered synthetic log tail\n';
+  let rejectRetry;
+  window.MockHost.rpc = (method, p) => {
+    calls.push({ method, ...p });
+    if (method !== 'logTail') return Promise.resolve();
+    if (p.key === b.key || p.logId === 103) return Promise.resolve(`Independent ${p.key}/${p.logId}`);
+    const count = calls.filter(c => c.method === 'logTail' && c.key === a.key && c.logId === 102).length;
+    if (count === 1) return Promise.reject(firstError);
+    if (count === 2) return new Promise((_, reject) => { rejectRetry = reject; });
+    return Promise.resolve(recovered);
+  };
+  hooks.renderDetail(a);
+  hooks.renderDetail(b);
+  await new Promise(resolve => setImmediate(resolve));
+  assert.match(hooks.renderDetail(a), /Synthetic log HTTP 503 &lt;transient&gt;/);
+  assert.match(hooks.renderDetail(a), /data-build="9002" data-logid="102"[^>]*>Retry log tail/);
+  assert.match(hooks.renderDetail(a), /data-logid="103"[^>]*>Load log tail/);
+  const otherKey = hooks.logKey(b, 9002, 102), otherContent = hooks.S.logs.get(otherKey);
+  const retry = hooks.loadLog(a.key, 9002, 102);
+  await hooks.loadLog(a.key, 9002, 102);
+  hooks.setSnapshot({ ...hooks.S.snap, orderRevision: 1 });
+  hooks.S.expanded.delete(a.key);
+  hooks.renderRows();
+  hooks.S.expanded.add(a.key);
+  hooks.renderRows();
+  assert.equal(hooks.S.logs.get(key), firstError);
+  assert.match(hooks.renderDetail(a), /Synthetic log HTTP 503 &lt;transient&gt;/);
+  assert.match(hooks.renderDetail(a), /data-logid="102" disabled aria-busy="true">Retry log tail/);
+  assert.equal(calls.filter(c => c.key === a.key && c.logId === 102).length, 2);
+  await hooks.loadLog(a.key, 9002, 103);
+  assert.equal(hooks.S.logs.get(otherKey), otherContent);
+  assert.match(hooks.renderDetail(a), /Independent repo:123\/103/);
+  rejectRetry(nextError);
+  await retry;
+  assert.match(hooks.renderDetail(a), /Synthetic log HTTP 503 again/);
+  assert.match(hooks.renderDetail(a), /data-logid="102"\s*>Retry log tail/);
+  assert.equal(hooks.S.logLoads.size, 0);
+  await hooks.loadLog(a.key, 9002, 102);
+  const html = hooks.renderDetail(a);
+  assert.match(html, /Recovered synthetic log tail/);
+  assert.doesNotMatch(html, /Synthetic log HTTP 503|Retry log tail/);
+  assert.match(html, /Timestamps/);
+  assert.match(html, /Copy/);
+  assert.match(html, /Open logs/);
+  await hooks.onAction('copyLog', { dataset: { log: key } }, a.key);
+  assert.equal(calls.at(-1).text, 'Recovered synthetic log tail\n');
+  await hooks.onAction('ts', { dataset: { log: key } }, a.key);
+  assert.match(hooks.renderDetail(a), /10:00:00\.123/);
+  await hooks.onAction('copyLog', { dataset: { log: key } }, a.key);
+  assert.equal(calls.at(-1).text, recovered);
+  assert.deepEqual(calls.filter(c => c.method === 'logTail'), [
+    { method: 'logTail', key: a.key, buildId: 9002, logId: 102, lines: 200 },
+    { method: 'logTail', key: b.key, buildId: 9002, logId: 102, lines: 200 },
+    { method: 'logTail', key: a.key, buildId: 9002, logId: 102, lines: 200 },
+    { method: 'logTail', key: a.key, buildId: 9002, logId: 103, lines: 200 },
+    { method: 'logTail', key: a.key, buildId: 9002, logId: 102, lines: 200 },
+  ]);
+  assert.equal(hooks.S.logs.get(otherKey), otherContent);
+  assert.equal(hooks.S.logs.size, 3);
 });
 
 test('failed-build log tails with equal build and log ids stay separate per organization and project', async () => {
