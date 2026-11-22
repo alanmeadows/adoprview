@@ -1243,7 +1243,8 @@ test('real row hit testing and action identity across refreshes', { timeout: 900
           const targets=[...row.querySelectorAll('.row .title,.row .meta,.row .pill,.row .act')].filter(e=>visible(e.getBoundingClientRect()));
           const overlap=shown&&targets.some(e=>{const r=e.getBoundingClientRect();
             return Math.min(r.right,c.right)-Math.max(r.left,c.left)>0&&Math.min(r.bottom,c.bottom)-Math.max(r.top,c.top)>0;});
-          const misses=targets.filter(e=>{const r=e.getBoundingClientRect(),x=r.left+r.width/2,y=r.top+r.height/2;
+          // Disabled/busy actions are intentionally pointer-events:none, so they cannot hit themselves.
+          const misses=targets.filter(e=>getComputedStyle(e).pointerEvents!=='none').filter(e=>{const r=e.getBoundingClientRect(),x=r.left+r.width/2,y=r.top+r.height/2;
             if(x<left||x>right||y<=headBottom||y>bottom)return false;const hit=document.elementFromPoint(x,y);
             return !hit||(hit!==e&&!e.contains(hit));}).map(e=>{const r=e.getBoundingClientRect(),hit=document.elementFromPoint(r.left+r.width/2,r.top+r.height/2);
             return e.className+'@'+Math.round(r.left+r.width/2)+','+Math.round(r.top+r.height/2)+'->'+(hit?(hit.id||hit.className||hit.tagName):'none');});
