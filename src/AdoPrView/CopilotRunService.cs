@@ -850,11 +850,11 @@ public sealed partial class CopilotRunService : IAsyncDisposable
         }
     }
 
-    void Append(Entry e, string text, bool stderr, bool history = false)
+    void Append(Entry e, string text, bool stderr, bool history = false, CancellationToken token = default)
     {
         lock (e.OutputGate)
         {
-            if (e.Detaching || !history && e.Cancellation.IsCancellationRequested) return;
+            if (e.Detaching || token.IsCancellationRequested || !history && e.Cancellation.IsCancellationRequested) return;
             var clean = (stderr ? e.StderrFilter : e.StdoutFilter).Filter(text);
             if (clean.Length == 0) return;
             e.Output.Append(clean);

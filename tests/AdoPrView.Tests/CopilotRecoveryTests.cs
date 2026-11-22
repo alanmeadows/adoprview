@@ -23,6 +23,48 @@ static class CopilotRecoveryTests
 
     public static async Task Run(Func<string, Func<Task>, Task> test)
     {
+        await test("Copilot admitted recovery callback cannot append after Stop", async () =>
+        {
+            using var f = new Fixture();
+            await using var first = f.Service();
+            var run = await first.StartAsync(Request());
+            await Wait(first, run.RunId, s => s.Output.Contains("FAKE-READY"));
+            f.Transport.End(1);
+            await Wait(first, run.RunId, s => s.Status == "failed");
+            await first.DisposeAsync();
+            var saved = f.Store.Load().Single().Saved!;
+            f.Store.Write(saved with { State = saved.State with { Status = "needs-attention", ResumeAttempts = 1 } });
+            f.Transport.BlockHistory = true;
+            await using var recovered = f.Service();
+            var recovery = recovered.RecoverAsync();
+            Task<CopilotRunState?>? stop = null;
+            try
+            {
+                await f.Transport.HistoryEntered.Task.WaitAsync(TimeSpan.FromSeconds(3));
+                var outer = f.Transport.HistoryReaders.Single();
+                // Model a callback admitted by Invoke before Stop, but delayed before acquiring the output lock.
+                var admitted = outer.Target?.GetType().GetField("stdout",
+                    System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.Public |
+                    System.Reflection.BindingFlags.NonPublic)?.GetValue(outer.Target) as Action<string>
+                    ?? throw new Exception("Fixture could not capture the production stdout delegate after admission");
+                stop = recovered.CancelAsync(run.Key, run.RunId);
+                var final = await stop.WaitAsync(TimeSpan.FromSeconds(3))
+                    ?? throw new Exception("Stop returned no recovered run");
+                admitted("ALREADY-ADMITTED-HISTORY\n");
+                var after = recovered.Get(run.RunId)!;
+                Check(after.Output == final.Output && after.OutputOffset == final.OutputOffset &&
+                    after.ExitCode == 1 && !after.MayBeRunning && f.Transport.HistoryReaders.Count == 1 &&
+                    f.Transport.Launches == 1 && f.Transport.Stops == 0 &&
+                    f.Store.Load().Single().Saved!.TaskConfirmedStopped,
+                    "Already-admitted history callback changed retained output after Stop returned");
+            }
+            finally
+            {
+                f.Transport.ReleaseHistory.TrySetResult();
+                await recovery.WaitAsync(TimeSpan.FromSeconds(3));
+                if (stop is not null) await stop.WaitAsync(TimeSpan.FromSeconds(3));
+            }
+        });
         foreach (var recoveredRun in new[] { false, true })
             foreach (var stop in new[] { true, false })
                 await test($"Copilot completed cleanup {(recoveredRun ? "recovered" : "normal")} {(stop ? "Stop" : "disposal")} stays bounded", async () =>

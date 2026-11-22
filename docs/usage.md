@@ -659,6 +659,9 @@ Completed-run cleanup also observes Stop and dashboard detachment. Interrupted
 cleanup retains the verified completed outcome and reports a cleanup warning;
 an abandoned late reply cannot mark the worktree removed. Normal cleanup keeps
 its existing ownership, publication and execution-lock checks.
+Recovery callbacks recheck their individual replay lifetime inside the output
+lock. A callback admitted before Stop cannot append afterward; replay closure
+also rejects deferred callbacks without resetting output accounting.
 
 Output uses a grow-on-demand tail buffer with the same retained-output limit,
 so empty or short saved histories do not each reserve the maximum buffer.

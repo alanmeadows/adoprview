@@ -270,6 +270,11 @@ held fake cleanup transport ignoring cancellation. Captured native Stop and
 disposal must finish within three seconds without changing exit/output/offset,
 relaunching, stopping an exited task or accepting a late `REMOVED` reply.
 The cleanup transport is always released; no real worktree removal is attempted.
+`Copilot admitted recovery callback` captures the actual inner production stdout
+delegate to model admission before the outer Invoke fence closes, then invokes
+it after Stop. Output/offset/exit/proof must remain unchanged. This is a
+deterministic admitted-callback logic fixture, not an actual scheduler race or
+displayed browser proof.
 
 The smaller kernel-control opt-in executes the exact production runner in an
 explicitly selected, already-responsive WSL distribution:
