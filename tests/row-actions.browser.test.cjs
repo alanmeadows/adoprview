@@ -335,6 +335,7 @@ test('real row hit testing and action identity across refreshes', { timeout: 900
       await evaluate(`document.activeElement?.blur();window.getSelection().removeAllRanges();`);
       await frame();
       await evaluate(`S.expanded.clear();S.lane=null;S.repo='';S.q='';S.scope='all';
+        document.querySelector('#search').value='';
         S.rowOrder=[];S.orderRevision=null;S.laneRetained.clear();S.runs.clear();S.busy.clear();closeRowMenu();
         window.holdLog=false;S.settings.hidden=['sample-deploy-id:1001'];S.settings.ignoreDrafts=false;S.hideUndo=[];
         window.confirmations=[];window.confirmResult=true;window.autoFailure=false;S.autoCompleteErrors.clear();
@@ -559,6 +560,43 @@ test('real row hit testing and action identity across refreshes', { timeout: 900
           assert.equal(await evaluate('window.explainSlot.requestId'), 'synthetic-explain-3');
           assert.equal((await calls()).filter(c => c.method === 'cancelExplanation').length, 2);
           await measure('replacement');
+        });
+        await t.test('restored preparing Explain hydrates identity without replacing its Cancel or output', async () => {
+          await reset(true);
+          await evaluate(`S.snap={prs:[]};S.lastSig='';
+            updateExplanation({key:'${key}',requestId:'synthetic-restored',sequence:1,status:'preparing',
+              message:'Restored synthetic preparation',output:'Restored partial output',coverage:[]});renderRows();
+            window.restoredCancel=document.querySelector('#explanationShelf [data-act="cancelExplanation"]');
+            window.restoredOutput=document.querySelector('#explanationShelf .explain-output');`);
+          assert.match(await evaluate("document.querySelector('.explanation-identity').textContent"), /sample-service-id:101/);
+          await evaluate(`updateExplanation({...S.explanations.get('${key}'),sequence:2,status:'running',
+            revision:{repo:'sample-service',id:101,iteration:4,sourceCommit:'a'.repeat(40),baseCommit:'b'.repeat(40)}});`);
+          assert.match(await evaluate("document.querySelector('.explanation-identity').textContent"), /sample-service !101/);
+          await evaluate('setSnapshot(structuredClone(window.baseline));renderRows();');
+          assert.match(await evaluate("document.querySelector('.explanation-identity').textContent"),
+            /sample-service !101: Add per-cluster health probe/);
+          await evaluate(`window.restoredCancel.focus();
+            updateExplanation({...S.explanations.get('${key}'),sequence:3,status:'running',
+              revision:{repo:'sample-service',id:101,iteration:4,sourceCommit:'a'.repeat(40),baseCommit:'b'.repeat(40)}});`);
+          assert.equal(await evaluate("window.restoredCancel===document.querySelector('#explanationShelf [data-act=\"cancelExplanation\"]')"), true);
+          assert.equal(await evaluate("window.restoredOutput===document.querySelector('#explanationShelf .explain-output')"), true);
+          assert.equal(await evaluate('document.activeElement===window.restoredCancel'), true);
+          await measure('restored-identity');
+        });
+        await t.test('retained Explain focusout flushes the latest queued snapshot for Cancel and output', async () => {
+          for (const selector of ['[data-act="cancelExplanation"]', '.explain-output']) {
+            await setup();
+            await evaluate(`setSnapshot({...S.snap,prs:S.snap.prs.filter(p=>p.key!=='${key}')});renderRows();
+              document.querySelector('#explanationShelf ${selector}').focus();
+              setSnapshot({...S.snap,orderRevision:(S.snap.orderRevision||0)+1,
+                prs:S.snap.prs.map(p=>({...p,title:'New synthetic current title'}))});`);
+            assert.equal(await evaluate('!!S.pendingSnapshot'), true);
+            assert.notEqual(await evaluate('S.snap.prs[0].title'), 'New synthetic current title');
+            await evaluate("document.querySelector('#search').focus()");
+            await frame();
+            assert.equal(await evaluate('S.pendingSnapshot'), null);
+            assert.equal(await evaluate('S.snap.prs[0].title'), 'New synthetic current title');
+          }
         });
         await t.test('AC4: return has no duplicate, exact Cancel focus transfers, terminal cleanup preserves inline output', async () => {
           for (const status of ['completed', 'cancelled', 'failed']) {

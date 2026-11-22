@@ -523,10 +523,6 @@ function updateExplanation(r) {
     throw new Error('Copilot returned an invalid explanation state.');
   const old = S.explanations.get(r.key);
   if (old && r.sequence <= old.sequence) return;
-  if (!S.explanationPrs.has(r.key)) {
-    const p = findPr(r.key);
-    if (p) S.explanationPrs.set(r.key, { id: p.id, repo: p.repo, title: p.title });
-  }
   S.explanations.set(r.key, r);
   // Streaming only mutates this panel, preserving neighboring action targets and focus.
   for (const card of document.querySelectorAll('.explanation')) {
@@ -556,6 +552,15 @@ function updateExplanation(r) {
   renderExplanationShelf();
 }
 
+function explanationIdentity(r) {
+  if (!S.explanationPrs.has(r.key)) {
+    const p = findPr(r.key);
+    if (p) S.explanationPrs.set(r.key, { id: p.id, repo: p.repo, title: p.title });
+  }
+  const p = S.explanationPrs.get(r.key) || r.revision;
+  return `Explain for ${p?.repo || r.key}${p?.id ? ` !${p.id}` : ''}${p?.title ? `: ${p.title}` : ''} outside the expanded view`;
+}
+
 function renderExplanationShelf() {
   const shelf = $('#explanationShelf');
   if (!shelf) return;
@@ -566,14 +571,12 @@ function renderExplanationShelf() {
     if (missing.has(entry.dataset.key)) missing.delete(entry.dataset.key);
     else entry.remove();
   }
-  shelf.insertAdjacentHTML('beforeend', outside.filter(r => missing.has(r.key)).map(r => {
-    const p = S.explanationPrs.get(r.key) || r.revision;
-    return `<div class="pr explanation-only" data-key="${esc(r.key)}"><div class="detail"><div class="full">
-      <p class="small">Explain for ${esc(p?.repo || r.key)} !${esc(p?.id || '')}${p?.title ? `: ${esc(p.title)}` : ''} outside the expanded view</p>
-      ${renderExplanation(r.key)}</div></div></div>`;
-  }).join(''));
+  shelf.insertAdjacentHTML('beforeend', outside.filter(r => missing.has(r.key)).map(r => `<div class="pr explanation-only" data-key="${esc(r.key)}"><div class="detail"><div class="full">
+    <p class="small explanation-identity">${esc(explanationIdentity(r))}</p>
+    ${renderExplanation(r.key)}</div></div></div>`).join(''));
   for (const card of shelf.querySelectorAll('.explanation')) {
     const key = card.dataset.explainKey;
+    $('.explanation-identity', card.closest('.explanation-only')).textContent = explanationIdentity(S.explanations.get(key));
     for (const action of ['explainPr', 'askPr', 'lensPr']) {
       $('[data-act="' + action + '"]', card).disabled = !canExplain(key) ||
         action === 'explainPr' && (explanationActive(S.explanations.get(key)) || isBusy(key, action));
@@ -2196,7 +2199,7 @@ function wire() {
   document.addEventListener('contextmenu', openRowMenu);
   $('main').addEventListener('scroll', queueIdCues, { capture: true, passive: true });
   window.addEventListener('resize', queueIdCues);
-  const rowRegions = [rows, $('#runShelf')];
+  const rowRegions = [rows, $('#runShelf'), $('#explanationShelf')];
   for (const region of rowRegions) {
     region.addEventListener('pointerenter', () => { S.pointerInRows = true; });
     region.addEventListener('pointerleave', e => {
