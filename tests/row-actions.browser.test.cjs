@@ -1403,11 +1403,16 @@ test('real row hit testing and action identity across refreshes', { timeout: 900
         window.selRow===document.querySelector('#rows [data-key="${key}"]') && s.toString().startsWith('Synthetic selectable prose for ${key}') && s.toString().trimEnd().endsWith('Recovered')}`),
         await lead(), await runs(), await evaluate(`S.runRelocations.has('${key}')`)], [true, '0', ['sel-new', 'sel-old', 'sel-rec'], true],
         'Promotion of a recovered run waits while a selection endpoint sits in its card');
+      // A queued full-row render (idle render, then flush) must not rebuild under the held relocation.
+      assert.deepEqual(await evaluate(`renderRows(true); flushRowUpdates();
+        [S.rowsPending, S.runRelocations.has('${key}'), window.selNodes.every(n=>n.isConnected), window.recCard.isConnected,
+          window.getSelection().getRangeAt(0).endContainer===window.selNodes[1]]`), [true, true, true, true, true],
+        'Full row render stays deferred while a selection holds a run relocation');
       await evaluate('window.getSelection().removeAllRanges()');
       await frame(); await frame();
-      assert.deepEqual([await lead(), await runs(), await evaluate('S.runRelocations.size'),
-        await evaluate(`window.recCard.isConnected && !window.recCard.classList.contains('run-earlier') && window.selNodes[1].isConnected`)],
-        ['1', ['sel-rec', 'sel-new', 'sel-old'], 0, true], 'The same recovered card leads once the selection clears');
+      assert.deepEqual([await lead(), await runs(), await evaluate('[S.runRelocations.size, S.rowsPending]'),
+        await evaluate(`[...document.querySelectorAll('#rows [data-key="${key}"] .copilot-run:not(.run-earlier)')].map(c=>c.dataset.runId)`)],
+        ['1', ['sel-rec', 'sel-new', 'sel-old'], [0, false], ['sel-rec']], 'The recovered run leads and the deferred render applies once the selection clears');
     });
 
     await t.test('layout narrow-window identity cue names the panned row without covering gates or actions', async () => {

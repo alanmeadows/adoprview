@@ -813,6 +813,20 @@ static class MergeChecksTests
             }
         });
 
+        await test("completed history: a listed dated completion beats a failed active detail but never an obtained active detail", async () =>
+        {
+            using var f = new Fixture();
+            var failed = f.Add(); var live = f.Add(id: 2);
+            f.FailPrs.Add(failed.Key);
+            // The list saw both complete while the active reads still saw them active.
+            var closed = new[] { failed, live }.Select(p => { var c = new PullRequest(p.Repo, p.Id) { Status = "completed", Closed = "2026-10-31T00:00:00Z" }; return c.Json(); }).ToArray();
+            f.CompletedResponse = (new JsonObject { ["value"] = new JsonArray(closed) }.ToJsonString(), HttpStatusCode.OK);
+            await f.Service.RefreshAsync();
+            var s = f.Service.Current;
+            Check(s.Prs.Select(x => x.Key).SequenceEqual(new[] { live.Key }) && s.Completed.Select(x => x.Key).SequenceEqual(new[] { failed.Key }),
+                "Active=" + string.Join(",", s.Prs.Select(x => x.Key)) + " Completed=" + string.Join(",", s.Completed.Select(x => x.Key)));
+        });
+
         await test("completed history: completions closed during a refresh are kept against the projection-time clock; later dates are not", async () =>
         {
             using var f = new Fixture();

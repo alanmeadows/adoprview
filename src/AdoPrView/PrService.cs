@@ -204,15 +204,18 @@ public sealed partial class PrService
 
             var prs = Sort(results);
             var mergeStatus = await RecheckMergesAsync(prs, heads, repoErrors, Interlocked.Exchange(ref _forceMergeRequested, 0) != 0);
-            var active = Sort(prs.Where(p => p.IsActive));
+            // Settings may change while reads are in flight: every candidate must still be in the current watch scope.
+            var listed = completed.Where(c => Watched(c.Org, c.Project, c.Repo, c.IsMine, c.Author)).ToList();
+            var listedKeys = listed.Select(c => c.Key).ToHashSet(StringComparer.OrdinalIgnoreCase);
+            // A dated completion outranks an active projection whose detail read failed, never an obtained active detail.
+            var active = Sort(prs.Where(p => p.IsActive && !(p.Error is not null && listedKeys.Contains(p.Key))));
             // Only an obtained detail/re-check that says completed moves a watched PR into history.
             var now = _time.GetUtcNow();
             var moved = prs.Where(p => !p.IsActive).Select(p => ToCompleted(p, since, now)).OfType<CompletedPr>().ToList();
 
             Publish(new Snapshot { Prs = active, LastRefresh = _time.GetUtcNow(), Me = meName ?? prev.Me,
                 RepoErrors = repoErrors.ToList(), MergeCheckStatus = mergeStatus,
-                // Settings may change while reads are in flight: every candidate must still be in the current watch scope.
-                Completed = MergeCompleted(completed.Where(c => Watched(c.Org, c.Project, c.Repo, c.IsMine, c.Author)).Concat(moved), active),
+                Completed = MergeCompleted(listed.Concat(moved), active),
                 CompletedWarnings = completedWarnings.Order(StringComparer.OrdinalIgnoreCase).ToList(),
                 OrderRevision = prev.OrderRevision + (Interlocked.Exchange(ref _orderRequested, 0) != 0 ? 1 : 0) });
         }
@@ -370,8 +373,17 @@ public sealed partial class PrService
             Updated = D(pr["creationDate"]),
             Description = S(pr["description"]),
             MergeStatus = S(pr["mergeStatus"]),
+            AutoCompleteBy = AutoCompleteBy(pr),
+            MergeStrategy = S(pr["completionOptions"]?["mergeStrategy"]),
             Lane = Lane.Waiting,
         };
+    }
+
+    static string? AutoCompleteBy(JsonNode pr)
+    {
+        var id = S(pr["autoCompleteSetBy"]?["id"]);
+        var name = S(pr["autoCompleteSetBy"]?["displayName"]);
+        return string.IsNullOrWhiteSpace(id) || id == Guid.Empty.ToString() ? null : string.IsNullOrWhiteSpace(name) ? id : name;
     }
 
     // ------------------------------------------------------------ build view
@@ -403,8 +415,6 @@ public sealed partial class PrService
         try { head = await headT; } catch (Exception ex) { headError = "Cannot verify merge target: " + ex.Message; }
 
         var createdBy = pr["createdBy"];
-        var autoCompleteId = S(pr["autoCompleteSetBy"]?["id"]);
-        var autoCompleteName = S(pr["autoCompleteSetBy"]?["displayName"]);
         var view = new PrView
         {
             Key = $"{repoId}:{prId}",
@@ -431,8 +441,7 @@ public sealed partial class PrService
             LastMergeTargetCommit = S(pr["lastMergeTargetCommit"]?["commitId"]),
             CurrentTargetCommit = head,
             MergeCheckError = headError,
-            AutoCompleteBy = string.IsNullOrWhiteSpace(autoCompleteId) || autoCompleteId == Guid.Empty.ToString() ? null
-                : string.IsNullOrWhiteSpace(autoCompleteName) ? autoCompleteId : autoCompleteName,
+            AutoCompleteBy = AutoCompleteBy(pr),
             MergeStrategy = S(pr["completionOptions"]?["mergeStrategy"]),
         };
         SetMergeStaleness(view);

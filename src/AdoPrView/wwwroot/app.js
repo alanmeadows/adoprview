@@ -227,7 +227,8 @@ function flushRowUpdates() {
   if (rowsInUse() || crossRunOutputSelection()) return;
   if (S.pendingSnapshot) setSnapshot(S.pendingSnapshot);
   for (const key of [...S.runRelocations]) relocateRunGroup(key);
-  if (S.rowsPending) renderRows();
+  // A relocation still queued here is held by a text selection; a full rebuild would detach it.
+  if (S.rowsPending && !S.runRelocations.size) renderRows();
   renderStatus();
 }
 
@@ -360,7 +361,8 @@ function restoreExpansionFocus(control) {
 }
 
 function renderRowsContent(whenIdle = false) {
-  if (S.rowPointerDown || (whenIdle && (rowsInUse() || crossRunOutputSelection()))) { S.rowsPending = true; renderStatus(); return; }
+  if (S.rowPointerDown || (whenIdle && (rowsInUse() || crossRunOutputSelection() ||
+    selectionBlocksMove([...document.querySelectorAll('#rows .copilot-run, #rows .lead-blockers')])))) { S.rowsPending = true; renderStatus(); return; }
   S.rowsPending = false;
   S.runRelocations.clear();
   const vis = baseVisible();
@@ -1585,6 +1587,8 @@ async function onAction(act, el, key) {
       await runAction(key, 'requeue', () => rpc('requeue', { key, evaluationId: el.dataset.eval }), 'Build re-queued');
       break;
     case 'triage':
+      // Launch only for an active PR; Cancel is a separate action and stays available for owned runs.
+      if (!p) return;
       S.expanded.add(key);
       if (runCancelable(runForPr(key))) {
         renderRows();

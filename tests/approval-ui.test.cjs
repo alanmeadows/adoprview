@@ -1571,7 +1571,7 @@ test('Completed lane is opt-in read-only history: counts, warnings, filters, Ope
     if (method === 'unhide') return { ...hooks.S.settings, hidden: [] };
     return {};
   };
-  for (const act of ['fix', 'autocomplete', 'approve', 'toggle']) await hooks.onAction(act, {}, done.key);
+  for (const act of ['triage', 'autocomplete', 'approve', 'toggle']) await hooks.onAction(act, {}, done.key);
   assert.deepEqual(calls, [], 'Completed keys never reach active-only actions');
   await hooks.onAction('open', {}, done.key);
   assert.deepEqual(calls.at(-1), ['openUrl', { url: done.url }]);
@@ -1583,4 +1583,6 @@ test('Completed lane is opt-in read-only history: counts, warnings, filters, Ope
   assert.deepEqual(calls.at(-1), ['unhide', { key: done.key }]);
   assert.equal(chip('completed'), '2');
   assert.equal(pr.lane, 'needsHuman');
+  await hooks.onAction('cancelRun', { dataset: { runId: 'owned-run' } }, done.key);
+  assert.deepEqual(calls.at(-1), ['cancelCopilot', { key: done.key, runId: 'owned-run' }], 'Cancel of an owned run still reaches the host');
 });
