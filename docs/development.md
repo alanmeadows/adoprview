@@ -178,6 +178,154 @@ synthetic Windows failure and verifies the dashboard stays visible/responding.
 Browser row checks cover lost/uncertain process activity and failed action
 feedback with both normal and reduced motion.
 
+Focused Fix output/control checks use only fake transports, small synthetic
+output and disposable settings/history, without a model or live ADO requests:
+
+```powershell
+$env:ADOPRVIEW_TEST_FILTER = 'Copilot'
+dotnet run --project tests\AdoPrView.Tests -c Release
+node --test --test-name-pattern='native Fix delivery|pre-navigation Fix|Copilot' tests\approval-ui.test.cjs
+Remove-Item Env:\ADOPRVIEW_TEST_FILTER
+```
+
+They cover bounded per-chunk allocations, a follower that ignores
+cancellation, stop/detach with retained output, uncertain owned liveness and
+browser acknowledgement/coalescing/disposal, fair delivery between runs,
+independent response deadlines with blocking/throwing cancellation callbacks,
+and intentional recovered-history replay after cancellation, including a
+potentially live needs-attention run blocked in preflight. They also cover
+startup/shutdown reservation races, controls surviving failed teardown,
+synchronous posting hangs and same-output lifecycle revisions, including the
+serialized native init/action/delivery projection. The existing
+`ADOPRVIEW_TEST_NATIVE_ACTION=1` opt-in also enables `Native Copilot`: a real
+disposable WPF/WebView2 window with withheld output acknowledgements, a fake
+hung follower, an actual unrelated recovery blocked at its fake preflight, and
+the production shutdown sequence held before final control disposal.
+The native button stops the selected run while those sentinels remain blocked,
+asserts a three-second control deadline and prints the measured milliseconds.
+It also verifies retained output/work, durable exact-task stop proof, and that
+the actual WebView message carries the projected lifecycle revision.
+This bounded synthetic check is
+not an installed-app or live WSL/model end-to-end test. Do not run browser or WSL
+opt-ins during unresolved shared-machine overload.
+`Copilot short saved output` measures an eight-tail empty/short-history fixture
+against a 64 KiB allocation limit, then checks growth, wrap and unchanged
+maximum retention. This is a small deterministic allocation regression, not a
+system stress test or a quota on task memory.
+
+`Copilot native menu` uses actual generated menu items and click callbacks to
+check full run identity, duplicate PR labels and unreadable-history eligibility.
+`Native init reads` holds a synthetic asynchronous run list while the real
+publisher advances the whole snapshot, then checks the serialized init response.
+The frontend whole-init regression exercises the real boot/RPC/event path with
+unrelated DOM wiring stubbed, including queued row updates and late run state.
+Publication revision is separate from `OrderRevision`; row ordering is unchanged.
+`Copilot restored replay` verifies pending and in-flight snapshots retain newer
+lifecycle/worktree state or same-revision output when restoration offers old data.
+`Copilot restored delivery reports` uses the production delivery factory to
+check failure/repeated-failure/success/later-failure notification recovery and
+prove an abandoned late success or failure cannot clear the current marker
+or report after completed disposal. The actual
+WPF control fixture uses that same factory.
+`Copilot task registry context` verifies durable registry capture and exact
+cancellation while recovery preflight is blocked or its registry changed.
+The `WSL captured task registry` case uses the actual production WSL transport,
+preflight/parser, launch request, status, Stop and log scripts with a fake
+file-backed supervisor. It covers default HOME, quoted XDG paths and a relative
+`BGTASK_STATE_DIR` override, then replaces the environment file with a failing
+sentinel and checks that control bypasses it, retaining synthetic work/logs.
+Enable only in an already-running Ubuntu distribution:
+
+```powershell
+$env:ADOPRVIEW_TEST_WSL_PREFLIGHT = '1'
+$env:ADOPRVIEW_TEST_FILTER = 'WSL captured task registry|Copilot task registry context'
+dotnet run --project tests\AdoPrView.Tests -c Release
+Remove-Item Env:\ADOPRVIEW_TEST_WSL_PREFLIGHT, Env:\ADOPRVIEW_TEST_FILTER
+```
+
+The fixture has a 25-second host deadline and removes its exact temporary
+directory. Its fake supervisor never launches the runner or kills a process;
+this is production-transport registry proof, not live bgtask/model integration,
+kernel escalation or an installed/native UI rerun.
+It also checks private prompt deletion after replacing the environment file,
+without sourcing that file or deleting synthetic work. `Copilot private prompt
+cleanup` holds a fake discard transport past its two-second response limit and
+separately returns a failed discard: both preserve verified stopped state,
+work/output and an explicit cleanup warning within three seconds. The hanging
+fake is deliberately released in `finally`; no live process is involved.
+The existing pre-follow cancellation case also asserts that legacy records'
+ownership/history commands do not re-source environment files. Actual transport
+proof checks default-registry legacy log access with the same failing sentinel.
+`Copilot confirmed-stopped` holds recovery preflight for an already-exited
+needs-attention record. Exact-run cancellation must complete within three
+seconds, retain work/output and the real exit code, persist stop proof and send
+no redundant task Stop or resume. The fake preflight is released in `finally`.
+`Copilot recovery history cannot` holds a fake log reader that ignores
+cancellation, both before and during Stop finalization, plus a returned-error
+case. Stop and disposal remain bounded, partial output/real exit/logs/work and
+durable stop proof survive, and abandoned callbacks cannot append late output.
+Both fake history and preflight sentinels are released in `finally`.
+The same `historyFirst` case asserts one reader, one occurrence of each received
+segment and the exact saved offset plus received-character count. Replay
+progress is entry-local, not a persisted schema change or output reset.
+The clamped countervariant publishes a bounded synthetic tail before Stop;
+incomplete replay still warns when truncation has removed the recovery header.
+Completed replay remains single-pass without a false unavailable-history warning.
+`Copilot native Stop notice` exercises the production message/icon formatter
+used by the native dialog: returned cleanup/history diagnostics remain visible,
+clean stopped results stay informational, and uncertain/missing results never
+claim inactive proof. This is offline notice composition, not a displayed
+WPF dialog or installed-app E2E.
+`Copilot terminal history` publishes failed/completed/cancelled state while a
+fake reader ignores cancellation, then clicks the captured actual native menu
+target. Stop and disposal must remain bounded, preserve real exit codes and
+partial logs/work/stop proof, and send no redundant task Stop or cleanup.
+The fake reader is released and menu items disposed in `finally`.
+`Copilot completed cleanup` covers normal and recovered completed runs with a
+held fake cleanup transport ignoring cancellation. Captured native Stop and
+disposal must finish within three seconds without changing exit/output/offset,
+relaunching, stopping an exited task or accepting a late `REMOVED` reply.
+The cleanup transport is always released; no real worktree removal is attempted.
+`Copilot admitted recovery callback` captures the actual inner production stdout
+delegate to model admission before the outer Invoke fence closes, then invokes
+it after Stop. Output/offset/exit/proof must remain unchanged. This is a
+deterministic admitted-callback logic fixture, not an actual scheduler race or
+displayed browser proof.
+
+The smaller kernel-control opt-in executes the exact production runner in an
+explicitly selected, already-responsive WSL distribution:
+
+```powershell
+$env:ADOPRVIEW_TEST_FILTER = 'Copilot kernel'
+$env:ADOPRVIEW_TEST_WSL_CONTROL = '1'
+$env:ADOPRVIEW_TEST_WSL_DISTRO = 'Ubuntu'
+dotnet run --project tests\AdoPrView.Tests -c Release
+Remove-Item Env:\ADOPRVIEW_TEST_FILTER, Env:\ADOPRVIEW_TEST_WSL_CONTROL, Env:\ADOPRVIEW_TEST_WSL_DISTRO
+```
+
+It requires Bash, Python 3 with Linux pidfd support, `flock`, `setsid` and
+`timeout`, plus permission to become a child subreaper. Before creating any
+fixture directory or helper, it opens a pidfd for itself and sends signal zero
+to check actual syscall availability and permission. Unavailable-open and
+denied-signal regressions prohibit directory/process creation and assert this
+preflight fails explicitly. A disposable sleeping
+CLI and its descendant ignore TERM so the runner must escalate only its owned
+group to KILL. The fixture checks the real exit receipt, free execution lock,
+preserved synthetic work/logs, a held orphan-descendant lock and refusal of a
+foreign ownership receipt. It additionally exercises the verbatim production
+signal guards with stale-start/absent captured identities and a real disposable
+leader; it does not force genuine host PID reuse. A fixture-only `BASH_ENV`
+DEBUG hook schedules TERM immediately before the production identity-capture
+assignment, proving pending Stop is replayed. A deliberately missing readiness
+file verifies cleanup of unregistered descendants. The report includes measured
+TERM-to-KILL time. It has a 20-second Linux deadline, a 25-second host
+cancellation deadline and identity-checked, pidfd-backed cleanup of only its
+own descendant tree, independent of successful readiness. Cleanup has a
+two-second deadline; unconfirmed cleanup preserves the fixture directory and
+fails rather than claiming success.
+It never invokes Copilot, bgtask, ADO, installed app state or existing user jobs;
+it does not establish live supervisor integration or installed-app E2E.
+
 Focused browser checks can set `ROW_TEST_FILTER` to a `|`-separated list of
 subtest-name substrings, for example `Fix output` or `GUI `. Then run
 `node --test tests\row-actions.browser.test.cjs` and clear the variable.

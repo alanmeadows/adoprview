@@ -78,6 +78,7 @@ public sealed class PrView
 
 public sealed class Snapshot
 {
+    public long Revision { get; set; }
     public List<PrView> Prs { get; init; } = new();
     public DateTimeOffset? LastRefresh { get; init; }
     public bool Refreshing { get; init; }

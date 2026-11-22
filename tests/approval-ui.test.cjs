@@ -7,7 +7,7 @@ const vm = require('node:vm');
 const source = fs.readFileSync(path.join(__dirname, '..', 'src', 'AdoPrView', 'wwwroot', 'app.js'), 'utf8');
 const themeSource = fs.readFileSync(path.join(__dirname, '..', 'src', 'AdoPrView', 'wwwroot', 'theme.js'), 'utf8');
 
-function setup(search = '?mock=1') {
+function setup(search = '?mock=1', native = false) {
   const elements = new Map();
   const element = () => ({
     innerHTML: '', textContent: '', dataset: {}, scrollTop: 0, children: [],
@@ -26,8 +26,10 @@ function setup(search = '?mock=1') {
     body: { insertAdjacentHTML() {} },
   };
   const dialogs = [];
+  const sent = [];
   const window = { MockHost: { rpc: () => new Promise(() => {}) }, addEventListener() {}, getSelection: () => '',
     confirm: text => { dialogs.push(text); return true; } };
+  if (native) window.chrome = { webview: { postMessage: text => sent.push(text === 'ready' ? text : JSON.parse(text)), addEventListener() {} } };
   const location = { href: 'https://app.local/index.html' + search, search };
   const context = vm.createContext({
     window, document, URL, URLSearchParams, location,
@@ -46,8 +48,60 @@ function setup(search = '?mock=1') {
   hooks.S.settings = { repos: [{}], hidden: [], whitelist: [], autoComplete: { mergeStrategy: 'squash' }, refreshSeconds: 120, mergeCheckMinutes: 10 };
   hooks.S.settings.videoSpeech = { voice: 'offline-voice' };
   hooks.S.snap = { prs: [pr], lastRefresh: new Date().toISOString(), approvalProvider: { name: 'Sample approval' } };
-  return { hooks, pr, window, elements, dialogs, document, context, element };
+  return { hooks, pr, window, elements, dialogs, document, context, element, sent };
 }
+
+test('native Fix delivery is acknowledged even when rendering rejects data; only native sequenced events get acknowledgements', () => {
+  const { hooks, sent } = setup('', true);
+  hooks.onHostMessage({ event: 'copilotRun', data: null, deliveryId: 41 });
+  assert.equal(sent.at(-1).method, 'copilotRunAck');
+  assert.equal(sent.at(-1).params.deliveryId, 41);
+  const count = sent.length;
+  hooks.onHostMessage({ event: 'copilotRun', data: null });
+  assert.equal(sent.length, count);
+});
+
+test('a delayed pre-navigation Fix snapshot cannot overwrite newer initial output or terminal state', () => {
+  const { hooks, pr } = setup();
+  const current = { key: pr.key, runId: 'same-run', status: 'running', output: 'new output', outputOffset: 200 };
+  hooks.updateCopilotRun(current);
+  hooks.updateCopilotRun({ ...current, output: 'old output', outputOffset: 100 });
+  assert.equal(hooks.S.runs.get(current.runId).output, 'new output');
+  hooks.updateCopilotRun({ ...current, status: 'cancelled', mayBeRunning: false });
+  hooks.updateCopilotRun(current);
+  assert.equal(hooks.S.runs.get(current.runId).status, 'cancelled');
+  const removed = { ...current, status: 'completed', worktreeStatus: 'removed-clean', revision: 12 };
+  hooks.updateCopilotRun(removed);
+  hooks.updateCopilotRun({ ...removed, worktreeStatus: 'retained-changes', revision: 11 });
+  assert.equal(hooks.S.runs.get(current.runId).worktreeStatus, 'removed-clean');
+  hooks.updateCopilotRun({ ...removed, error: 'newer cleanup diagnostic', revision: 13 });
+  assert.equal(hooks.S.runs.get(current.runId).error, 'newer cleanup diagnostic');
+});
+
+test('whole native init cannot replace a newer received or queued snapshot and run state', async () => {
+  for (const queued of [false, true]) {
+    const { hooks, pr, sent, window, context } = setup('', true);
+    const booted = vm.runInContext('wire = () => {}; boot()', context);
+    const init = sent.find(message => message.method === 'init');
+    const current = { key: pr.key, runId: 'same-run', status: 'completed', output: 'latest', outputOffset: 200,
+      revision: 12, worktreeStatus: 'removed-clean' };
+    hooks.updateCopilotRun(current);
+    hooks.S.pointerInRows = queued;
+    hooks.onHostMessage({ event: 'snapshot', data: { ...hooks.S.snap, revision: 12, orderRevision: 3,
+      prs: [{ ...pr, title: 'new authoritative title' }] } });
+    hooks.onHostMessage({ id: init.id, result: { settings: hooks.S.settings,
+      snapshot: { ...hooks.S.snap, revision: 11, orderRevision: 2, prs: [{ ...pr, title: 'old init title' }] },
+      runs: [{ ...current, revision: 11, worktreeStatus: 'retained-changes' }] } });
+    await booted;
+    assert.equal((hooks.S.pendingSnapshot || hooks.S.snap).prs[0].title, 'new authoritative title');
+    assert.equal(hooks.S.runs.get(current.runId).worktreeStatus, 'removed-clean');
+    assert.equal(window.__ready, true);
+    hooks.S.pointerInRows = false;
+    hooks.flushRowUpdates();
+    assert.equal(hooks.S.snap.prs[0].title, 'new authoritative title');
+    assert.equal(hooks.S.orderRevision, 3);
+  }
+});
 
 test('Fix drawer saves additional instructions independently without changing captured running sessions', async () => {
   const { hooks, window, elements } = setup();

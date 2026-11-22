@@ -23,6 +23,358 @@ static class CopilotRecoveryTests
 
     public static async Task Run(Func<string, Func<Task>, Task> test)
     {
+        await test("Copilot admitted recovery callback cannot append after Stop", async () =>
+        {
+            using var f = new Fixture();
+            await using var first = f.Service();
+            var run = await first.StartAsync(Request());
+            await Wait(first, run.RunId, s => s.Output.Contains("FAKE-READY"));
+            f.Transport.End(1);
+            await Wait(first, run.RunId, s => s.Status == "failed");
+            await first.DisposeAsync();
+            var saved = f.Store.Load().Single().Saved!;
+            f.Store.Write(saved with { State = saved.State with { Status = "needs-attention", ResumeAttempts = 1 } });
+            f.Transport.BlockHistory = true;
+            await using var recovered = f.Service();
+            var recovery = recovered.RecoverAsync();
+            Task<CopilotRunState?>? stop = null;
+            try
+            {
+                await f.Transport.HistoryEntered.Task.WaitAsync(TimeSpan.FromSeconds(3));
+                var outer = f.Transport.HistoryReaders.Single();
+                // Model a callback admitted by Invoke before Stop, but delayed before acquiring the output lock.
+                var admitted = outer.Target?.GetType().GetField("stdout",
+                    System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.Public |
+                    System.Reflection.BindingFlags.NonPublic)?.GetValue(outer.Target) as Action<string>
+                    ?? throw new Exception("Fixture could not capture the production stdout delegate after admission");
+                stop = recovered.CancelAsync(run.Key, run.RunId);
+                var final = await stop.WaitAsync(TimeSpan.FromSeconds(3))
+                    ?? throw new Exception("Stop returned no recovered run");
+                admitted("ALREADY-ADMITTED-HISTORY\n");
+                var after = recovered.Get(run.RunId)!;
+                Check(after.Output == final.Output && after.OutputOffset == final.OutputOffset &&
+                    after.ExitCode == 1 && !after.MayBeRunning && f.Transport.HistoryReaders.Count == 1 &&
+                    f.Transport.Launches == 1 && f.Transport.Stops == 0 &&
+                    f.Store.Load().Single().Saved!.TaskConfirmedStopped,
+                    "Already-admitted history callback changed retained output after Stop returned");
+            }
+            finally
+            {
+                f.Transport.ReleaseHistory.TrySetResult();
+                await recovery.WaitAsync(TimeSpan.FromSeconds(3));
+                if (stop is not null) await stop.WaitAsync(TimeSpan.FromSeconds(3));
+            }
+        });
+        foreach (var recoveredRun in new[] { false, true })
+            foreach (var stop in new[] { true, false })
+                await test($"Copilot completed cleanup {(recoveredRun ? "recovered" : "normal")} {(stop ? "Stop" : "disposal")} stays bounded", async () =>
+                {
+                    using var f = new Fixture();
+                    f.Transport.Cleanup = "RETAINED";
+                    await using var first = f.Service();
+                    var run = await first.StartAsync(Request());
+                    await Wait(first, run.RunId, s => s.Output.Contains("FAKE-READY"));
+                    if (recoveredRun)
+                    {
+                        f.Transport.End(0);
+                        await Wait(first, run.RunId, s => s.Status == "completed");
+                        await first.DisposeAsync();
+                    }
+                    var cleanups = f.Transport.Cleanups;
+                    f.Transport.BlockCleanup = true;
+                    await using var restored = recoveredRun ? f.Service() : null;
+                    var service = restored ?? first;
+                    Task? recovery = null, action = null;
+                    System.Windows.Forms.ToolStripMenuItem[] items = [];
+                    try
+                    {
+                        if (recoveredRun) recovery = service.RecoverAsync();
+                        else f.Transport.End(0);
+                        await f.Transport.CleanupEntered.Task.WaitAsync(TimeSpan.FromSeconds(3));
+                        var before = service.Get(run.RunId)!;
+                        Check(before is { Status: "completed", MayBeRunning: false, ExitCode: 0 } &&
+                            f.Store.Load().Single().Saved!.TaskConfirmedStopped,
+                            "Cleanup fixture did not publish verified completion before the blocked transport");
+                        if (stop)
+                        {
+                            items = MainWindow.CopilotStopMenuItems([run],
+                                selected => action = service.CancelAsync(selected.Key, selected.RunId));
+                            Check(items.Length == 1 && items[0].Enabled, "Captured cleanup Stop lost its exact target");
+                            items[0].PerformClick();
+                        }
+                        else action = service.DisposeAsync().AsTask();
+                        await (action ?? throw new Exception("Cleanup control action was not invoked"))
+                            .WaitAsync(TimeSpan.FromSeconds(3));
+                        var final = service.Get(run.RunId)!;
+                        Check(final is { Status: "completed", MayBeRunning: false, ExitCode: 0, WorktreeRetained: true } &&
+                            final.Error?.Contains("cleanup") == true && final.Output == before.Output &&
+                            final.OutputOffset == before.OutputOffset && !f.Transport.WorkspaceRemoved &&
+                            f.Transport.Launches == 1 && f.Transport.Stops == 0 && f.Transport.Cleanups == cleanups + 1 &&
+                            f.Store.Load().Single().Saved!.TaskConfirmedStopped,
+                            "Interrupted cleanup lost completed outcome, output/work/stop proof or warning");
+                        f.Transport.ReleaseCleanup.TrySetResult();
+                        await f.Transport.CleanupReturned.Task.WaitAsync(TimeSpan.FromSeconds(3));
+                        Check(service.Get(run.RunId) is { WorktreeRetained: true } late && late.Error == final.Error &&
+                            late.Output == final.Output && late.OutputOffset == final.OutputOffset,
+                            "Abandoned cleanup accepted a late REMOVED reply or changed completion output");
+                        await service.DisposeAsync().AsTask().WaitAsync(TimeSpan.FromSeconds(3));
+                    }
+                    finally
+                    {
+                        f.Transport.ReleaseCleanup.TrySetResult();
+                        foreach (var item in items) item.Dispose();
+                        if (recovery is not null) await recovery.WaitAsync(TimeSpan.FromSeconds(3));
+                        await service.DisposeAsync().AsTask().WaitAsync(TimeSpan.FromSeconds(3));
+                        if (action is not null) await action.WaitAsync(TimeSpan.FromSeconds(3));
+                    }
+                });
+        await test("Copilot terminal history pending after exit stops from the captured native menu", async () =>
+        {
+            foreach (var (terminal, code) in new[] { ("failed", 1), ("completed", 0), ("cancelled", 143) })
+            {
+                using var f = new Fixture();
+                f.Transport.Cleanup = "RETAINED";
+                await using var first = f.Service();
+                var run = await first.StartAsync(Request());
+                await Wait(first, run.RunId, s => s.Output.Contains("FAKE-READY"));
+                f.Transport.End(code);
+                await Wait(first, run.RunId, s => s.Status == (code == 0 ? "completed" : "failed"));
+                await first.DisposeAsync();
+                var saved = f.Store.Load().Single().Saved!;
+                f.Store.Write(saved with { State = saved.State with { Status = terminal } });
+                var cleanups = f.Transport.Cleanups;
+                f.Transport.BlockHistory = true;
+                await using var recovered = f.Service();
+                var recovery = recovered.RecoverAsync();
+                Task<CopilotRunState?>? stop = null;
+                System.Windows.Forms.ToolStripMenuItem[] items = [];
+                try
+                {
+                    await f.Transport.HistoryEntered.Task.WaitAsync(TimeSpan.FromSeconds(3));
+                    Check(recovered.Get(run.RunId) is { IsActive: false, MayBeRunning: false } current &&
+                        current.Status == terminal, "Fixture did not publish terminal state before pending history");
+                    items = MainWindow.CopilotStopMenuItems([run],
+                        selected => stop = recovered.CancelAsync(selected.Key, selected.RunId));
+                    Check(items.Length == 1 && items[0].Enabled, "Captured native menu lost its exact active target");
+                    items[0].PerformClick();
+                    var final = await (stop ?? throw new Exception("Captured Stop did not call cancellation"))
+                        .WaitAsync(TimeSpan.FromSeconds(3)) ?? throw new Exception("Stop returned no recovered run");
+                    Check(final is { Status: "cancelled", MayBeRunning: false, WorktreeRetained: true } &&
+                        final.ExitCode == code && final.Error?.Contains("logs") == true &&
+                        final.Output.Contains("FAKE-READY") && f.Transport.HistoryReaders.Count == 1 &&
+                        f.Transport.Launches == 1 && f.Transport.Stops == 0 && f.Transport.Cleanups == cleanups &&
+                        f.Store.Load().Single().Saved!.TaskConfirmedStopped,
+                        "Terminal history Stop lost real outcome, partial logs/work or owned inactive proof");
+                    Check(final.OutputOffset == saved.State.OutputOffset + f.Transport.RecordedOutput.Length &&
+                        final.Output.IndexOf("FAKE-READY", StringComparison.Ordinal) ==
+                            final.Output.LastIndexOf("FAKE-READY", StringComparison.Ordinal),
+                        "Terminal history Stop duplicated its partial replay or changed the accepted offset");
+                    foreach (var reader in f.Transport.HistoryReaders) reader("LATE-HISTORY-REPLY\n");
+                    Check(recovered.Get(run.RunId)!.Output == final.Output,
+                        "Abandoned terminal history changed stopped output");
+                    await recovered.DisposeAsync().AsTask().WaitAsync(TimeSpan.FromSeconds(3));
+                }
+                finally
+                {
+                    f.Transport.ReleaseHistory.TrySetResult();
+                    foreach (var item in items) item.Dispose();
+                    await recovery.WaitAsync(TimeSpan.FromSeconds(3));
+                    if (stop is not null) await stop.WaitAsync(TimeSpan.FromSeconds(3));
+                }
+            }
+        });
+        await test("Copilot recovery history cannot delay verified Stop or change inactive state", async () =>
+        {
+            foreach (var (historyFirst, failure, complete, longHistory) in new[]
+                { (false, false, false, false), (true, false, false, false), (false, true, false, false),
+                    (true, false, true, false), (true, false, false, true) })
+            {
+                using var f = new Fixture();
+                await using var first = f.Service();
+                var run = await first.StartAsync(Request());
+                await Wait(first, run.RunId, s => s.Output.Contains("FAKE-READY"));
+                if (longHistory) f.Transport.Emit(new string('x', 128 * 1024 + 1024) + "\nFAKE-TAIL\n");
+                f.Transport.End(1);
+                await Wait(first, run.RunId, s => s.Status == "failed");
+                await first.DisposeAsync();
+                var saved = f.Store.Load().Single().Saved!;
+                f.Store.Write(saved with { State = saved.State with { Status = "needs-attention", ResumeAttempts = 1 } });
+                f.Transport.BlockPreflight = !historyFirst;
+                f.Transport.BlockHistory = !(failure || complete);
+                if (failure) f.Transport.Failure = "history";
+                await using var recovered = f.Service();
+                var recovery = recovered.RecoverAsync();
+                if (complete) await recovery.WaitAsync(TimeSpan.FromSeconds(3));
+                else await (historyFirst ? f.Transport.HistoryEntered.Task : f.Transport.RecoveryEntered.Task)
+                        .WaitAsync(TimeSpan.FromSeconds(3));
+                if (longHistory) Check(recovered.Get(run.RunId)!.Output.StartsWith("[Earlier output truncated]", StringComparison.Ordinal),
+                    "Long-history fixture did not publish its clamped output before Stop");
+                var stop = recovered.CancelAsync(run.Key, run.RunId);
+                try
+                {
+                    var final = await stop.WaitAsync(TimeSpan.FromSeconds(3))
+                        ?? throw new Exception("Stop returned no matching recovered run");
+                    Check(final is { Status: "cancelled", MayBeRunning: false, ExitCode: 1, WorktreeRetained: true } &&
+                        f.Transport.Launches == 1 && f.Transport.Stops == 0 &&
+                        f.Transport.Cleanups == 0 && f.Transport.RecordedOutput.Contains("FAKE-READY") &&
+                        f.Store.Load().Single().Saved!.TaskConfirmedStopped,
+                        "Unavailable recovery history lost verified stop, real exit, logs/work or explicit warning");
+                    Check(complete ? final.Error is null : final.Error?.Contains("logs") == true,
+                        "Incomplete replay lost its logs warning or completed replay gained a false warning");
+                    if (!failure)
+                    {
+                        var marker = longHistory ? "FAKE-TAIL" : "FAKE-READY";
+                        Check(final.Output.Contains(marker) && f.Transport.HistoryReaders.Count == 1 &&
+                            final.Output.IndexOf(marker, StringComparison.Ordinal) ==
+                                final.Output.LastIndexOf(marker, StringComparison.Ordinal) &&
+                            final.OutputOffset == saved.State.OutputOffset + f.Transport.RecordedOutput.Length,
+                            "Recovery history was replayed twice or its preserved output offset changed");
+                    }
+                    var output = final.Output;
+                    foreach (var reader in f.Transport.HistoryReaders) reader("LATE-HISTORY-REPLY\n");
+                    Check(recovered.Get(run.RunId)!.Output == output, "Abandoned history changed stopped output");
+                    await recovered.DisposeAsync().AsTask().WaitAsync(TimeSpan.FromSeconds(3));
+                }
+                finally
+                {
+                    f.Transport.ReleasePreflight.TrySetResult();
+                    f.Transport.ReleaseHistory.TrySetResult();
+                    await recovery.WaitAsync(TimeSpan.FromSeconds(3));
+                    await stop.WaitAsync(TimeSpan.FromSeconds(3));
+                }
+            }
+        });
+        await test("Copilot confirmed-stopped needs-attention cancels blocked recovery without another task Stop", async () =>
+        {
+            using var f = new Fixture();
+            await using var first = f.Service();
+            var run = await first.StartAsync(Request());
+            await Wait(first, run.RunId, s => s.Output.Contains("FAKE-READY"));
+            f.Transport.End(1);
+            await Wait(first, run.RunId, s => s.Status == "failed");
+            await first.DisposeAsync();
+            var saved = f.Store.Load().Single().Saved!;
+            Check(saved.TaskConfirmedStopped && !saved.State.MayBeRunning, "Fixture did not persist a confirmed-stopped run");
+            f.Store.Write(saved with { State = saved.State with { Status = "needs-attention" } });
+            f.Transport.BlockPreflight = true;
+            await using var recovered = f.Service();
+            var recovery = recovered.RecoverAsync();
+            await f.Transport.RecoveryEntered.Task.WaitAsync(TimeSpan.FromSeconds(3));
+            var stop = recovered.CancelAsync(run.Key, run.RunId);
+            try
+            {
+                var final = await stop.WaitAsync(TimeSpan.FromSeconds(3));
+                Check(final is { Status: "cancelled", MayBeRunning: false, WorktreeRetained: true, ExitCode: 1 } &&
+                    final.Output.Contains("FAKE-READY") && f.Transport.Launches == 1 && f.Transport.Stops == 0 &&
+                    f.Store.Load().Single().Saved!.TaskConfirmedStopped,
+                    "Cancelling stopped recovery changed real exit history, stopped another task or lost durable ownership");
+            }
+            finally
+            {
+                f.Transport.ReleasePreflight.TrySetResult();
+                await recovery.WaitAsync(TimeSpan.FromSeconds(3));
+                await stop.WaitAsync(TimeSpan.FromSeconds(3));
+            }
+        });
+        await test("Copilot private prompt cleanup cannot hold verified Stop behind a hung transport", async () =>
+        {
+            foreach (var hung in new[] { true, false })
+            {
+                using var f = new Fixture();
+                await using var service = f.Service();
+                var run = await service.StartAsync(Request());
+                await Wait(service, run.RunId, s => s.Output.Contains("FAKE-READY"));
+                f.Transport.BlockDiscard = hung;
+                if (!hung) f.Transport.Failure = "discard-prompt";
+                var stop = service.CancelAsync(run.Key, run.RunId);
+                try
+                {
+                    if (hung) await f.Transport.DiscardEntered.Task.WaitAsync(TimeSpan.FromSeconds(3));
+                    var final = await stop.WaitAsync(TimeSpan.FromSeconds(3));
+                    Check(final!.Status == "cancelled" && !final.MayBeRunning && final.WorktreeRetained &&
+                        final.Error!.Contains("prompt cleanup") && final.Output.Contains("FAKE-READY"),
+                        "Verified stop lost truthful liveness, preserved work/output or explicit cleanup warning");
+                    var call = f.Transport.Calls.Single(c => c.Operation == "discard-prompt");
+                    Check(!call.Script.Contains("source ") && !call.Script.Contains("nvm"),
+                        "Private prompt cleanup re-entered blocking shell initialization");
+                }
+                finally
+                {
+                    f.Transport.ReleaseDiscard.TrySetResult();
+                    await stop.WaitAsync(TimeSpan.FromSeconds(3));
+                }
+            }
+        });
+        await test("Copilot task registry context stays captured across launch stop and recovery", async () =>
+        {
+            foreach (var stateOverride in new[] { "", "/home/offline/task registry 'override" })
+            {
+                using var f = new Fixture();
+                f.Transport.RegistryConfig = "/home/offline/config 'registry";
+                f.Transport.RegistryOverride = stateOverride;
+                await using var service = f.Service();
+                var request = Request() with { AdditionalInstructions = "  CAPTURED-REGISTRY-GUIDANCE\r\n" };
+                var run = await service.StartAsync(request);
+                await Wait(service, run.RunId, s => s.Output.Contains("FAKE-READY"));
+                Check(f.Transport.Calls.Single(c => c.Operation == "stage-prompt").StandardInput ==
+                    request.Prompt + CopilotRunService.PublishInstructions(request, "origin", new string('a', 64)) +
+                    "\n## Additional instructions\n" + request.AdditionalInstructions,
+                    "Captured-registry staging changed or duplicated the appended guidance");
+                var saved = f.Store.Load().Single().Saved!;
+                var environment = JsonSerializer.Serialize(saved.Environment);
+                Check(environment.Contains("XdgConfigHome"),
+                    "The launch registry context was not captured in the durable record");
+                await service.DisposeAsync();
+                f.Transport.BlockPreflight = stateOverride.Length == 0;
+                if (!f.Transport.BlockPreflight) f.Transport.RegistryConfig = "/home/offline/changed-registry";
+                await using var recovered = f.Service();
+                var recovery = recovered.RecoverAsync();
+                if (f.Transport.BlockPreflight)
+                    await f.Transport.RecoveryEntered.Task.WaitAsync(TimeSpan.FromSeconds(3));
+                else
+                {
+                    await recovery.WaitAsync(TimeSpan.FromSeconds(3));
+                    Check(recovered.Get(run.RunId)!.Status == "needs-attention" && f.Transport.Launches == 1,
+                        "Changed registry was adopted or automatically relaunched");
+                }
+                var stopped = await recovered.CancelAsync(run.Key, run.RunId).WaitAsync(TimeSpan.FromSeconds(3));
+                await recovery.WaitAsync(TimeSpan.FromSeconds(3));
+                Check(stopped!.Status == "cancelled" && !stopped.MayBeRunning && stopped.WorktreeRetained &&
+                    stopped.Output.Contains("FAKE-READY"), "Captured-registry cancellation lost truthful state, output or work");
+                foreach (var call in f.Transport.Calls.Where(c => c.Operation is "stage-prompt" or "launch" or "follow" or "status" or "stop" or "history"))
+                {
+                    Check(call.Script.Contains("export XDG_CONFIG_HOME='/home/offline/config '\\''registry'") &&
+                        call.Script.Contains(stateOverride.Length == 0 ? "unset BGTASK_STATE_DIR" :
+                            "export BGTASK_STATE_DIR='/home/offline/task registry '\\''override'"),
+                        "Launch and control did not use the same captured task registry");
+                    if (call.Operation is "status" or "stop" or "follow" or "history")
+                        Check(!call.Script.Contains("source ") && !call.Script.Contains("nvm"),
+                            "Emergency task control re-entered potentially blocking environment setup");
+                }
+            }
+        });
+        await test("Copilot failed uncertain cancellation retains its cross-dashboard reservation and exact-run retry proves stop", async () =>
+        {
+            using var f = new Fixture();
+            await using var service = f.Service();
+            var run = await service.StartAsync(Request());
+            await Wait(service, run.RunId, s => s.Output.Contains("FAKE-READY"));
+            f.Transport.Failure = "stop";
+            try { await service.CancelAsync(run.Key, run.RunId); } catch (InvalidOperationException) { }
+            Check(service.Get(run.RunId)!.MayBeRunning && f.Store.Load().Single().Saved!.State.MayBeRunning &&
+                !f.Store.Load().Single().Saved!.TaskConfirmedStopped, "Failed stop manufactured terminal proof");
+            await using (var other = f.Service())
+            {
+                try { await other.StartAsync(Request()); throw new Exception("Failed-but-live record lost its durable reservation"); }
+                catch (InvalidOperationException) { }
+            }
+            f.Transport.Failure = null;
+            var stopped = await service.CancelAsync(run.Key, run.RunId);
+            Check(stopped is { Status: "cancelled", MayBeRunning: false, WorktreeRetained: true } &&
+                f.Store.Load().Single().Saved!.TaskConfirmedStopped &&
+                stopped.Request.Prompt == run.Request.Prompt,
+                "Exact-run retry did not prove stop or mutated the captured prompt/suffix");
+        });
         await test("Copilot additional instructions stay out of durable history and never rewrite recovered or completed sessions", async () =>
         {
             using var f = new Fixture();
@@ -354,6 +706,60 @@ static class CopilotRecoveryTests
                 f.Transport.Stops == 1 && f.Transport.Cleanups == 0,
                 "Startup ignored explicit cancellation or resumed/cleaned its work");
         });
+        await test("Copilot recovered cancellation preserves replayed output offsets while reconciling terminal saved state", async () =>
+        {
+            using var f = new Fixture();
+            var first = f.Service();
+            var run = await first.StartAsync(Request());
+            await Wait(first, run.RunId, s => s.Output.Contains("FAKE-READY"));
+            await first.DisposeAsync();
+            f.Transport.End(143, outcome: false);
+            await using var resumed = f.Service();
+            await resumed.RecoverAsync();
+            f.Transport.Emit("Synthetic continuation failed.\n");
+            f.Transport.End(1);
+            var rendered = await Wait(resumed, run.RunId, s => s.Status == "needs-attention" &&
+                s.OutputOffset > f.Store.Load().Single().Saved!.State.OutputOffset);
+            var saved = f.Store.Load().Single().Saved!;
+            f.Store.Write(saved with { State = saved.State with { Status = "cancelled", FinishedAt = DateTimeOffset.UtcNow } });
+            var cancelled = await resumed.CancelAsync(run.Key, run.RunId);
+            Check(cancelled!.Status == "cancelled" && cancelled.Output == rendered.Output &&
+                cancelled.OutputOffset == rendered.OutputOffset && cancelled.WorktreeRetained,
+                "Saved-state reconciliation regressed the rendered UTF-16 offset and would discard a valid cancellation in the UI");
+        });
+        await test("Copilot cancellation before recovered follow preserves intentional history replay", async () =>
+        {
+            foreach (var status in new[] { "running", "needs-attention" })
+            {
+                using var f = new Fixture();
+                var first = f.Service();
+                var run = await first.StartAsync(Request());
+                await Wait(first, run.RunId, state => state.Output.Contains("FAKE-READY"));
+                f.Transport.Emit("SUPERVISED HISTORY\n");
+                await first.DisposeAsync();
+                var saved = f.Store.Load().Single().Saved!;
+                f.Store.Write(saved with { State = saved.State with { Status = status, MayBeRunning = true } });
+                f.Transport.BlockPreflight = true;
+                await using var recovered = f.Service();
+                var recovery = recovered.RecoverAsync();
+                try
+                {
+                    await f.Transport.RecoveryEntered.Task.WaitAsync(TimeSpan.FromSeconds(3));
+                    var stopped = await recovered.CancelAsync(run.Key, run.RunId).WaitAsync(TimeSpan.FromSeconds(3));
+                    Check(stopped is { Status: "cancelled", MayBeRunning: false, WorktreeRetained: true } &&
+                        stopped.Output.Contains("SUPERVISED HISTORY") && f.Transport.Launches == 1 && f.Transport.Stops == 1,
+                        "Cancelling before follow attachment discarded owned supervised history or relaunched");
+                    Check(f.Transport.Calls.Where(c => c.Operation is "verify-run" or "history")
+                        .All(c => !c.Script.Contains("source ") && !c.Script.Contains("nvm")),
+                        "Legacy cancellation re-entered shell setup after owned stop verification");
+                }
+                finally
+                {
+                    f.Transport.ReleasePreflight.TrySetResult();
+                    await recovery.WaitAsync(TimeSpan.FromSeconds(3));
+                }
+            }
+        });
 
         await test("Copilot failed resume or missing authentication is needs-attention, retains work and never loops", async () =>
         {
@@ -396,7 +802,7 @@ static class CopilotRecoveryTests
         });
     }
 
-    sealed class Fixture : IDisposable
+    internal sealed class Fixture : IDisposable
     {
         public readonly string Directory = Path.Combine(Environment.CurrentDirectory, ".copilot-recovery-fixture-" + Guid.NewGuid().ToString("N"));
         public readonly Fake Transport = new();
@@ -406,10 +812,11 @@ static class CopilotRecoveryTests
         public void Dispose() { if (System.IO.Directory.Exists(Directory)) System.IO.Directory.Delete(Directory, recursive: true); }
     }
 
-    sealed class Fake : ICopilotRunTransport
+    internal sealed class Fake : ICopilotRunTransport
     {
         readonly object gate = new();
         public readonly ConcurrentQueue<CopilotProcessRequest> Calls = new();
+        public readonly ConcurrentQueue<Action<string>> HistoryReaders = new();
         readonly List<Action<string>> readers = [];
         TaskCompletionSource<int> ended = NewEnd();
         string[] launch = [];
@@ -420,6 +827,20 @@ static class CopilotRecoveryTests
         public string? Failure;
         public string Cleanup = "REMOVED";
         public bool SessionAvailable = true, LockHeld, WorkspaceRemoved;
+        public bool BlockPreflight, BlockFollowers, BlockDiscard, BlockHistory, BlockCleanup;
+        public string RecordedOutput { get { lock (gate) return log; } }
+        public string? RegistryConfig;
+        public string RegistryOverride = "";
+        public readonly TaskCompletionSource RecoveryEntered = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        public readonly TaskCompletionSource ReleasePreflight = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        public readonly TaskCompletionSource ReleaseFollowers = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        public readonly TaskCompletionSource DiscardEntered = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        public readonly TaskCompletionSource ReleaseDiscard = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        public readonly TaskCompletionSource HistoryEntered = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        public readonly TaskCompletionSource ReleaseHistory = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        public readonly TaskCompletionSource CleanupEntered = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        public readonly TaskCompletionSource ReleaseCleanup = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        public readonly TaskCompletionSource CleanupReturned = new(TaskCreationOptions.RunContinuationsAsynchronously);
         static TaskCompletionSource<int> NewEnd() => new(TaskCreationOptions.RunContinuationsAsynchronously);
         public void Emit(string value) { lock (gate) { log += value; foreach (var read in readers.ToArray()) read(value); } }
         public void End(int code, bool outcome = true)
@@ -431,13 +852,26 @@ static class CopilotRecoveryTests
             Calls.Enqueue(r);
             token.ThrowIfCancellationRequested();
             if (Failure == r.Operation) return new(1, "", "never expose this transport detail");
+            if (r.Operation == "discard-prompt" && BlockDiscard)
+            {
+                DiscardEntered.TrySetResult();
+                await ReleaseDiscard.Task;
+                return new(0, "", "");
+            }
             string Protocol(params string[] values) => "ADOPRVIEW1\0" + string.Join('\0', values) + "\0";
             switch (r.Operation)
             {
-                case "preflight": return new(0, Protocol("Offline-Ubuntu", "offline", "/home/offline", "/home/offline/source",
+                case "preflight":
+                    if (BlockPreflight)
+                    {
+                        RecoveryEntered.TrySetResult();
+                        await ReleasePreflight.Task.WaitAsync(token);
+                    }
+                    return new(0, Protocol("Offline-Ubuntu", "offline", "/home/offline", "/home/offline/source",
                     "/home/offline/source/.git", "/home/offline/bin/copilot", "/home/offline/bin/bgtask", Help, "/home/offline/.copilot",
                     "origin", "https://dev.azure.com/offline-org/offline-project/_git/offline-repo",
-                    "https://dev.azure.com/offline-org/offline-project/_git/offline-repo", new string('a', 64)), "");
+                    "https://dev.azure.com/offline-org/offline-project/_git/offline-repo", new string('a', 64)) +
+                    (RegistryConfig is null ? "" : "ADOPRVIEW_TASK_REGISTRY\0" + RegistryConfig + "\0" + RegistryOverride + "\0END_TASK_REGISTRY\0"), "");
                 case "prepare": return new(0, Protocol("WORKTREE", "/home/offline/.local/state/ado-prview/runs/" + r.Arguments[6],
                     "/home/offline/.local/state/ado-prview/runs/" + r.Arguments[6] + "/worktree"), "");
                 case "launch":
@@ -466,14 +900,35 @@ static class CopilotRecoveryTests
                 case "follow":
                     Task done;
                     lock (gate) { if (stdout is not null) { readers.Add(stdout); stdout(log); } done = ended.Task; }
-                    try { await done.WaitAsync(token); return new(0, "", ""); }
+                    try
+                    {
+                        if (BlockFollowers) await ReleaseFollowers.Task;
+                        else await done.WaitAsync(token);
+                        return new(0, "", "");
+                    }
                     finally { lock (gate) { if (stdout is not null) readers.Remove(stdout); } }
-                case "history": stdout?.Invoke(log); return new(0, log, "");
+                case "history":
+                    if (stdout is not null) HistoryReaders.Enqueue(stdout);
+                    stdout?.Invoke(log);
+                    if (BlockHistory)
+                    {
+                        HistoryEntered.TrySetResult();
+                        await ReleaseHistory.Task;
+                    }
+                    return new(0, log, "");
                 case "stop": Stops++; End(143); return new(0, "", "");
                 case "cleanup":
                     Check(ended.Task.IsCompleted, "Cleanup attempted on a live fake session");
+                    Cleanups++;
+                    if (BlockCleanup)
+                    {
+                        CleanupEntered.TrySetResult();
+                        await ReleaseCleanup.Task;
+                        CleanupReturned.TrySetResult();
+                        return new(0, Protocol("REMOVED"), "");
+                    }
                     if (Cleanup == "REMOVED") WorkspaceRemoved = true;
-                    Cleanups++; return new(0, Protocol(Cleanup, "fake retained work"), "");
+                    return new(0, Protocol(Cleanup, "fake retained work"), "");
                 default: return new(0, "", "");
             }
         }

@@ -11,7 +11,8 @@ public sealed class Bridge(PrService prs, SettingsStore store, Func<string, Task
     IApprovalProvider? approval = null, IApprovalUi? approvalUi = null, Func<string, JsonObject, Task<object>>? copilotAction = null,
     Func<string, Task<object>>? popAction = null, Func<string, JsonObject, Task<object>>? explainAction = null,
     Action<string>? themeChanged = null, Func<string, JsonObject, Task<object>>? videoAction = null,
-    Func<string, JsonObject, Task<object>>? investigationAction = null, Action<string>? openBrowser = null)
+    Func<string, JsonObject, Task<object>>? investigationAction = null, Action<string>? openBrowser = null,
+    Action<long>? copilotAcknowledged = null)
 {
     public static readonly JsonSerializerOptions Json = new(JsonSerializerDefaults.Web)
     {
@@ -22,7 +23,7 @@ public sealed class Bridge(PrService prs, SettingsStore store, Func<string, Task
     public Task PushSnapshotAsync(Snapshot s) => post(JsonSerializer.Serialize(new { @event = "snapshot", data = s }, Json));
     public Task PushSettingsAsync() => post(JsonSerializer.Serialize(new { @event = "settings", data = store.Current }, Json));
     public Task PushToastAsync(string kind, string text) => post(JsonSerializer.Serialize(new { @event = "toast", data = new { kind, text } }, Json));
-    public Task PushCopilotRunAsync(object run) => post(JsonSerializer.Serialize(new { @event = "copilotRun", data = run }, Json));
+    public Task PushCopilotRunAsync(object run, long? deliveryId = null) => post(JsonSerializer.Serialize(new { @event = "copilotRun", data = run, deliveryId }, Json));
     public Task PushExplanationAsync(object state) => post(JsonSerializer.Serialize(new { @event = "explanation", data = state }, Json));
     public Task PushInvestigationAsync(object state) => post(JsonSerializer.Serialize(new { @event = "investigation", data = state }, Json));
     public Task PushVideoAsync(object state) => post(JsonSerializer.Serialize(new { @event = "prVideo", data = state }, Json));
@@ -62,11 +63,12 @@ public sealed class Bridge(PrService prs, SettingsStore store, Func<string, Task
         switch (method)
         {
             case "init":
-                return new { settings = store.Current, snapshot = prs.Current,
+                return new {
                     runs = copilotAction is null ? Array.Empty<object>() : await copilotAction("listCopilot", p),
                     explanations = explainAction is null ? Array.Empty<object>() : await explainAction("listExplanations", p),
                     investigations = investigationAction is null ? Array.Empty<object>() : await investigationAction("listInvestigations", p),
                     videos = videoAction is null ? Array.Empty<object>() : await videoAction("listVideos", p),
+                    settings = store.Current, snapshot = prs.Current,
                     version = typeof(Bridge).Assembly.GetName().Version?.ToString(3) };
             case "refresh":
                 kickRefresh(true);
@@ -124,6 +126,9 @@ public sealed class Bridge(PrService prs, SettingsStore store, Func<string, Task
             case "cancelCopilot":
                 if (copilotAction is null) throw new InvalidOperationException("The native inline Copilot runner is unavailable.");
                 return await copilotAction(method, p);
+            case "copilotRunAck":
+                copilotAcknowledged?.Invoke(p["deliveryId"]!.GetValue<long>());
+                return null;
             case "explainPr":
             case "cancelExplanation":
                 if (explainAction is null) throw new InvalidOperationException("The native PR explanation service is unavailable.");

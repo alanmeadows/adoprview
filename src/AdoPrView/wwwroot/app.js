@@ -29,6 +29,10 @@ function onHostMessage(m) {
     toast(m.data.text, m.data.kind);
   } else if (m.event === 'copilotRun') {
     try { updateCopilotRun(m.data); } catch (e) { toast(e.message || String(e), 'error'); }
+    finally {
+      if (host && Number.isSafeInteger(m.deliveryId))
+        host.postMessage(JSON.stringify({ id: ++seq, method: 'copilotRunAck', params: { deliveryId: m.deliveryId } }));
+    }
   } else if (m.event === 'explanation') {
     try { updateExplanation(m.data); } catch (e) { toast(e.message || String(e), 'error'); }
   } else if (m.event === 'investigation') {
@@ -206,6 +210,8 @@ function flushRowUpdates() {
 
 function setSnapshot(snap) {
   snap = snap || { prs: [] };
+  const currentRevision = (S.pendingSnapshot || S.snap).revision;
+  if (Number.isSafeInteger(currentRevision) && Number.isSafeInteger(snap.revision) && snap.revision < currentRevision) return;
   const revision = snap.orderRevision ?? 0;
   const sorted = [...snap.prs].sort((a, b) =>
     Object.keys(LANES).indexOf(a.lane) - Object.keys(LANES).indexOf(b.lane) ||
@@ -605,9 +611,11 @@ function updateCopilotRun(r) {
   if (!r || typeof r.key !== 'string' || typeof r.runId !== 'string' || typeof r.status !== 'string' || typeof r.output !== 'string')
     throw new Error('Copilot returned an invalid run state.');
   const old = S.runs.get(r.runId);
+  if (Number.isSafeInteger(old?.revision) && Number.isSafeInteger(r.revision) && r.revision < old.revision) return;
   if (old?.runId === r.runId && ((old.status !== 'preparing' && r.status === 'preparing') ||
     (['completed', 'failed', 'cancelled'].includes(old.status) && !old.mayBeRunning && runActive(r)))) return;
   if (old?.runId === r.runId && old.updatedAt && r.updatedAt && Date.parse(r.updatedAt) < Date.parse(old.updatedAt)) return;
+  if (Number.isFinite(old?.outputOffset) && Number.isFinite(r.outputOffset) && r.outputOffset < old.outputOffset) return;
   S.runs.set(r.runId, r);
   syncCopilotButton(r.key);
   // Stream only into this panel; never replace rows or move another click target.
