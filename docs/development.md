@@ -252,6 +252,9 @@ Both fake history and preflight sentinels are released in `finally`.
 The same `historyFirst` case asserts one reader, one occurrence of each received
 segment and the exact saved offset plus received-character count. Replay
 progress is entry-local, not a persisted schema change or output reset.
+The clamped countervariant publishes a bounded synthetic tail before Stop;
+incomplete replay still warns when truncation has removed the recovery header.
+Completed replay remains single-pass without a false unavailable-history warning.
 
 The smaller kernel-control opt-in executes the exact production runner in an
 explicitly selected, already-responsive WSL distribution:

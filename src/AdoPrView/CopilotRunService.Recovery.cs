@@ -237,7 +237,7 @@ public sealed partial class CopilotRunService
             if (status == "needs-attention") activePrs.Add(PrIdentity(e.State.Request));
             else activePrs.Remove(PrIdentity(e.State.Request));
         }
-        if (e.State.Output.StartsWith("[Recovered run history", StringComparison.Ordinal))
+        if (e.HistoryReplayStarted || e.State.Output.StartsWith("[Recovered run history", StringComparison.Ordinal))
         {
             var cancelling = status == "cancelled" || e.Cancellation.IsCancellationRequested;
             var unavailable = e.HistoryReplayStarted && !e.HistoryReplayCompleted;
