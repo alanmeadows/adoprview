@@ -800,6 +800,19 @@ static class MergeChecksTests
             Check(result is not null && f.Service.Current.Completed.Count == 0, "Unwatched author or repository was reinserted into history");
         });
 
+        await test("completed history: list completions use the watch scope current at publication, not refresh start", async () =>
+        {
+            foreach (var removeRepo in new[] { false, true })
+            {
+                using var f = new Fixture();
+                f.Store.Current.Whitelist.Add("Friend");
+                var listed = f.Add(); listed.Author = "Friend"; listed.Status = "completed"; listed.Closed = "2026-10-31T00:00:00Z";
+                f.BeforeCompletedList = () => { if (removeRepo) f.Store.Current.Repos.Clear(); else f.Store.Current.Whitelist.Clear(); };
+                await f.Service.RefreshAsync();
+                Check(f.Service.Current.Completed.Count == 0, (removeRepo ? "Removed repository" : "Removed whitelisted author") + " still published list-derived history");
+            }
+        });
+
         await test("completed history: completions closed during a refresh are kept against the projection-time clock; later dates are not", async () =>
         {
             using var f = new Fixture();

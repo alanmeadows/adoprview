@@ -449,7 +449,8 @@ const runActive = r => !!r && (r.mayBeRunning === true || ['preparing', 'recover
 const runCancelable = r => runActive(r) || (r?.status === 'needs-attention' && r.id > 0);
 const runsForPr = key => [...S.runs.values()].reverse().filter(r => r.key === key)
   .sort((a, b) => (Date.parse(b.startedAt) || 0) - (Date.parse(a.startedAt) || 0));
-const runForPr = key => runsForPr(key).find(runActive) || runsForPr(key).at(0);
+// A live run, else an outstanding (cancelable) recovery run, else the newest run.
+const runForPr = key => runsForPr(key).find(runActive) || runsForPr(key).find(runCancelable) || runsForPr(key).at(0);
 // Live/uncertain or starting runs lead the expanded detail; finished runs follow the PR context.
 const runLeads = key => runCancelable(runForPr(key)) || isBusy(key, 'triage');
 
@@ -954,7 +955,8 @@ function relocateRunGroup(key) {
   // selections elsewhere (failed logs, Explain, other PRs) are left attached.
   const selection = window.getSelection(), range = selection?.isCollapsed === false ? selection.getRangeAt(0) : null;
   const outputOnly = range && cards.some(card => $('.run-output', card)?.contains(range.startContainer) && $('.run-output', card).contains(range.endContainer));
-  if (rowsInUse() || crossRunOutputSelection() || (range && !outputOnly && cards.some(card => range.intersectsNode(card)))) {
+  const moving = [...cards, ...detail.querySelectorAll('.lead-blockers')];
+  if (rowsInUse() || crossRunOutputSelection() || (range && !outputOnly && moving.some(el => range.intersectsNode(el)))) {
     S.runRelocations.add(key); renderStatus(); return;
   }
   S.runRelocations.delete(key);
@@ -982,7 +984,8 @@ const humanText = a => ({ reviews: 'Human reviewer approval needed (+1)', pop: '
 
 // A leading run must not bury blockers that no leading card above already conveys (e.g. conflicts, required reviews).
 function leadBlockersCard(p) {
-  const approvalCard = !!(p.approval || S.approvals.has(p.key));
+  // Only a current approval offer conveys the required review; a cached outcome alone does not.
+  const approvalCard = !!p.approval;
   // Exclude only reasons a leading card already shows: each failed-gate card conveys its "Build failed" blocker.
   const shown = new Set((p.failedBuilds || []).map(fb => `Build failed: ${fb.name}`));
   const reasons = [

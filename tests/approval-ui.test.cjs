@@ -1236,6 +1236,16 @@ test('Copilot uncertain owned task remains busy despite newer terminal history u
   assert.doesNotMatch(hooks.actionButtons(pr).match(/<button[^>]*data-act="triage"[^>]*>/)[0], /running|aria-busy/);
 });
 
+test('an outstanding cancelable recovery run stays the PR run over newer terminal history', () => {
+  const { hooks, pr } = setup();
+  const recovery = { key: pr.key, runId: 'recovery', id: 7, status: 'needs-attention', mayBeRunning: false,
+    output: '', message: 'Task status unavailable', startedAt: '2026-01-01T00:00:00Z' };
+  hooks.updateCopilotRun(recovery);
+  hooks.updateCopilotRun({ ...recovery, runId: 'later-done', id: 8, status: 'completed', startedAt: '2026-01-02T00:00:00Z' });
+  assert.equal(hooks.runForPr(pr.key).runId, 'recovery');
+  assert.match(hooks.renderDetail(pr), /Show run/);
+});
+
 test('PoP requests only the captured native key and never opens an external tab or infers approval', async () => {
   const { hooks, pr, window } = setup();
   let resolve;

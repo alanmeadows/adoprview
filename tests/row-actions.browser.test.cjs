@@ -1283,7 +1283,7 @@ test('real row hit testing and action identity across refreshes', { timeout: 900
     await t.test('layout a leading run never buries conflicts or required reviews that no leading card conveys', async () => {
       await send('Emulation.setDeviceMetricsOverride', { width: 1600, height: 1000, deviceScaleFactor: 1, mobile: false });
       for (const c of [{ blockers: ['Merge conflicts'], humanActions: [], expect: ['Merge conflicts'] },
-        { blockers: [], humanActions: ['reviews'], expect: ['Human reviewer approval needed (+1)'] },
+        { blockers: [], humanActions: ['reviews'], cached: true, expect: ['Human reviewer approval needed (+1)'] },
         { mixed: true, blockers: ['Merge conflicts with main'], humanActions: ['reviews'],
           expect: ['Merge conflicts with main', 'Human reviewer approval needed (+1)'] }]) {
         await reset();
@@ -1292,7 +1292,7 @@ test('real row hit testing and action identity across refreshes', { timeout: 900
           const fbs=${!!c.mixed}?[{buildId:9105,name:'Synthetic mixed build',tasks:[{logId:105,name:'Synthetic mixed task',issues:[]}]}]:[];
           Object.assign(pr,{failedBuilds:fbs,error:null,approval:null,humanActions:${JSON.stringify(c.humanActions)},
             blockers:[...fbs.map(f=>'Build failed: '+f.name),...${JSON.stringify(c.blockers)}]});
-          S.approvals.delete(key);
+          if(${!!c.cached})S.approvals.set(key,{kind:'error',message:'Synthetic cached approval outcome'});else S.approvals.delete(key);
           S.runs.set('lead-live',{...pr,runId:'lead-live',status:'running',mayBeRunning:true,startedAt:'2026-01-02T00:00:00Z',output:'Live\\n'.repeat(200),outputOffset:1000});
           S.expanded.add(key);renderRows();}`);
         await frame();
@@ -1307,6 +1307,19 @@ test('real row hit testing and action identity across refreshes', { timeout: 900
         }
         assertOneStatusScope(layout);
       }
+      // A selection in the Blocking card defers the run group's relocation (which removes that card) until it clears.
+      const key = 'sample-service-id:105';
+      await move(10, 10);
+      await evaluate(`{const el=document.querySelector('#rows [data-key="${key}"] .lead-blockers li .k'),r=document.createRange();r.selectNodeContents(el);
+        window.getSelection().removeAllRanges();window.getSelection().addRange(r);window.blockNode=el.firstChild;window.blockText=window.getSelection().toString();}`);
+      await evaluate(`updateCopilotRun({...S.runs.get('lead-live'),status:'completed',mayBeRunning:false,revision:5})`);
+      await frame();
+      assert.deepEqual(await evaluate(`[window.blockNode.isConnected,window.getSelection().toString()===window.blockText,S.runRelocations.has('${key}')]`), [true, true, true],
+        'A selected Blocking reason stays attached while the relocation waits');
+      await evaluate('window.getSelection().removeAllRanges()');
+      await frame(); await frame();
+      assert.deepEqual(await evaluate(`[!!document.querySelector('#rows [data-key="${key}"] .lead-blockers'),S.runRelocations.size]`), [false, 0],
+        'The finished run moves behind the context once the selection clears');
     });
 
     await t.test('layout run relocation leaves native text selections in failed logs and Explain prose attached', async () => {

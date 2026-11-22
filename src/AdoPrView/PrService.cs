@@ -211,7 +211,8 @@ public sealed partial class PrService
 
             Publish(new Snapshot { Prs = active, LastRefresh = _time.GetUtcNow(), Me = meName ?? prev.Me,
                 RepoErrors = repoErrors.ToList(), MergeCheckStatus = mergeStatus,
-                Completed = MergeCompleted(completed.Concat(moved), active),
+                // Settings may change while reads are in flight: every candidate must still be in the current watch scope.
+                Completed = MergeCompleted(completed.Where(c => Watched(c.Org, c.Project, c.Repo, c.IsMine, c.Author)).Concat(moved), active),
                 CompletedWarnings = completedWarnings.Order(StringComparer.OrdinalIgnoreCase).ToList(),
                 OrderRevision = prev.OrderRevision + (Interlocked.Exchange(ref _orderRequested, 0) != 0 ? 1 : 0) });
         }
@@ -256,16 +257,16 @@ public sealed partial class PrService
 
     // Detail and re-check results apply the same current watched-repository and author scope as the history list.
     CompletedPr? ToCompleted(PrView pr, DateTimeOffset since, DateTimeOffset now) =>
-        pr.IsActive || pr.CompletedAt is not { } closed || !InWindow(closed, since, now) || !Watched(pr) ? null
+        pr.IsActive || pr.CompletedAt is not { } closed || !InWindow(closed, since, now) || !Watched(pr.Org, pr.Project, pr.Repo, pr.IsMine, pr.Author) ? null
             : new(pr.Key, pr.Id, pr.Title, pr.Url, pr.Org, pr.Project, pr.Repo, pr.RepoId, pr.Author, pr.IsMine,
                 _store.Current.Hidden.Contains(pr.Key, StringComparer.OrdinalIgnoreCase), closed, null);
 
-    bool Watched(PrView pr)
+    bool Watched(string org, string project, string repo, bool isMine, Person author)
     {
         var settings = _store.Current;
-        var repoKey = $"{pr.Org}/{pr.Project}/{pr.Repo}".ToLowerInvariant();
+        var repoKey = $"{org}/{project}/{repo}".ToLowerInvariant();
         return settings.Repos.Any(r => r.Key == repoKey) &&
-               (pr.IsMine || MatchesWhitelist(pr.Author.Name, pr.Author.UniqueName ?? "", settings.Whitelist.ToList()));
+               (isMine || MatchesWhitelist(author.Name, author.UniqueName ?? "", settings.Whitelist.ToList()));
     }
 
     static List<CompletedPr> MergeCompleted(IEnumerable<CompletedPr> completed, IEnumerable<PrView> active)
