@@ -52,6 +52,7 @@ const S = {
   repo: '',
   q: '',
   logs: new Map(),          // logKey() -> text | Error | 'loading'
+  logLoads: new Set(),
   showTs: new Set(),
   busy: new Set(),          // "key:action"
   approvals: new Map(),    // key -> last approval provider outcome (never a credential)
@@ -77,6 +78,9 @@ const S = {
   speechEpoch: 0,
   rowMenu: null,
   drawer: false,
+  drawerDraft: new Map(),
+  drawerDraftReset: false,
+  drawerEpoch: 0,
   themeBusy: false,
   discovered: null,
 };
@@ -297,6 +301,7 @@ function laneVisible(prs) {
 }
 
 function renderRows(whenIdle = false) {
+  const focused = expansionControl(document.activeElement);
   const selection = captureRunOutputs();
   const players = new Map([...document.querySelectorAll('video[data-video-media]')].map(v => [v.dataset.videoMedia, v]));
   renderRowsContent(whenIdle);
@@ -305,6 +310,23 @@ function renderRows(whenIdle = false) {
     const existing = players.get(placeholder.dataset.videoMedia);
     if (existing && existing !== placeholder) placeholder.replaceWith(existing);
   }
+  restoreExpansionFocus(focused);
+}
+
+function expansionControl(target) {
+  const control = target?.closest?.('[role="button"][data-act][aria-expanded]');
+  return control && !control.closest('.md') && control.matches(
+    '.row > .c-pr[data-act="toggle"], .row > .gate > .pill[data-act="gate"], #runShelf > .pr > .run-heading[data-act="toggle"]')
+    ? control : null;
+}
+
+function restoreExpansionFocus(control) {
+  if (!control || control.isConnected) return;
+  const key = control.closest('.pr')?.dataset.key;
+  const row = [...document.querySelectorAll('.pr')].find(el => el.dataset.key === key);
+  const next = [...(row?.querySelectorAll('[role="button"][data-act][aria-expanded]') || [])]
+    .find(el => expansionControl(el) === el && el.dataset.act === control.dataset.act && el.dataset.gate === control.dataset.gate);
+  next?.focus({ preventScroll: true });
 }
 
 function renderRowsContent(whenIdle = false) {
@@ -750,6 +772,7 @@ function renderRunShelf(whenIdle = false) {
 function renderRunShelfContent() {
   const shelf = $('#runShelf');
   if (!shelf) return;
+  const focused = shelf.contains?.(document.activeElement) ? expansionControl(document.activeElement) : null;
   const unfiltered = !S.lane && !S.q.trim() && !S.repo && S.scope === 'all';
   const loaded = !!(S.snap.lastRefresh || S.snap.error);
   const present = new Set(S.snap.prs.filter(p => !ignoredDraft(p)).map(p => p.key));
@@ -762,11 +785,12 @@ function renderRunShelfContent() {
   shelf.innerHTML = keys.map(key => {
     const r = runForPr(key), open = S.expanded.has(key);
     return `<div class="pr run-only ${open ? 'open' : ''}" data-key="${esc(key)}">
-      <div class="run-heading" data-act="toggle">${svg('chev').replace('<svg', '<svg class="chev"')}
+      <div class="run-heading" data-act="toggle" role="button" tabindex="0" aria-expanded="${open}">${svg('chev').replace('<svg', '<svg class="chev"')}
         <div class="prmain"><div class="title">${esc(r.title)}</div><div class="meta small"><span class="id">!${esc(r.id)}</span><span class="sep"> · </span><span>${esc(r.repo)}</span><span class="sep"> · </span><span>${findPr(key) && ignoredDraft(findPr(key)) ? 'Ignored draft' : 'PR no longer in the active list'} · ${esc(runSummary(r))}</span></div></div></div>
       ${open ? `<div class="detail"><div class="full stack">${renderRunCard(key, r)}${earlierRunCards(key)}</div></div>` : ''}
     </div>`;
   }).join('');
+  restoreExpansionFocus(focused);
 }
 
 function updateCopilotRun(r) {
@@ -870,8 +894,9 @@ function gateCell(p, g) {
   if (g === 'autocomplete' && gate.state === 'human') clickable = true;
   if (g === 'reviews' && gate.state === 'human') clickable = true;
   if (['fail', 'warn', 'pending'].includes(gate.state) && ['build', 'merge', 'comments', 'agency', 'checks', 'reviews'].includes(g)) clickable = true;
+  const inspection = clickable && !['pop', 'autocomplete'].includes(g);
   const tip = [gate.label, gate.detail].filter(Boolean).join(' — ');
-  return `<div class="gate"><span class="pill ${gate.state} ${clickable ? 'click' : ''}" ${clickable ? `data-act="gate" data-gate="${g}"` : ''} title="${esc(tip)}"><i></i><span>${esc(gate.label)}</span></span></div>`;
+  return `<div class="gate"><span class="pill ${gate.state} ${clickable ? 'click' : ''}" ${clickable ? `data-act="gate" data-gate="${g}"` : ''} ${inspection ? `role="button" tabindex="0" aria-expanded="${S.expanded.has(p.key)}"` : ''} title="${esc(tip)}"><i></i><span>${esc(gate.label)}</span></span></div>`;
 }
 
 function isBusy(key, a) { return S.busy.has(`${key}:${a}`); }
@@ -1028,7 +1053,7 @@ function renderPr(p, meta) {
   if (p.error) tags.push(`<span class="tag err" title="${esc(p.error)}">load error</span>`);
   return `<div class="pr ${open ? 'open' : ''}" data-key="${esc(p.key)}" style="--c:${meta.c}">
     <div class="row" data-act="toggle">
-      <div class="c-pr">${svg('chev').replace('<svg', '<svg class="chev"')}
+      <div class="c-pr" data-act="toggle" role="button" tabindex="0" aria-expanded="${open}">${svg('chev').replace('<svg', '<svg class="chev"')}
         <div class="prmain">
           <div class="title" title="${esc(p.title)}">${esc(p.title)}</div>
           <div class="meta">${tags.join('')}${metaBits.join('<span class="sep">·</span>')}</div>
@@ -1092,7 +1117,7 @@ function renderDetail(p) {
           ${t.logId != null ? (typeof log === 'string'
             ? `<button class="mini ${S.showTs.has(lk) ? 'on' : ''}" data-act="ts" data-log="${esc(lk)}">${svg('clock')} Timestamps</button>
                <button class="mini" data-act="copyLog" data-log="${esc(lk)}">${svg('copy')} Copy</button>`
-            : log === undefined ? `<button class="mini" data-act="loadLog" data-build="${fb.buildId}" data-logid="${t.logId}">Load log tail</button>` : '') : ''}
+            : log === undefined || log instanceof Error ? `<button class="mini" data-act="loadLog" data-build="${fb.buildId}" data-logid="${t.logId}" ${S.logLoads.has(lk) ? 'disabled aria-busy="true"' : ''}>${log instanceof Error ? 'Retry log tail' : 'Load log tail'}</button>` : '') : ''}
         </div>${issues}${logHtml}</div>`;
     }).join('') || '<div class="body small">No failed task records found in the timeline.</div>';
     full.push(`<div class="card failed"><h3>✕ Failed gate · ${esc(fb.name)} <span class="small">build ${fb.buildId}</span><span class="grow"></span>
@@ -1193,13 +1218,17 @@ async function loadLog(key, buildId, logId) {
   const p = findPr(key);
   if (!p) return;
   const lk = logKey(p, buildId, logId);
-  if (S.logs.get(lk) === 'loading') return;
-  S.logs.set(lk, 'loading');
+  if (S.logLoads.has(lk)) return;
+  S.logLoads.add(lk);
+  if (S.logs.get(lk) instanceof Error) renderRows(true);
+  else S.logs.set(lk, 'loading');
   try {
     const text = await rpc('logTail', { key, buildId, logId, lines: 200 });
     S.logs.set(lk, text || '(empty log)');
   } catch (e) {
     S.logs.set(lk, e);
+  } finally {
+    S.logLoads.delete(lk);
   }
   renderRows(true);
 }
@@ -1585,6 +1614,8 @@ async function onSpeechAction(action) {
 }
 
 async function openDrawer() {
+  ++S.drawerEpoch;
+  S.drawerDraft.clear(); S.drawerDraftReset = true;
   S.drawer = true; $('#drawer').hidden = false; $('#scrim').hidden = false; renderDrawer();
   await loadApprovalSettings();
 }
@@ -1603,12 +1634,33 @@ async function loadApprovalSettings() {
   if (S.drawer) renderDrawer();
 }
 
+const drawerFieldKey = el => el.id || `wsl:${el.dataset.wslRepo}`;
+const drawerFields = () => [...$('#drawerBody').querySelectorAll('input[id], select[id], textarea[id], input[data-wsl-repo]')];
+
+function clearSubmittedDrawerInput(id, value, epoch) {
+  const current = $('#' + id);
+  if (S.drawer && epoch === S.drawerEpoch && current?.value === value) {
+    current.value = '';
+    S.drawerDraft.delete(id);
+  }
+}
+
 function renderDrawer() {
   const st = S.settings;
   if (!st) return;
   const titles = new Map(S.snap.prs.map((p) => [p.key.toLowerCase(), p]));
   const disc = S.discovered;
-  $('#drawerBody').innerHTML = `
+  const body = $('#drawerBody');
+  const fields = drawerFields();
+  if (S.drawerDraftReset) { S.drawerDraft.clear(); S.drawerDraftReset = false; }
+  else for (const el of fields) {
+    if (el.id === 'theme') continue;
+    const initial = el.tagName === 'SELECT' ? [...el.options].find(o => o.defaultSelected)?.value ?? el.options[0]?.value : el.defaultValue;
+    const dirty = el.type === 'checkbox' ? el.checked !== el.defaultChecked : el.value !== initial;
+    if (dirty) S.drawerDraft.set(drawerFieldKey(el), { value: el.value, checked: el.checked });
+    else S.drawerDraft.delete(drawerFieldKey(el));
+  }
+  body.innerHTML = `
     <div class="section">
       <h4>Appearance</h4>
       <p class="help" id="themeHelp">Changes apply and save immediately. Light Mode is the default.</p>
@@ -1675,15 +1727,43 @@ function renderDrawer() {
     </div>
     <div class="section">
       <h4>Copilot triage instructions</h4>
-      <p class="help">The "Ask" appended to every triage prompt. Leave empty for the default (drive the PR to green, no auto-complete).</p>
-      <div class="field"><textarea id="triageInstructions" placeholder="Default instructions">${esc(st.triageInstructions || '')}</textarea></div>
+      <p class="help">Override the "Ask" in new Fix prompts. Leave empty to keep the default (drive the PR to green, no auto-complete). Required gates and execution boundaries still apply.</p>
+      <div class="field"><label for="triageInstructions">Custom Ask (override)</label><textarea id="triageInstructions" placeholder="Default instructions">${esc(st.triageInstructions || '')}</textarea></div>
+      <p class="help">Additional instructions are appended once at the very end of Copy prompt and new Fix launches, after the generated gates and verified launch/publish context. They do not replace the default or custom Ask, or change existing sessions.</p>
+      <div class="field"><label for="additionalTriageInstructions">Additional instructions (append)</label><textarea id="additionalTriageInstructions" placeholder="Optional additional instructions">
+${esc(st.additionalTriageInstructions || '')}</textarea></div>
     </div>
     <div class="section"><button class="btn primary" data-dact="save">${svg('check')} Save settings</button></div>`;
+
+  const current = drawerFields();
+  for (const el of current) {
+    const draft = S.drawerDraft.get(drawerFieldKey(el));
+    if (draft) { el.value = draft.value; if (el.type === 'checkbox') el.checked = draft.checked; }
+  }
 }
 
-async function saveSettings(patch) {
+async function saveSettings(patch, commitDraft = false) {
+  const epoch = S.drawerEpoch;
+  const submitted = commitDraft ? new Map(drawerFields()
+    .filter(el => !['theme', 'repoUrl', 'wlInput'].includes(el.id))
+    .map(el => [drawerFieldKey(el), { value: el.value, checked: el.checked }])) : null;
   const st = { ...S.settings, ...patch };
   S.settings = await rpc('saveSettings', { settings: st });
+  if (submitted && S.drawer && epoch === S.drawerEpoch) {
+    // Rebase capture to the submission so newer edits reverted to old defaults stay dirty.
+    for (const el of drawerFields()) {
+      const value = submitted.get(drawerFieldKey(el));
+      if (!value) continue;
+      const current = { value: el.value, checked: el.checked };
+      if (current.value === value.value && current.checked === value.checked) S.drawerDraft.delete(drawerFieldKey(el));
+      else S.drawerDraft.set(drawerFieldKey(el), current);
+      if (el.type === 'checkbox') el.defaultChecked = value.checked;
+      else if (el.tagName === 'SELECT') for (const option of el.options) option.defaultSelected = option.value === value.value;
+      else el.defaultValue = value.value;
+      el.value = current.value;
+      if (el.type === 'checkbox') el.checked = current.checked;
+    }
+  }
   render();
 }
 
@@ -1738,9 +1818,11 @@ async function onDrawerAction(act, el) {
   try {
     switch (act) {
       case 'addRepo': {
-        const url = $('#repoUrl').value.trim();
+        const value = $('#repoUrl').value, epoch = S.drawerEpoch;
+        const url = value.trim();
         if (!url) return;
         S.settings = await rpc('addRepo', { url });
+        clearSubmittedDrawerInput('repoUrl', value, epoch);
         toast('Repository added — refreshing');
         break;
       }
@@ -1761,9 +1843,11 @@ async function onDrawerAction(act, el) {
         toast('Repositories added — refreshing');
         break;
       case 'addWl': {
-        const v = $('#wlInput').value.trim();
+        const value = $('#wlInput').value, epoch = S.drawerEpoch;
+        const v = value.trim();
         if (!v) return;
         await saveSettings({ whitelist: [...S.settings.whitelist, v] });
+        clearSubmittedDrawerInput('wlInput', value, epoch);
         toast(`Watching PRs by ${v}`);
         break;
       }
@@ -1774,20 +1858,26 @@ async function onDrawerAction(act, el) {
         S.settings = await rpc('unhide', { key: el.dataset.key });
         S.hideUndo = S.hideUndo.filter((h) => h.key.toLowerCase() !== el.dataset.key.toLowerCase());
         break;
-      case 'save':
+      case 'save': {
+        const additionalInstructions = $('#additionalTriageInstructions').value;
+        const storedAdditionalInstructions = S.settings.additionalTriageInstructions;
         await saveSettings({
           refreshSeconds: +$('#refreshSeconds').value || 120,
           mergeCheckMinutes: +$('#mergeCheckMinutes').value || 10,
           notifications: $('#notifications').checked,
           sound: $('#sound').checked,
           ignoreDrafts: $('#ignoreDrafts').checked,
-          autoComplete: { mergeStrategy: $('#mergeStrategy').value, deleteSourceBranch: $('#deleteSourceBranch').checked, transitionWorkItems: $('#transitionWorkItems').checked },
+          autoComplete: { ...S.settings.autoComplete, mergeStrategy: $('#mergeStrategy').value, deleteSourceBranch: $('#deleteSourceBranch').checked, transitionWorkItems: $('#transitionWorkItems').checked },
           triageInstructions: $('#triageInstructions').value,
+          additionalTriageInstructions: typeof storedAdditionalInstructions === 'string' &&
+            additionalInstructions === storedAdditionalInstructions.replace(/\r\n?/g, '\n')
+            ? storedAdditionalInstructions : additionalInstructions,
           wslDistro: $('#wslDistro').value.trim(),
           wslRepoDirectories: Object.fromEntries([...document.querySelectorAll('[data-wsl-repo]')].map(e => [e.dataset.wslRepo, e.value.trim()]).filter(([, value]) => value)),
-        });
+        }, true);
         toast('Settings saved');
         break;
+      }
     }
   } catch (e) {
     if (S.discovered === 'loading') S.discovered = null;
@@ -1900,6 +1990,13 @@ function wire() {
   });
   document.addEventListener('keydown', (e) => {
     if (e.key === 'Escape' && S.rowMenu) { e.preventDefault(); closeRowMenu(); flushRowUpdates(); return; }
+    const control = expansionControl(e.target);
+    if (control && ['Enter', ' '].includes(e.key)) {
+      e.preventDefault();
+      if (e.repeat || control.getAttribute('aria-disabled') === 'true') return;
+      control.click();
+      return;
+    }
     const inInput = /INPUT|TEXTAREA|SELECT/.test(document.activeElement?.tagName) || document.activeElement?.isContentEditable;
     if (!inInput && e.ctrlKey && !e.shiftKey && !e.altKey && !e.metaKey && e.key.toLowerCase() === 'z' && S.hideUndo.length) {
       e.preventDefault();

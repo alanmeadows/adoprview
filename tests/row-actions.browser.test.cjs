@@ -7,6 +7,147 @@ const path = require('node:path');
 const os = require('node:os');
 const { pathToFileURL } = require('node:url');
 
+test('Additional Fix fields are independently editable and restored in the real source GUI', { timeout: 60000 }, async () => {
+  const profile = await mkdtemp(path.join(os.tmpdir(), 'ado-fix-fields-'));
+  const browser = process.env.ROW_TEST_BROWSER || 'C:\\Program Files (x86)\\Microsoft\\Edge\\Application\\msedge.exe';
+  const child = spawn(browser, [
+    '--headless=new', '--remote-debugging-port=0', '--no-first-run', '--disable-extensions',
+    '--no-default-browser-check', `--user-data-dir=${profile}`, 'about:blank',
+  ], { stdio: ['ignore', 'ignore', 'pipe'] });
+  const exited = once(child, 'exit');
+  let socket;
+  try {
+    const url = await new Promise((resolve, reject) => {
+      const timer = setTimeout(() => reject(new Error('Browser startup timed out')), 15000);
+      child.once('error', error => { clearTimeout(timer); reject(error); });
+      child.stderr.on('data', chunk => {
+        const match = chunk.toString().match(/DevTools listening on (ws:\/\/\S+)/);
+        if (match) { clearTimeout(timer); resolve(match[1]); }
+      });
+    });
+    socket = new WebSocket(url);
+    await once(socket, 'open');
+    let id = 0, session;
+    const pending = new Map();
+    socket.addEventListener('message', event => {
+      const message = JSON.parse(event.data), request = pending.get(message.id);
+      if (!request) return;
+      pending.delete(message.id);
+      message.error ? request.reject(new Error(JSON.stringify(message.error))) : request.resolve(message.result);
+    });
+    const send = (method, params = {}, useSession = true) => new Promise((resolve, reject) => {
+      const n = ++id;
+      pending.set(n, { resolve, reject });
+      socket.send(JSON.stringify({ id: n, method, params, ...(useSession && session ? { sessionId: session } : {}) }));
+    });
+    const target = await send('Target.createTarget', { url: 'about:blank' }, false);
+    session = (await send('Target.attachToTarget', { targetId: target.targetId, flatten: true }, false)).sessionId;
+    const evaluate = async expression => {
+      const result = await send('Runtime.evaluate', { expression, awaitPromise: true, returnByValue: true });
+      if (result.exceptionDetails) throw new Error(JSON.stringify(result.exceptionDetails));
+      return result.result.value;
+    };
+    const click = async selector => {
+      const point = await evaluate(`(()=>{
+        document.querySelector('#toasts').replaceChildren();
+        const el=document.querySelector(${JSON.stringify(selector)});
+        if(!el)throw Error('Missing control');
+        el.scrollIntoView({block:'center'});
+        const r=el.getBoundingClientRect(),x=r.x+r.width/2,y=r.y+r.height/2;
+        const hit=document.elementFromPoint(x,y);
+        if(!el.contains(hit))throw Error('Control is not hit-testable: '+${JSON.stringify(selector)}+' covered by '+(hit?.className||hit?.tagName||'none'));
+        return {x,y};
+      })()`);
+      for (const type of ['mousePressed', 'mouseReleased'])
+        await send('Input.dispatchMouseEvent', { type, ...point, button: 'left', clickCount: 1 });
+    };
+    await send('Page.enable');
+    await send('Emulation.setDeviceMetricsOverride', { width: 1280, height: 900, deviceScaleFactor: 1, mobile: false });
+    const root = path.resolve(__dirname, '..', 'src', 'AdoPrView', 'wwwroot', 'index.html');
+    await send('Page.navigate', { url: pathToFileURL(root).href + '?mock=1' });
+    await evaluate(`new Promise((resolve,reject)=>{
+      const deadline=Date.now()+10000;
+      const check=()=>window.__ready?resolve():Date.now()>deadline?reject(Error('UI did not boot')):setTimeout(check,20);check();
+    })`);
+    await evaluate(`
+      S.snap.approvalProvider=null;
+      S.settings.triageInstructions=null;S.settings.additionalTriageInstructions=null;
+      S.settings.futureSetting='SYNTHETIC-KEEP';
+      window.fixSaved=[];
+      window.fixExisting=['running','recovering','completed'].map((status,i)=>({
+        key:'offline:'+i,runId:'existing-'+i,status,output:'Captured session '+i
+      }));
+      for(const run of window.fixExisting)S.runs.set(run.runId,run);
+      window.MockHost.rpc=async(method,p)=>{
+        if(method!=='saveSettings')throw Error('Unexpected host call '+method);
+        window.fixSaved.push(structuredClone(p.settings));
+        return structuredClone(p.settings);
+      };
+    `);
+    await click('#settingsBtn');
+    const labels = await evaluate(`['triageInstructions','additionalTriageInstructions'].map(id=>
+      document.querySelector('label[for="'+id+'"]').textContent)`);
+    assert.deepEqual(labels, ['Custom Ask (override)', 'Additional instructions (append)']);
+    const ask = 'CUSTOM ASK: fix only the synthetic issue';
+    const extra = '\n  EXTRA GUIDANCE\nKeep the final newline.\n';
+    await click('#triageInstructions');
+    await send('Input.insertText', { text: ask });
+    await click('#additionalTriageInstructions');
+    await send('Input.insertText', { text: extra });
+    await click('[data-dact="save"]');
+    assert.equal(await evaluate('window.fixSaved.length'), 1);
+    const saved = await evaluate('window.fixSaved[0]');
+    assert.equal(saved.triageInstructions, ask);
+    assert.equal(saved.additionalTriageInstructions, extra);
+    assert.equal(saved.futureSetting, 'SYNTHETIC-KEEP');
+    await evaluate('closeDrawer();S.settings=structuredClone(window.fixSaved[0]);');
+    await click('#settingsBtn');
+    assert.deepEqual(await evaluate(`['triageInstructions','additionalTriageInstructions'].map(id=>
+      document.getElementById(id).value)`), [ask, extra]);
+    await click('[data-dact="save"]');
+    assert.equal(await evaluate('window.fixSaved[1].additionalTriageInstructions'), extra);
+    await evaluate(`document.querySelector('#triageInstructions').closest('.section').scrollIntoView({block:'center'});`);
+    if (process.env.ADOPRVIEW_FIX_SCREENSHOT) {
+      await evaluate('new Promise(resolve=>setTimeout(resolve,250))');
+      const screenshot = await send('Page.captureScreenshot', { format: 'png' });
+      await writeFile(process.env.ADOPRVIEW_FIX_SCREENSHOT, Buffer.from(screenshot.data, 'base64'));
+    }
+    await click('#additionalTriageInstructions');
+    await send('Input.dispatchKeyEvent', { type: 'keyDown', key: 'a', code: 'KeyA', windowsVirtualKeyCode: 65, modifiers: 2 });
+    await send('Input.dispatchKeyEvent', { type: 'keyUp', key: 'a', code: 'KeyA', windowsVirtualKeyCode: 65, modifiers: 2 });
+    await send('Input.dispatchKeyEvent', { type: 'keyDown', key: 'Backspace', code: 'Backspace', windowsVirtualKeyCode: 8 });
+    await send('Input.dispatchKeyEvent', { type: 'keyUp', key: 'Backspace', code: 'Backspace', windowsVirtualKeyCode: 8 });
+    await click('[data-dact="save"]');
+    assert.equal(await evaluate('window.fixSaved[2].additionalTriageInstructions'), '');
+    assert.equal(await evaluate('window.fixSaved[2].triageInstructions'), ask);
+    for (const original of ['\n  CRLF guidance\r\nverbatim\n', '\r  CR guidance\rverbatim\r']) {
+      const normalized = original.replace(/\r\n?/g, '\n');
+      await evaluate(`S.settings.additionalTriageInstructions=${JSON.stringify(original)};renderDrawer();`);
+      assert.equal(await evaluate("document.querySelector('#additionalTriageInstructions').value"), normalized);
+      await click('[data-dact="save"]');
+      assert.equal(await evaluate('window.fixSaved.at(-1).additionalTriageInstructions'), original);
+      await evaluate('closeDrawer();S.settings=structuredClone(window.fixSaved.at(-1));');
+      await click('#settingsBtn');
+      assert.equal(await evaluate("document.querySelector('#additionalTriageInstructions').value"), normalized);
+      await click('#additionalTriageInstructions');
+      await send('Input.dispatchKeyEvent', { type: 'keyDown', key: 'a', code: 'KeyA', windowsVirtualKeyCode: 65, modifiers: 2 });
+      await send('Input.dispatchKeyEvent', { type: 'keyUp', key: 'a', code: 'KeyA', windowsVirtualKeyCode: 65, modifiers: 2 });
+      const edited = normalized + 'EDITED';
+      await send('Input.insertText', { text: edited });
+      await click('[data-dact="save"]');
+      assert.equal(await evaluate('window.fixSaved.at(-1).additionalTriageInstructions'), edited);
+      assert.equal(await evaluate('window.fixSaved.at(-1).triageInstructions'), ask);
+    }
+    assert.equal(await evaluate('window.fixExisting.every(run=>S.runs.get(run.runId)===run)'), true);
+    await send('Browser.close', {}, false);
+  } finally {
+    socket?.close();
+    if (child.exitCode === null) child.kill();
+    await exited;
+    await rm(profile, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
+  }
+});
+
 // No browser packages required: Node 22+ and a local Chromium browser.
 test('real row hit testing and action identity across refreshes', { timeout: 90000 }, async t => {
   if (process.env.ROW_TEST_FILTER) {
@@ -57,6 +198,13 @@ test('real row hit testing and action identity across refreshes', { timeout: 900
     const press = p => send('Input.dispatchMouseEvent', { type: 'mousePressed', button: 'left', clickCount: 1, x: p.x, y: p.y });
     const release = p => send('Input.dispatchMouseEvent', { type: 'mouseReleased', button: 'left', clickCount: 1, x: p.x, y: p.y });
     const click = async p => { await move(p.x, p.y); await press(p); await release(p); };
+    const keyboard = async (key, windowsVirtualKeyCode, modifiers = 0) => {
+      const code = key === ' ' ? 'Space' : key;
+      await send('Input.dispatchKeyEvent', { type: 'keyDown', key, code, windowsVirtualKeyCode, modifiers,
+        ...(key === 'Enter' ? { text: '\r' } : {}) });
+      await send('Input.dispatchKeyEvent', { type: 'keyUp', key, code, windowsVirtualKeyCode, modifiers });
+      await frame();
+    };
     await send('Page.enable');
     await send('Page.bringToFront');
     await send('Emulation.setEmulatedMedia', { features: [{ name: 'prefers-reduced-motion', value: 'no-preference' }] });
@@ -573,6 +721,126 @@ test('real row hit testing and action identity across refreshes', { timeout: 900
       assert.deepEqual((await calls()).at(-1), { method: 'openUrl', url: expectedUrl(p) });
     });
 
+    await t.test('GUI keyboard expands rows, build gates and retained run headings without launching an action', async () => {
+      await reset(true);
+      const key = 'sample-service-id:101';
+      await evaluate(`S.logs.clear();S.snap.prs=S.snap.prs.map(p=>p.key==='${key}'?{...p,gates:{...p.gates,
+        build:{state:'fail',label:'Synthetic build'},comments:{state:'fail',label:'Open thread'}},
+        failedBuilds:[{buildId:9001,name:'Synthetic build',tasks:[{logId:101,name:'Synthetic failed task',issues:[]}]}]}:p);render();
+        window.inspectionClicks=[];window.inspectionClick=e=>{
+          const c=e.target.closest('[role="button"][data-act][aria-expanded]');
+          if(c)window.inspectionClicks.push({key:c.closest('.pr').dataset.key,act:c.dataset.act,gate:c.dataset.gate||null});
+        };document.addEventListener('click',window.inspectionClick,true);`);
+      const tabTo = async selector => {
+        await evaluate(`document.querySelector('#settingsBtn').focus()`);
+        for (let n = 0; n < 65; n++) {
+          await keyboard('Tab', 9);
+          if (await evaluate(`document.activeElement.matches(${JSON.stringify(selector)})`)) return;
+        }
+        assert.fail(`Tab never reached ${selector}`);
+      };
+      const state = () => evaluate(`({key:document.activeElement.closest('.pr')?.dataset.key,
+        expanded:document.activeElement.getAttribute('aria-expanded'),open:S.expanded.has('${key}')})`);
+      const row = `[data-key="${key}"] .c-pr`;
+      await tabTo(row);
+      assert.equal(await evaluate(`getComputedStyle(document.activeElement).outlineStyle`), 'solid');
+      assert.equal(await evaluate(`document.querySelector('[data-key="${key}"] .detail')`), null);
+      assert.equal(await evaluate(`!!document.querySelector('button button,[role="button"] button')`), false);
+      for (const [keyName, code] of [['Enter', 13], [' ', 32]]) {
+        const scroll = await evaluate(`({page:scrollY,main:document.querySelector('main').scrollTop})`);
+        const clicks = await evaluate('window.inspectionClicks.length');
+        await keyboard(keyName, code);
+        assert.deepEqual(await state(), {key,expanded:'true',open:true});
+        assert.equal(await evaluate('window.inspectionClicks.length'), clicks + 1, 'One activation per key press');
+        if (keyName === ' ') assert.deepEqual(await evaluate(`({page:scrollY,main:document.querySelector('main').scrollTop})`), scroll);
+        await send('Input.dispatchKeyEvent', {type:'keyDown',key:keyName,code:keyName===' '?'Space':keyName,
+          windowsVirtualKeyCode:code,autoRepeat:true});
+        await send('Input.dispatchKeyEvent', {type:'keyUp',key:keyName,windowsVirtualKeyCode:code});
+        assert.deepEqual(await state(), {key,expanded:'true',open:true});
+        assert.equal(await evaluate('window.inspectionClicks.length'), clicks + 1, 'Held keys must not toggle again');
+        await keyboard(keyName, code);
+        assert.deepEqual(await state(), {key,expanded:'false',open:false});
+      }
+      for (const gate of ['build', 'comments']) {
+        for (const [keyName, code] of [['Enter', 13], [' ', 32]]) {
+          await tabTo(`[data-key="${key}"] [data-act="gate"][data-gate="${gate}"]`);
+          assert.deepEqual(await state(), {key,expanded:'false',open:false});
+          await keyboard(keyName, code);
+          assert.deepEqual(await state(), {key,expanded:'true',open:true});
+          assert.equal(await evaluate('document.activeElement.dataset.gate'), gate);
+          await keyboard('Escape', 27);
+          assert.deepEqual(await state(), {key,expanded:'false',open:false});
+        }
+      }
+      const inactiveGates = await evaluate(`[...document.querySelectorAll('[data-key="${key}"] .pill:not([data-act])')].map(c=>({
+        role:c.getAttribute('role'),tab:c.getAttribute('tabindex'),expanded:c.getAttribute('aria-expanded')}))`);
+      assert.ok(inactiveGates.length > 0);
+      assert.ok(inactiveGates.every(c => c.role === null && c.tab === null && c.expanded === null));
+      await evaluate(`document.querySelector('#search').focus();
+        {const pr=S.snap.prs.find(p=>p.key==='${key}');
+        S.runs.set('keyboard-shelf',{...pr,runId:'keyboard-shelf',status:'running',output:'Synthetic retained output'});
+        setSnapshot({...S.snap,prs:S.snap.prs.filter(p=>p.key!=='${key}')});renderRows();}`);
+      for (const [keyName, code] of [['Enter', 13], [' ', 32]]) {
+        await tabTo('#runShelf .run-heading');
+        assert.deepEqual(await state(), {key,expanded:'false',open:false});
+        const scroll = await evaluate(`({page:scrollY,main:document.querySelector('main').scrollTop})`);
+        await keyboard(keyName, code);
+        assert.deepEqual(await state(), {key,expanded:'true',open:true});
+        assert.equal(await evaluate(`document.querySelector('#runShelf .run-output').textContent`), 'Synthetic retained output');
+        if (keyName === ' ') assert.deepEqual(await evaluate(`({page:scrollY,main:document.querySelector('main').scrollTop})`), scroll);
+        await keyboard(keyName, code);
+        assert.deepEqual(await state(), {key,expanded:'false',open:false});
+        assert.equal(await evaluate(`document.querySelector('#runShelf .run-output')`), null);
+      }
+      const requests = await calls();
+      assert.ok(requests.every(c => c.method === 'logTail'), JSON.stringify(requests));
+      assert.ok(requests.every(c => c.key === key && c.buildId === 9001 && c.logId === 101));
+      assert.deepEqual(await evaluate('window.confirmations'), []);
+      await evaluate('document.removeEventListener("click",window.inspectionClick,true)');
+    });
+
+    await t.test('GUI keyboard inspection focus survives refresh, Escape and collapsed shelf streaming without hidden targets', async () => {
+      await reset(true);
+      const key = 'sample-service-id:101';
+      await keyboard('Tab', 9);
+      await evaluate(`document.querySelector('[data-key="${key}"] .c-pr').focus();window.swapRows()`);
+      assert.equal(await evaluate('!!S.pendingSnapshot'), true);
+      await keyboard('Enter', 13);
+      assert.equal(await evaluate(`document.activeElement.closest('.pr').dataset.key`), key);
+      assert.equal(await evaluate(`document.activeElement.getAttribute('aria-expanded')`), 'true');
+      await evaluate('renderRows()');
+      assert.equal(await evaluate(`document.activeElement.closest('.pr').dataset.key`), key);
+      await keyboard('Escape', 27);
+      assert.equal(await evaluate(`document.activeElement.getAttribute('aria-expanded')`), 'false');
+      await keyboard(' ', 32);
+      assert.equal(await evaluate(`document.activeElement.getAttribute('aria-expanded')`), 'true');
+      await evaluate(`document.querySelector('#search').focus()`); await frame();
+      assert.equal(await evaluate(`document.querySelector('.pr').dataset.key`), 'sample-api-id:104');
+      await evaluate(`{const pr=S.snap.prs.find(p=>p.key==='${key}');
+        S.runs.set('keyboard-stream',{...pr,runId:'keyboard-stream',status:'running',output:'Initial output'});
+        setSnapshot({...S.snap,prs:S.snap.prs.filter(p=>p.key!=='${key}')});renderRows();
+        document.querySelector('#runShelf .run-heading').focus();
+        updateCopilotRun({...S.runs.get('keyboard-stream'),output:'Streamed output'});}`);
+      assert.equal(await evaluate(`document.activeElement.matches('#runShelf .run-heading')`), true);
+      await keyboard(' ', 32);
+      assert.equal(await evaluate(`document.querySelector('#runShelf .run-output').textContent`), 'Streamed output');
+      await keyboard('Escape', 27);
+      assert.equal(await evaluate(`document.activeElement.getAttribute('aria-expanded')`), 'false');
+      await evaluate(`setSnapshot({...S.snap,prs:S.snap.prs.map(p=>({...p,title:'Updated after shelf focus'}))})`);
+      assert.equal(await evaluate('!!S.pendingSnapshot'), true);
+      await keyboard('Tab', 9);
+      if (!await evaluate(`!!document.activeElement.closest('header')`)) await keyboard('Tab', 9);
+      assert.equal(await evaluate(`!!document.activeElement.closest('header')`), true);
+      assert.equal(await evaluate('S.pendingSnapshot'), null);
+      assert.equal(await evaluate(`document.querySelector('#rows .title').textContent`), 'Updated after shelf focus');
+      await evaluate(`S.q='no matching inspection target';render()`);
+      assert.equal(await evaluate(`document.querySelector('[data-key="${key}"]')`), null);
+      assert.equal(await evaluate(`document.activeElement.closest('.pr')`), null);
+      await evaluate(`S.q='';S.settings.hidden.push('${key}');render()`);
+      assert.equal(await evaluate(`document.querySelector('[data-key="${key}"]')`), null);
+      assert.deepEqual(await calls(), []);
+    });
+
     await t.test('keyboard-focused controls retain their PR until focus leaves rows', async () => {
       await reset(true);
       await send('Input.dispatchKeyEvent', { type: 'keyDown', key: 'Tab', code: 'Tab', windowsVirtualKeyCode: 9 });
@@ -620,6 +888,119 @@ test('real row hit testing and action identity across refreshes', { timeout: 900
       await move(10, 10); await frame();
       assert.equal(await evaluate(`document.querySelectorAll('.pr').length`), 1);
       assert.equal(await evaluate(`document.querySelector('.pr').dataset.key`), 'sample-api-id:104');
+    });
+
+    await t.test('GUI failed log Retry preserves errors, repeated failure, deduplication and task/PR isolation after refresh/reopen', async () => {
+      await reset(true);
+      const key = 'sample-service-id:101', other = 'sample-api-id:104';
+      const row = `[data-key="${key}"]`, otherRow = `[data-key="${other}"]`;
+      const selector = `${row} [data-act="loadLog"][data-build="9002"][data-logid="102"]`;
+      const task = `${row} .task:first-of-type`, additional = `${row} .task:last-of-type`;
+      await evaluate(`{
+        const snap=structuredClone(S.snap);
+        for(const pr of snap.prs){
+          pr.lane='blocked';pr.project=pr.key==='${key}'?'Sample':'Other';
+          pr.failedBuilds=[{buildId:9002,name:'Synthetic retry build',url:'https://example.invalid/build/9002',
+            tasks:[{logId:102,name:'Synthetic failed task',issues:[]},{logId:103,name:'Synthetic additional task',issues:[]}]}];
+        }
+        window.retryPrior=new Map();
+        for(const pr of snap.prs)for(const task of pr.failedBuilds[0].tasks){
+          const cache=logKey(pr,9002,task.logId);window.retryPrior.set(cache,S.logs.get(cache));S.logs.delete(cache);
+        }
+        window.logRpc=MockHost.rpc;window.retryCalls=[];window.releaseLogRetry=null;
+        MockHost.rpc=async(method,p)=>{
+          if(method==='logTail'){
+            window.retryCalls.push({method,...p});
+            if(p.key==='${key}'&&p.buildId===9002&&p.logId===102){
+              const attempt=window.retryCalls.filter(c=>c.key==='${key}'&&c.logId===102).length;
+              if(attempt===1)throw Error('Synthetic log HTTP 503 <transient>');
+              await new Promise(resolve=>window.releaseLogRetry=resolve);
+              window.releaseLogRetry=null;
+              if(attempt===2)throw Error('Synthetic log HTTP 503 again');
+              return '2026-11-21T10:00:00.123Z Recovered synthetic log tail\\n';
+            }
+            return 'Independent '+p.key+'/'+p.logId;
+          }
+          return window.logRpc(method,p);
+        };
+        setSnapshot(snap);
+      }`);
+      const idle = async () => {
+        await move(10, 10); await evaluate('document.activeElement?.blur()'); await frame();
+      };
+      const text = selector => evaluate(`document.querySelector(${JSON.stringify(selector)}).textContent`);
+      const reads = () => evaluate('window.retryCalls');
+      const reopen = async () => {
+        await click(await point(key, '.row .title')); await idle();
+        await click(await point(key, '.row .title')); await idle();
+      };
+      try {
+        await click(await point(key, '.row .title')); await idle();
+        await click(await point(other, '.row .title')); await idle();
+        assert.equal(await text(selector), 'Retry log tail');
+        assert.match(await text(task), /Synthetic log HTTP 503 <transient>/);
+        assert.match(await text(otherRow), /Independent sample-api-id:104\/102/);
+        assert.equal(await text(`${additional} [data-act="loadLog"]`), 'Load log tail');
+        await click(await elementPoint('#refreshBtn')); await idle();
+        await reopen();
+        assert.equal((await reads()).length, 2, 'Refresh/reopen does not automatically retry or reset other logs');
+        assert.equal(await text(selector), 'Retry log tail');
+
+        await click(await elementPoint(selector)); await frame();
+        await click(await elementPoint(selector)); await frame();
+        assert.equal((await reads()).filter(c => c.key === key && c.logId === 102).length, 2);
+        assert.match(await text(task), /Synthetic log HTTP 503 <transient>/);
+        await idle();
+        assert.equal(await evaluate(`document.querySelector(${JSON.stringify(selector)}).disabled`), true);
+        assert.equal(await evaluate(`document.querySelector(${JSON.stringify(selector)}).getAttribute('aria-busy')`), 'true');
+        await click(await elementPoint('#refreshBtn')); await idle();
+        await reopen();
+        assert.match(await text(task), /Synthetic log HTTP 503 <transient>/);
+        assert.equal(await evaluate(`document.querySelector(${JSON.stringify(selector)}).disabled`), true);
+        await click(await elementPoint(selector)); await idle();
+        assert.equal((await reads()).filter(c => c.key === key && c.logId === 102).length, 2);
+        await click(await elementPoint(`${additional} [data-act="loadLog"]`)); await idle();
+        assert.match(await text(additional), /Independent sample-service-id:101\/103/);
+        assert.match(await text(otherRow), /Independent sample-api-id:104\/102/);
+        await evaluate('window.releaseLogRetry()'); await idle();
+        assert.match(await text(task), /Synthetic log HTTP 503 again/);
+        assert.equal(await text(selector), 'Retry log tail');
+        assert.equal(await evaluate(`document.querySelector(${JSON.stringify(selector)}).disabled`), false);
+
+        await evaluate(`document.querySelector(${JSON.stringify(selector)}).focus()`);
+        await keyboard('Enter', 13); await idle();
+        assert.match(await text(task), /Synthetic log HTTP 503 again/);
+        await evaluate('window.releaseLogRetry()'); await idle();
+        assert.match(await text(task), /Recovered synthetic log tail/);
+        assert.doesNotMatch(await text(task), /Synthetic log HTTP 503|Retry log tail/);
+        assert.match(await text(additional), /Independent sample-service-id:101\/103/);
+        assert.match(await text(otherRow), /Independent sample-api-id:104\/102/);
+        await click(await elementPoint(`${task} [data-act="copyLog"]`)); await idle();
+        assert.equal((await calls()).filter(c => c.method === 'copy').at(-1).text, 'Recovered synthetic log tail\n');
+        await click(await elementPoint(`${task} [data-act="ts"]`)); await idle();
+        assert.match(await text(`${task} pre.log`), /10:00:00\.123/);
+        await click(await elementPoint(`${task} [data-act="copyLog"]`)); await idle();
+        assert.equal((await calls()).filter(c => c.method === 'copy').at(-1).text,
+          '2026-11-21T10:00:00.123Z Recovered synthetic log tail\n');
+        await click(await elementPoint(`${row} .card.failed [data-act="url"]`)); await idle();
+        assert.deepEqual((await calls()).filter(c => c.method === 'openUrl').at(-1),
+          {method:'openUrl',url:'https://example.invalid/build/9002'});
+        await click(await elementPoint('#refreshBtn')); await idle(); await reopen();
+        assert.match(await text(task), /Recovered synthetic log tail/);
+        assert.deepEqual(await reads(), [
+          {method:'logTail',key,buildId:9002,logId:102,lines:200},
+          {method:'logTail',key:other,buildId:9002,logId:102,lines:200},
+          {method:'logTail',key,buildId:9002,logId:102,lines:200},
+          {method:'logTail',key,buildId:9002,logId:103,lines:200},
+          {method:'logTail',key,buildId:9002,logId:102,lines:200},
+        ]);
+        t.diagnostic('Exact logTail counts: target 102=3 (503,503,success), target 103=1, other-project 102=1; lines=200 throughout. Mouse and keyboard Retry, Refresh/reopen, visible errors, busy state, timestamps/copy/open all asserted.');
+      } finally {
+        await evaluate('window.releaseLogRetry?.()'); await idle();
+        assert.equal(await evaluate('S.logLoads.size'), 0, 'No owned log request remains in flight');
+        await evaluate(`MockHost.rpc=window.logRpc;
+          for(const [cache,prior] of window.retryPrior)if(prior===undefined)S.logs.delete(cache);else S.logs.set(cache,prior);`);
+      }
     });
 
     await t.test('automatic log loading above another targeted row cannot move its link under the pointer', async () => {
@@ -1753,7 +2134,7 @@ test('real row hit testing and action identity across refreshes', { timeout: 900
       assert.equal(await evaluate('S.scope'), 'drafts');
       assert.equal(await evaluate('S.lane'), null);
       assert.deepEqual(await evaluate(`[...document.querySelectorAll('#laneCounters .n')].map(e=>e.textContent)`), ['0', '0', '0', '0']);
-      assert.deepEqual(await evaluate(`[...document.querySelectorAll('#rows [data-key="${key}"] .row [data-act]')].map(e=>e.dataset.act)`), ['open']);
+      assert.deepEqual(await evaluate(`[...document.querySelectorAll('#rows [data-key="${key}"] .row [data-act]')].map(e=>e.dataset.act)`), ['toggle', 'open']);
       await click(await point(key, '.row [data-act="open"]')); await frame();
       assert.deepEqual((await calls()).filter(c => c.method === 'openUrl'),
         [{ method: 'openUrl', url: 'https://dev.azure.com/contoso/Sample/_git/sample-service/pullrequest/101' }]);
@@ -1784,6 +2165,9 @@ test('real row hit testing and action identity across refreshes', { timeout: 900
           `<a href="javascript:${mark}href')">raw js link</a>`,
           `[markdown js link](javascript:${mark}mdlink'))`,
           `<a href="data:text/html,<script>alert(1)</script>">data link</a>`,
+          `<span class="fake-inspection" role="button" tabindex="0" aria-expanded="false" data-act="open">Open trap</span>`,
+          `<div class="row"><div class="gate"><span class="pill fake-inspection" role="button" tabindex="0" aria-expanded="false" data-act="gate" data-gate="pop">PoP trap</span></div></div>`,
+          `<div class="row"><div class="c-pr fake-inspection" role="button" tabindex="0" aria-expanded="false" data-act="toggle">Toggle trap</div></div>`,
         ].join('\n\n');
       };
       const prepared = await evaluate(`(()=>{
@@ -1807,6 +2191,17 @@ test('real row hit testing and action identity across refreshes', { timeout: 900
       await frame();
       await evaluate('new Promise(resolve=>setTimeout(resolve,750))');
       await frame();
+      const traps = await evaluate(`document.querySelectorAll('[data-key="${key}"] .md .fake-inspection').length`);
+      assert.equal(traps, 6, 'Description and thread fixtures retain the hostile keyboard attributes');
+      for (let n = 0; n < traps; n++) {
+        await evaluate(`document.querySelectorAll('[data-key="${key}"] .md .fake-inspection')[${n}].focus()`);
+        for (const [keyName, code] of [['Enter', 13], [' ', 32]]) {
+          await keyboard(keyName, code);
+          assert.equal(await evaluate(`S.expanded.has('${key}')`), true, 'Markdown must not dispatch inspection or row actions');
+          assert.deepEqual(await calls(), [], 'Markdown keyboard attributes must not reach the host');
+          assert.deepEqual(await evaluate('window.bridge'), []);
+        }
+      }
       const result = await evaluate(`(()=>{
         const row=document.querySelector('[data-key="${key}"]');
         const bodies={desc:row.querySelector('.detail .body.md'),thread:row.querySelector('.detail .thread .md')};
@@ -1838,6 +2233,252 @@ test('real row hit testing and action identity across refreshes', { timeout: 900
       await evaluate(`DOMPurify.sanitize=window.realSanitize;delete window.chrome.webview;`);
     });
 
+    const withSettingsDraftFixture = async run => {
+      await reset();
+      await evaluate(`window.draftRpc=MockHost.rpc;window.originalDraftSettings=structuredClone(S.settings);
+        S.settings.futureProvider={preserve:'synthetic unknown field'};
+        S.settings.autoComplete.futureOption='synthetic nested option';
+        window.committedDraftSettings=structuredClone(S.settings);
+        window.draftWrites=[];window.denyDraftMethod='';window.holdDraftMethod='';
+        MockHost.rpc=async(method,p)=>{
+          if(['saveSettings','setTheme','addRepo','removeRepo'].includes(method)){
+            window.draftWrites.push({method,params:structuredClone(p)});
+            if(window.holdDraftMethod===method)await new Promise(resolve=>window.completeDraftWrite=resolve);
+            if(window.denyDraftMethod===method)throw Error('Synthetic '+method+' write failed');
+            const next=structuredClone(window.committedDraftSettings);
+            if(method==='saveSettings'){
+              Object.assign(next,p.settings,{theme:next.theme});
+              next.wslDistro=next.wslDistro?.trim()||null;
+            }
+            if(method==='setTheme')next.theme=p.theme;
+            if(method==='addRepo'){
+              if(p.url!=='https://dev.azure.com/contoso/Sample/_git/synthetic-draft-repo')
+                throw Error('Synthetic invalid repository URL');
+              next.repos.push({org:'contoso',project:'Sample',repo:'synthetic-draft-repo'});
+            }
+            if(method==='removeRepo')next.repos=next.repos.filter(r=>repoKey(r)!==p.key);
+            window.committedDraftSettings=next;
+            return structuredClone(next);
+          }
+          return window.draftRpc(method,p);
+        };`);
+      try {
+        await click(await elementPoint('#settingsBtn')); await frame();
+        await evaluate(`window.readDraftFields=()=>({
+          ...Object.fromEntries(['triageInstructions','refreshSeconds','mergeCheckMinutes','mergeStrategy','wslDistro',
+            ...(document.querySelector('#additionalTriageInstructions')?['additionalTriageInstructions']:[])].map(id=>[id,document.getElementById(id).value])),
+          ...Object.fromEntries(['notifications','sound','ignoreDrafts','deleteSourceBranch','transitionWorkItems'].map(id=>[id,document.getElementById(id).checked])),
+          wslRepoDirectories:Object.fromEntries([...document.querySelectorAll('[data-wsl-repo]')].map(e=>[e.dataset.wslRepo,e.value]))
+        });
+        document.querySelector('#triageInstructions').value='Unsaved Custom Ask\\n';
+        if(document.querySelector('#additionalTriageInstructions'))document.querySelector('#additionalTriageInstructions').value='Unsaved additive instructions\\n';
+        document.querySelector('#refreshSeconds').value='333';
+        document.querySelector('#mergeCheckMinutes').value='23';
+        document.querySelector('#mergeStrategy').value='rebase';
+        document.querySelector('#wslDistro').value='Synthetic Ubuntu';
+        for(const id of ['notifications','sound','deleteSourceBranch','transitionWorkItems'])document.getElementById(id).checked=false;
+        document.querySelector('#ignoreDrafts').checked=true;
+        [...document.querySelectorAll('[data-wsl-repo]')].forEach((e,i)=>e.value='/home/synthetic/checkout-'+i);
+        window.expectedDraftFields=window.readDraftFields();`);
+        const saved = await evaluate('structuredClone(window.committedDraftSettings)');
+        const assertDraft = async () => assert.deepEqual(await evaluate('window.readDraftFields()'), await evaluate('window.expectedDraftFields'));
+        const assertCommitted = async expected => {
+          assert.deepEqual(await evaluate('S.settings'), expected, 'UI committed state matches only confirmed writes');
+          assert.deepEqual(await evaluate('window.committedDraftSettings'), expected, 'Synthetic host state does not contain unfinished edits');
+        };
+        await run({ saved, assertDraft, assertCommitted });
+      } finally {
+        await evaluate(`MockHost.rpc=window.draftRpc;if(S.drawer)closeDrawer();S.settings=window.originalDraftSettings;render()`);
+      }
+    };
+
+    await t.test('GUI settings failed Save preserves every available draft and only successful explicit Save survives reload', async () => {
+      await withSettingsDraftFixture(async ({ saved, assertDraft, assertCommitted }) => {
+        await evaluate(`window.denyDraftMethod='saveSettings';document.querySelector('#repoUrl').value='invalid draft URL';
+          document.querySelector('#wlInput').value='Unsubmitted author';`);
+        await click(await elementPoint('[data-dact="save"]')); await frame();
+        await assertDraft(); await assertCommitted(saved);
+        assert.equal(await evaluate(`document.querySelector('#repoUrl').value`), 'invalid draft URL');
+        assert.equal(await evaluate(`document.querySelector('#wlInput').value`), 'Unsubmitted author');
+        assert.equal(await evaluate(`document.querySelectorAll('#toasts .toast.error').length`), 1);
+        assert.match(await evaluate(`document.querySelector('#toasts').textContent`), /Synthetic saveSettings write failed/);
+        assert.doesNotMatch(await evaluate(`document.querySelector('#toasts').textContent`), /Settings saved/);
+        await evaluate(`document.querySelector('#refreshSeconds').value='334';window.expectedDraftFields=window.readDraftFields();
+          window.denyDraftMethod='';document.querySelector('#toasts').replaceChildren();`);
+        await click(await elementPoint('[data-dact="save"]')); await frame();
+        const expected = await evaluate('window.expectedDraftFields');
+        const committed = { ...saved, ...expected, refreshSeconds: 334, mergeCheckMinutes: 23,
+          autoComplete: { ...saved.autoComplete, mergeStrategy: expected.mergeStrategy,
+            deleteSourceBranch: expected.deleteSourceBranch, transitionWorkItems: expected.transitionWorkItems } };
+        for (const name of ['mergeStrategy','deleteSourceBranch','transitionWorkItems']) delete committed[name];
+        await assertDraft(); await assertCommitted(committed);
+        assert.match(await evaluate(`document.querySelector('#toasts').textContent`), /Settings saved/);
+        assert.equal(await evaluate(`window.draftWrites[1].params.settings.refreshSeconds`), 334, 'Retry uses corrected preserved input');
+
+        const injection = await send('Page.addScriptToEvaluateOnNewDocument', { source: `
+          Object.defineProperty(window,'MockHost',{configurable:true,set(host){
+            Object.defineProperty(window,'MockHost',{configurable:true,writable:true,value:host});
+            const original=host.rpc.bind(host);
+            host.rpc=async(method,p)=>{
+              const result=await original(method,p);
+              return method==='init'?{...result,settings:${JSON.stringify(committed)}}:result;
+            };
+          }});` });
+        try {
+          await evaluate('delete window.__ready');
+          await send('Page.reload');
+          await evaluate(`new Promise((resolve,reject)=>{
+            const deadline=Date.now()+10000;
+            const check=()=>window.__ready?resolve():Date.now()>deadline?reject(Error('Reload did not boot')):setTimeout(check,20);check();
+          })`);
+          await evaluate('openDrawer()'); await frame();
+          assert.deepEqual(await evaluate('S.settings'), committed, 'Fresh boot reads only confirmed synthetic host settings');
+          assert.equal(await evaluate(`document.querySelector('#triageInstructions').value`), 'Unsaved Custom Ask\n');
+          assert.equal(await evaluate(`document.querySelector('#refreshSeconds').value`), '334');
+          assert.equal(await evaluate(`document.querySelector('#wslDistro').value`), 'Synthetic Ubuntu');
+          assert.equal(await evaluate(`document.querySelector('#repoUrl').value`), '');
+          assert.equal(await evaluate(`document.querySelector('#wlInput').value`), '');
+        } finally {
+          await send('Page.removeScriptToEvaluateOnNewDocument', { identifier: injection.identifier });
+          await evaluate(`window.draftRpc=MockHost.rpc;window.originalDraftSettings=${JSON.stringify(saved)};
+            window.baseline=structuredClone(S.snap);`);
+        }
+      });
+    });
+
+    await t.test('GUI settings unrelated repository and author failures preserve input for correction and success commits only their own state', async () => {
+      await withSettingsDraftFixture(async ({ saved, assertDraft, assertCommitted }) => {
+        await evaluate(`document.querySelector('#repoUrl').value='invalid draft URL';`);
+        await click(await elementPoint('[data-dact="addRepo"]')); await frame();
+        await assertDraft(); await assertCommitted(saved);
+        assert.equal(await evaluate(`document.querySelector('#repoUrl').value`), 'invalid draft URL');
+        assert.match(await evaluate(`document.querySelector('#toasts').textContent`), /Synthetic invalid repository URL/);
+        await evaluate(`document.querySelector('#repoUrl').value='https://dev.azure.com/contoso/Sample/_git/synthetic-draft-repo';
+          window.denyDraftMethod='addRepo';document.querySelector('#toasts').replaceChildren();`);
+        await click(await elementPoint('[data-dact="addRepo"]')); await frame();
+        await assertDraft(); await assertCommitted(saved);
+        assert.match(await evaluate(`document.querySelector('#toasts').textContent`), /Synthetic addRepo write failed/);
+        assert.equal(await evaluate(`document.querySelector('#repoUrl').value`), 'https://dev.azure.com/contoso/Sample/_git/synthetic-draft-repo');
+        await evaluate(`window.denyDraftMethod='';`);
+        await click(await elementPoint('[data-dact="addRepo"]')); await frame();
+        const withRepo = { ...saved, repos: [...saved.repos, { org:'contoso', project:'Sample', repo:'synthetic-draft-repo' }] };
+        await assertCommitted(withRepo);
+        const fields = await evaluate('window.readDraftFields()'), expected = await evaluate('window.expectedDraftFields');
+        assert.deepEqual(fields, { ...expected, wslRepoDirectories: { ...expected.wslRepoDirectories, 'contoso/sample/synthetic-draft-repo': '' } });
+        assert.equal(await evaluate(`document.querySelector('#repoUrl').value`), '');
+        await evaluate(`window.expectedDraftFields=window.readDraftFields();window.denyDraftMethod='saveSettings';
+          document.querySelector('#wlInput').value='Unfinished author';document.querySelector('#toasts').replaceChildren();`);
+        await click(await elementPoint('[data-dact="addWl"]')); await frame();
+        await assertDraft(); await assertCommitted(withRepo);
+        assert.equal(await evaluate(`document.querySelector('#wlInput').value`), 'Unfinished author');
+        assert.match(await evaluate(`document.querySelector('#toasts').textContent`), /Synthetic saveSettings write failed/);
+        assert.doesNotMatch(await evaluate(`document.querySelector('#toasts').textContent`), /Watching PRs by/);
+        await evaluate(`window.denyDraftMethod='';document.querySelector('#wlInput').value='Corrected author';`);
+        await click(await elementPoint('[data-dact="addWl"]')); await frame();
+        const withAuthor = { ...withRepo, whitelist: [...saved.whitelist, 'Corrected author'] };
+        await assertDraft(); await assertCommitted(withAuthor);
+        assert.equal(await evaluate(`document.querySelector('#wlInput').value`), '');
+        assert.equal(await evaluate(`window.draftWrites.at(-1).params.settings.whitelist.at(-1)`), 'Corrected author');
+        await click(await elementPoint(`[data-dact="removeWl"][data-i="${withAuthor.whitelist.length - 1}"]`)); await frame();
+        await assertDraft(); await assertCommitted(withRepo);
+        await click(await elementPoint('[data-dact="removeRepo"][data-key="contoso/sample/synthetic-draft-repo"]')); await frame();
+        await assertCommitted(saved);
+        assert.deepEqual(await evaluate('window.readDraftFields()'), expected);
+        await evaluate('closeDrawer();openDrawer()'); await frame();
+        assert.equal(await evaluate(`document.querySelector('#triageInstructions').value`), saved.triageInstructions || '');
+        assert.equal(await evaluate(`document.querySelector('#refreshSeconds').value`), '120', 'Unrelated successes never committed polling drafts');
+      });
+    });
+
+    await t.test('GUI settings immediate theme saves and rollback preserve drafts and unknown integration fields', async () => {
+      await withSettingsDraftFixture(async ({ saved, assertDraft, assertCommitted }) => {
+        await evaluate(`document.querySelector('#theme').value='dark';
+          document.querySelector('#theme').dispatchEvent(new Event('change',{bubbles:true}));`);
+        await frame();
+        await assertDraft(); await assertCommitted({ ...saved, theme:'dark' });
+        assert.equal(await evaluate('document.documentElement.dataset.theme'), 'dark');
+        assert.deepEqual(await evaluate('window.draftWrites'), [{method:'setTheme',params:{theme:'dark'}}]);
+        await evaluate(`window.denyDraftMethod='setTheme';document.querySelector('#theme').value='light';
+          document.querySelector('#theme').dispatchEvent(new Event('change',{bubbles:true}));`);
+        await frame();
+        await assertDraft(); await assertCommitted({ ...saved, theme:'dark' });
+        assert.equal(await evaluate('document.documentElement.dataset.theme'), 'dark');
+        assert.equal(await evaluate(`document.querySelector('#theme').value`), 'dark');
+        assert.match(await evaluate(`document.querySelector('#toasts').textContent`), /Theme was not saved: Synthetic setTheme write failed/);
+        await evaluate('renderDrawer()'); await frame();
+        await assertDraft(); await assertCommitted({ ...saved, theme:'dark' });
+        await evaluate(`window.denyDraftMethod='';document.querySelector('#theme').value='light';
+          document.querySelector('#theme').dispatchEvent(new Event('change',{bubbles:true}));`);
+        await frame();
+        await assertDraft(); await assertCommitted({ ...saved, theme:'light' });
+        assert.equal(await evaluate('document.documentElement.dataset.theme'), 'light');
+      });
+    });
+
+    await t.test('GUI settings delayed Save and Add preserve independent, newer and reopened-drawer drafts', async () => {
+      await withSettingsDraftFixture(async () => {
+        const finishWrite = async () => {
+          assert.equal(await evaluate(`typeof window.completeDraftWrite`), 'function', 'Synthetic write must be pending');
+          await evaluate(`window.holdDraftMethod='';window.completeDraftWrite();delete window.completeDraftWrite;`);
+          await frame();
+        };
+        await evaluate(`window.holdDraftMethod='saveSettings';
+          document.querySelector('#repoUrl').value='Unsubmitted repository URL';
+          document.querySelector('#wlInput').value='Unsubmitted author';`);
+        await click(await elementPoint('[data-dact="save"]')); await frame();
+        await evaluate(`document.querySelector('#triageInstructions').value='Newer Custom Ask';
+          document.querySelector('#refreshSeconds').value='334';
+          document.querySelector('#mergeStrategy').value='squash';
+          document.querySelector('#notifications').checked=true;
+          renderDrawer();`);
+        await finishWrite();
+        assert.equal(await evaluate('S.settings.triageInstructions'), 'Unsaved Custom Ask\n');
+        assert.equal(await evaluate('S.settings.refreshSeconds'), 333);
+        assert.equal(await evaluate(`document.querySelector('#triageInstructions').value`), 'Newer Custom Ask');
+        assert.equal(await evaluate(`document.querySelector('#refreshSeconds').value`), '334');
+        assert.equal(await evaluate(`document.querySelector('#mergeStrategy').value`), 'squash');
+        assert.equal(await evaluate(`document.querySelector('#notifications').checked`), true);
+        assert.equal(await evaluate(`document.querySelector('#repoUrl').value`), 'Unsubmitted repository URL');
+        assert.equal(await evaluate(`document.querySelector('#wlInput').value`), 'Unsubmitted author');
+        assert.equal(await evaluate(`document.querySelector('#wslDistro').value`), 'Synthetic Ubuntu');
+
+        await evaluate(`window.holdDraftMethod='saveSettings';document.querySelector('#wslDistro').value='  Submitted distro  ';`);
+        await click(await elementPoint('[data-dact="save"]')); await frame();
+        await evaluate(`(async()=>{closeDrawer();await openDrawer();
+          document.querySelector('#triageInstructions').value='Newer Custom Ask';
+          document.querySelector('#wslDistro').value='  Submitted distro  ';
+          document.querySelector('#wlInput').value='Reopened author';renderDrawer();})()`);
+        await finishWrite();
+        assert.equal(await evaluate('S.settings.triageInstructions'), 'Newer Custom Ask');
+        assert.equal(await evaluate(`document.querySelector('#triageInstructions').value`), 'Newer Custom Ask');
+        assert.equal(await evaluate('S.settings.wslDistro'), 'Submitted distro');
+        assert.equal(await evaluate(`document.querySelector('#wslDistro').value`), '  Submitted distro  ', 'Same-valued reopened input is not normalized by the previous drawer Save');
+        assert.equal(await evaluate(`document.querySelector('#wlInput').value`), 'Reopened author');
+
+        for (const action of ['addRepo','addWl']) {
+          const id = action === 'addRepo' ? 'repoUrl' : 'wlInput';
+          const method = action === 'addRepo' ? 'addRepo' : 'saveSettings';
+          const submitted = action === 'addRepo' ? 'https://dev.azure.com/contoso/Sample/_git/synthetic-draft-repo' : 'Submitted author';
+          await evaluate(`window.holdDraftMethod=${JSON.stringify(method)};
+            document.querySelector('#${id}').value=${JSON.stringify(submitted)};`);
+          await click(await elementPoint(`[data-dact="${action}"]`)); await frame();
+          await evaluate(`document.querySelector('#${id}').value='Next unsubmitted value';renderDrawer();`);
+          await finishWrite();
+          assert.equal(await evaluate(`document.querySelector('#${id}').value`), 'Next unsubmitted value', `${action} must preserve newer text after rerender`);
+          if (action === 'addRepo') {
+            await click(await elementPoint('[data-dact="removeRepo"][data-key="contoso/sample/synthetic-draft-repo"]')); await frame();
+          }
+
+          await evaluate(`window.holdDraftMethod=${JSON.stringify(method)};
+            document.querySelector('#${id}').value=${JSON.stringify(submitted)};`);
+          await click(await elementPoint(`[data-dact="${action}"]`)); await frame();
+          await evaluate(`(async()=>{closeDrawer();await openDrawer();document.querySelector('#${id}').value=${JSON.stringify(submitted)};renderDrawer();})()`);
+          await finishWrite();
+          assert.equal(await evaluate(`document.querySelector('#${id}').value`), submitted, `${action} must not clear same-valued text in a reopened drawer`);
+        }
+      });
+    });
+
     await t.test('both themes apply to real components, states, contrast and saved reloads', async () => {
       const navigate = async url => {
         await evaluate('delete window.__ready');
@@ -1846,6 +2487,7 @@ test('real row hit testing and action identity across refreshes', { timeout: 900
           const deadline=Date.now()+10000;
           const check=()=>window.__ready?resolve():Date.now()>deadline?reject(Error('UI did not boot')):setTimeout(check,20);check();
         })`);
+        await send('Page.bringToFront');
         await frame();
       };
       for (const hint of ['', '&theme=github']) {
