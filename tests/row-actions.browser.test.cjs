@@ -1433,6 +1433,8 @@ test('real row hit testing and action identity across refreshes', { timeout: 900
         !!r && r.startContainer===window.selNodes[0] && r.endContainer===window.selNodes[1] && window.selNodes.every(n=>n.isConnected) &&
         window.shelfOld.isConnected && s.toString().trimEnd().endsWith('Shelf older')}`);
       assert.equal(await shelfAttached(), true, 'The shelf crossing selection baseline is intact before promotion');
+      assert.deepEqual(await evaluate('S.rowsPending=true; flushRowUpdates(); [window.shelfOld.isConnected, S.rowsPending, S.runRelocations.size]'), [true, true, 0],
+        'A deferred rebuild with no queued relocation stays pending instead of detaching the selected shelf cards');
       await evaluate(`updateCopilotRun({...S.runs.get('shelf-old'),status:'recovering',mayBeRunning:true,revision:1})`);
       await frame();
       assert.deepEqual([await shelfAttached(), await shelfMain(), await evaluate(`S.runRelocations.has('${key}')`)],

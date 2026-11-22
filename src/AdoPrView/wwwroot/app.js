@@ -227,8 +227,9 @@ function flushRowUpdates() {
   if (rowsInUse() || crossRunOutputSelection()) return;
   if (S.pendingSnapshot) setSnapshot(S.pendingSnapshot);
   for (const key of [...S.runRelocations]) relocateRunGroup(key);
-  // A relocation still queued here is held by a text selection; a full rebuild would detach it.
-  if (S.rowsPending && !S.runRelocations.size) renderRows();
+  // A relocation still queued here is held by a text selection; a full rebuild would detach it. The idle-aware rebuild
+  // also stays pending while a crossing selection touches run cards, and selectionchange retries it once cleared.
+  if (S.rowsPending && !S.runRelocations.size) renderRows(true);
   renderStatus();
 }
 
