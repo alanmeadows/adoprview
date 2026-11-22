@@ -1234,7 +1234,7 @@ test('real row hit testing and action identity across refreshes', { timeout: 900
       await send('Emulation.setDeviceMetricsOverride', { width: 900, height: 500, deviceScaleFactor: 1, mobile: false });
       await reset();
       await evaluate(`S.expanded.add('sample-service-id:105');renderRows();document.querySelector('main').scrollTop=0;`);
-      const cues = () => evaluate(`(()=>{const main=document.querySelector('main'),m=main.getBoundingClientRect();
+      const cues = () => evaluate(`(()=>{document.querySelector('#toasts').replaceChildren();const main=document.querySelector('main'),m=main.getBoundingClientRect();
         const left=m.left+main.clientLeft,right=left+main.clientWidth,top=m.top+main.clientTop,bottom=top+main.clientHeight;
         const byKey=new Map(S.snap.prs.map(p=>[p.key,p])),headBottom=Math.max(top,document.querySelector('.thead').getBoundingClientRect().bottom);
         return [...document.querySelectorAll('#rows > .pr')].map(row=>{
@@ -1245,7 +1245,8 @@ test('real row hit testing and action identity across refreshes', { timeout: 900
             return Math.min(r.right,c.right)-Math.max(r.left,c.left)>0&&Math.min(r.bottom,c.bottom)-Math.max(r.top,c.top)>0;});
           const misses=targets.filter(e=>{const r=e.getBoundingClientRect(),x=r.left+r.width/2,y=r.top+r.height/2;
             if(x<left||x>right||y<=headBottom||y>bottom)return false;const hit=document.elementFromPoint(x,y);
-            return !hit||(hit!==e&&!e.contains(hit));}).length;
+            return !hit||(hit!==e&&!e.contains(hit));}).map(e=>{const r=e.getBoundingClientRect(),hit=document.elementFromPoint(r.left+r.width/2,r.top+r.height/2);
+            return e.className+'@'+Math.round(r.left+r.width/2)+','+Math.round(r.top+r.height/2)+'->'+(hit?(hit.id||hit.className||hit.tagName):'none');});
           const p=byKey.get(row.dataset.key);
           return {key:row.dataset.key,shown,text:chip.textContent,expected:'!'+p.id+' · '+p.repo,
             inside:!shown||(c.left>=left-.5&&c.right<=right+.5),overlap,misses,onScreen:visible(row.getBoundingClientRect()),
@@ -1260,7 +1261,7 @@ test('real row hit testing and action identity across refreshes', { timeout: 900
       for (const x of [threshold - 2, threshold, geometry.max]) {
         const state = await pan(x);
         for (const c of state.filter(r => r.onScreen)) {
-          assert.equal(c.misses, 0, `Hit testing changed in ${c.key} at ${x}`);
+          assert.deepEqual(c.misses, [], `Hit testing changed in ${c.key} at ${x}`);
           if (x < threshold) { assert.equal(c.shown, c.prRight <= 0, `Cue before PR cell left ${c.key}`); continue; }
           assert.deepEqual([c.shown, c.text, c.inside, c.overlap], [true, c.expected, true, false], `Cue for ${c.key} at ${x}`);
         }
@@ -1309,7 +1310,7 @@ test('real row hit testing and action identity across refreshes', { timeout: 900
       assert.match(await evaluate(`document.querySelector('#rows').textContent`), /sample-service: Checked 100 completions in this repository; watched PRs may be missing\./);
       assert.equal(await evaluate(`document.querySelector('#runShelf').hidden || !document.querySelector('#runShelf').textContent.trim()`), true);
       await evaluate(`document.querySelector('[data-key="sample-api-id:96"] [data-act="open"]').focus()`);
-      await send('Input.dispatchKeyEvent', { type: 'keyDown', key: 'Enter', code: 'Enter', windowsVirtualKeyCode: 13 });
+      await send('Input.dispatchKeyEvent', { type: 'keyDown', key: 'Enter', code: 'Enter', windowsVirtualKeyCode: 13, text: '\r' });
       await send('Input.dispatchKeyEvent', { type: 'keyUp', key: 'Enter', code: 'Enter', windowsVirtualKeyCode: 13 }); await frame();
       assert.deepEqual((await calls()).at(-1), { method: 'openUrl', url: await evaluate(`S.snap.completed.find(c=>c.id===96).url`) });
       if (process.env.ADOPRVIEW_LAYOUT_SCREENSHOTS) {
