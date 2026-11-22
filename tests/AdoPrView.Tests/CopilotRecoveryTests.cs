@@ -23,6 +23,69 @@ static class CopilotRecoveryTests
 
     public static async Task Run(Func<string, Func<Task>, Task> test)
     {
+        foreach (var recoveredRun in new[] { false, true })
+            foreach (var stop in new[] { true, false })
+                await test($"Copilot completed cleanup {(recoveredRun ? "recovered" : "normal")} {(stop ? "Stop" : "disposal")} stays bounded", async () =>
+                {
+                    using var f = new Fixture();
+                    f.Transport.Cleanup = "RETAINED";
+                    await using var first = f.Service();
+                    var run = await first.StartAsync(Request());
+                    await Wait(first, run.RunId, s => s.Output.Contains("FAKE-READY"));
+                    if (recoveredRun)
+                    {
+                        f.Transport.End(0);
+                        await Wait(first, run.RunId, s => s.Status == "completed");
+                        await first.DisposeAsync();
+                    }
+                    var cleanups = f.Transport.Cleanups;
+                    f.Transport.BlockCleanup = true;
+                    await using var restored = recoveredRun ? f.Service() : null;
+                    var service = restored ?? first;
+                    Task? recovery = null, action = null;
+                    System.Windows.Forms.ToolStripMenuItem[] items = [];
+                    try
+                    {
+                        if (recoveredRun) recovery = service.RecoverAsync();
+                        else f.Transport.End(0);
+                        await f.Transport.CleanupEntered.Task.WaitAsync(TimeSpan.FromSeconds(3));
+                        var before = service.Get(run.RunId)!;
+                        Check(before is { Status: "completed", MayBeRunning: false, ExitCode: 0 } &&
+                            f.Store.Load().Single().Saved!.TaskConfirmedStopped,
+                            "Cleanup fixture did not publish verified completion before the blocked transport");
+                        if (stop)
+                        {
+                            items = MainWindow.CopilotStopMenuItems([run],
+                                selected => action = service.CancelAsync(selected.Key, selected.RunId));
+                            Check(items.Length == 1 && items[0].Enabled, "Captured cleanup Stop lost its exact target");
+                            items[0].PerformClick();
+                        }
+                        else action = service.DisposeAsync().AsTask();
+                        await (action ?? throw new Exception("Cleanup control action was not invoked"))
+                            .WaitAsync(TimeSpan.FromSeconds(3));
+                        var final = service.Get(run.RunId)!;
+                        Check(final is { Status: "completed", MayBeRunning: false, ExitCode: 0, WorktreeRetained: true } &&
+                            final.Error?.Contains("cleanup") == true && final.Output == before.Output &&
+                            final.OutputOffset == before.OutputOffset && !f.Transport.WorkspaceRemoved &&
+                            f.Transport.Launches == 1 && f.Transport.Stops == 0 && f.Transport.Cleanups == cleanups + 1 &&
+                            f.Store.Load().Single().Saved!.TaskConfirmedStopped,
+                            "Interrupted cleanup lost completed outcome, output/work/stop proof or warning");
+                        f.Transport.ReleaseCleanup.TrySetResult();
+                        await f.Transport.CleanupReturned.Task.WaitAsync(TimeSpan.FromSeconds(3));
+                        Check(service.Get(run.RunId) is { WorktreeRetained: true } late && late.Error == final.Error &&
+                            late.Output == final.Output && late.OutputOffset == final.OutputOffset,
+                            "Abandoned cleanup accepted a late REMOVED reply or changed completion output");
+                        await service.DisposeAsync().AsTask().WaitAsync(TimeSpan.FromSeconds(3));
+                    }
+                    finally
+                    {
+                        f.Transport.ReleaseCleanup.TrySetResult();
+                        foreach (var item in items) item.Dispose();
+                        if (recovery is not null) await recovery.WaitAsync(TimeSpan.FromSeconds(3));
+                        await service.DisposeAsync().AsTask().WaitAsync(TimeSpan.FromSeconds(3));
+                        if (action is not null) await action.WaitAsync(TimeSpan.FromSeconds(3));
+                    }
+                });
         await test("Copilot terminal history pending after exit stops from the captured native menu", async () =>
         {
             foreach (var (terminal, code) in new[] { ("failed", 1), ("completed", 0), ("cancelled", 143) })
@@ -666,7 +729,7 @@ static class CopilotRecoveryTests
         public string? Failure;
         public string Cleanup = "REMOVED";
         public bool SessionAvailable = true, LockHeld, WorkspaceRemoved;
-        public bool BlockPreflight, BlockFollowers, BlockDiscard, BlockHistory;
+        public bool BlockPreflight, BlockFollowers, BlockDiscard, BlockHistory, BlockCleanup;
         public string RecordedOutput { get { lock (gate) return log; } }
         public string? RegistryConfig;
         public string RegistryOverride = "";
@@ -677,6 +740,9 @@ static class CopilotRecoveryTests
         public readonly TaskCompletionSource ReleaseDiscard = new(TaskCreationOptions.RunContinuationsAsynchronously);
         public readonly TaskCompletionSource HistoryEntered = new(TaskCreationOptions.RunContinuationsAsynchronously);
         public readonly TaskCompletionSource ReleaseHistory = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        public readonly TaskCompletionSource CleanupEntered = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        public readonly TaskCompletionSource ReleaseCleanup = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        public readonly TaskCompletionSource CleanupReturned = new(TaskCreationOptions.RunContinuationsAsynchronously);
         static TaskCompletionSource<int> NewEnd() => new(TaskCreationOptions.RunContinuationsAsynchronously);
         public void Emit(string value) { lock (gate) { log += value; foreach (var read in readers.ToArray()) read(value); } }
         public void End(int code, bool outcome = true)
@@ -755,8 +821,16 @@ static class CopilotRecoveryTests
                 case "stop": Stops++; End(143); return new(0, "", "");
                 case "cleanup":
                     Check(ended.Task.IsCompleted, "Cleanup attempted on a live fake session");
+                    Cleanups++;
+                    if (BlockCleanup)
+                    {
+                        CleanupEntered.TrySetResult();
+                        await ReleaseCleanup.Task;
+                        CleanupReturned.TrySetResult();
+                        return new(0, Protocol("REMOVED"), "");
+                    }
                     if (Cleanup == "REMOVED") WorkspaceRemoved = true;
-                    Cleanups++; return new(0, Protocol(Cleanup, "fake retained work"), "");
+                    return new(0, Protocol(Cleanup, "fake retained work"), "");
                 default: return new(0, "", "");
             }
         }

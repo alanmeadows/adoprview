@@ -655,6 +655,10 @@ inactive state or imply that an unconfirmed task stopped.
 An already-captured Stop action also interrupts pending terminal history after
 the task exits, even if its displayed status has already changed to completed
 or failed. Terminal status does not mean background reconciliation has finished.
+Completed-run cleanup also observes Stop and dashboard detachment. Interrupted
+cleanup retains the verified completed outcome and reports a cleanup warning;
+an abandoned late reply cannot mark the worktree removed. Normal cleanup keeps
+its existing ownership, publication and execution-lock checks.
 
 Output uses a grow-on-demand tail buffer with the same retained-output limit,
 so empty or short saved histories do not each reserve the maximum buffer.

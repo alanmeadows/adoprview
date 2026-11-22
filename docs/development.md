@@ -265,6 +265,11 @@ fake reader ignores cancellation, then clicks the captured actual native menu
 target. Stop and disposal must remain bounded, preserve real exit codes and
 partial logs/work/stop proof, and send no redundant task Stop or cleanup.
 The fake reader is released and menu items disposed in `finally`.
+`Copilot completed cleanup` covers normal and recovered completed runs with a
+held fake cleanup transport ignoring cancellation. Captured native Stop and
+disposal must finish within three seconds without changing exit/output/offset,
+relaunching, stopping an exited task or accepting a late `REMOVED` reply.
+The cleanup transport is always released; no real worktree removal is attempted.
 
 The smaller kernel-control opt-in executes the exact production runner in an
 explicitly selected, already-responsive WSL distribution:

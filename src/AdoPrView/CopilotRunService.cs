@@ -518,8 +518,9 @@ public sealed partial class CopilotRunService : IAsyncDisposable
                     RequireSuccess(discarded, "Private prompt cleanup could not be confirmed.");
                     if (finalStatus == "completed" && e.TaskConfirmedStopped)
                     {
+                        token.ThrowIfCancellationRequested();
                         var cleaned = await InvokeRun("cleanup", env, CleanupScript, CleanupArguments(e),
-                            token: CancellationToken.None).ConfigureAwait(false);
+                            token: token).ConfigureAwait(false);
                         var disposition = ProtocolFields(cleaned.StandardOutput);
                         Update(e, s => s with
                         {

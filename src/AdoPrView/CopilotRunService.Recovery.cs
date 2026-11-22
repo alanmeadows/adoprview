@@ -261,7 +261,10 @@ public sealed partial class CopilotRunService
         {
             try
             {
-                var cleaned = await InvokeRun("cleanup", e.Environment!, CleanupScript, CleanupArguments(e)).ConfigureAwait(false);
+                using var cleanup = CancellationTokenSource.CreateLinkedTokenSource(e.Cancellation.Token, e.DetachCancellation.Token);
+                cleanup.Token.ThrowIfCancellationRequested();
+                var cleaned = await InvokeRun("cleanup", e.Environment!, CleanupScript, CleanupArguments(e),
+                    token: cleanup.Token).ConfigureAwait(false);
                 var fields = ProtocolFields(cleaned.StandardOutput);
                 Update(e, s => s with { WorktreeStatus = cleaned.ExitCode == 0 && fields.FirstOrDefault() == "REMOVED" ?
                     "removed-clean" : "retained-changes", Error = fields.FirstOrDefault() == "REMOVED" ? null :
