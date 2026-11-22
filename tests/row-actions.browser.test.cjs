@@ -587,8 +587,12 @@ test('real row hit testing and action identity across refreshes', { timeout: 900
           for (const selector of ['[data-act="cancelExplanation"]', '.explain-output']) {
             await setup();
             await evaluate(`setSnapshot({...S.snap,prs:S.snap.prs.filter(p=>p.key!=='${key}')});renderRows();
-              document.querySelector('#explanationShelf ${selector}').focus();
-              setSnapshot({...S.snap,orderRevision:(S.snap.orderRevision||0)+1,
+              document.querySelector('#search').focus();`);
+            const focused = () => evaluate(`document.activeElement?.matches(${JSON.stringify('#explanationShelf ' + selector)})`);
+            for (let i = 0; i < 40 && !await focused(); i++) await keyboard('Tab', 9);
+            assert.equal(await focused(), true);
+            assert.equal(await evaluate("document.activeElement.matches(':focus-visible')"), true);
+            await evaluate(`setSnapshot({...S.snap,orderRevision:(S.snap.orderRevision||0)+1,
                 prs:S.snap.prs.map(p=>({...p,title:'New synthetic current title'}))});`);
             assert.equal(await evaluate('!!S.pendingSnapshot'), true);
             assert.notEqual(await evaluate('S.snap.prs[0].title'), 'New synthetic current title');
