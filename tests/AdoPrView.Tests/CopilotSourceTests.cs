@@ -9,9 +9,10 @@ static class CopilotSourceTests
 {
     const string Sha = "1111111111111111111111111111111111111111";
     static void Check(bool condition, string message) { if (!condition) throw new Exception(message); }
-    public static async Task<string> CreatePrompt()
+    public static async Task<string> CreatePrompt(string? customAsk = null)
     {
         using var f = new Fixture();
+        f.Store.Current.TriageInstructions = customAsk;
         return (await f.Service.GetCopilotSourceAsync(f.Pr.Key)).Prompt;
     }
 
@@ -119,6 +120,114 @@ static class CopilotSourceTests
 
     public static async Task Run(Func<string, Func<Task>, Task> test)
     {
+        foreach (var suffix in new[] { false, true })
+            await test($"Copilot additional instructions reject NUL before returning copied or captured prompts (suffix={suffix})", async () =>
+            {
+                using var f = new Fixture();
+                if (suffix) f.Store.Current.AdditionalTriageInstructions = "EXTRA\0GUIDANCE";
+                else f.Store.Current.TriageInstructions = "CUSTOM\0ASK";
+                await RejectPrompt(() => f.Service.BuildTriagePromptAsync(f.Pr.Key));
+                await RejectPrompt(() => f.Service.GetCopilotSourceAsync(f.Pr.Key));
+            });
+        foreach (var custom in new[] { false, true })
+            foreach (var overflow in new[] { 0, 1 })
+                await test($"Copilot additional instructions enforce copied effective prompt boundary (custom={custom}, overflow={overflow})", async () =>
+                {
+                    using var f = new Fixture();
+                    if (custom) f.Store.Current.TriageInstructions = "CUSTOM ASK";
+                    var baseline = await f.Service.BuildTriagePromptAsync(f.Pr.Key);
+                    const string heading = "\n## Additional instructions\n";
+                    var extra = new string('s', 1024 * 1024 - baseline.Length - heading.Length + overflow);
+                    f.Store.Current.AdditionalTriageInstructions = extra;
+                    if (overflow == 1)
+                    {
+                        await RejectPrompt(() => f.Service.BuildTriagePromptAsync(f.Pr.Key));
+                        await RejectPrompt(() => f.Service.GetCopilotSourceAsync(f.Pr.Key));
+                    }
+                    else
+                    {
+                        var copied = await f.Service.BuildTriagePromptAsync(f.Pr.Key);
+                        var captured = await f.Service.GetCopilotSourceAsync(f.Pr.Key);
+                        Check(copied.Length == 1024 * 1024 && copied == baseline + heading + extra &&
+                            captured.Prompt + heading + captured.AdditionalInstructions == copied,
+                            "Exact-limit Copy/capture prompt was truncated, normalized or inconsistent");
+                    }
+                });
+        foreach (var copy in new[] { false, true })
+            foreach (var custom in new[] { false, true })
+                await test($"Copilot additional instructions snapshot all prompt settings before log awaits (copy={copy}, custom={custom})", async () =>
+                {
+                    using var f = new Fixture();
+                    f.Store.Current.TriageInstructions = custom ? "ORIGINAL ASK" : null;
+                    f.Store.Current.FixSkill = "original-skill";
+                    const string additional = "\n  ORIGINAL SUFFIX\n";
+                    f.Store.Current.AdditionalTriageInstructions = additional;
+                    f.Pr.FailedBuilds.Add(new(7, "Offline failure", "https://example.invalid/build/7", null,
+                        [new("Compile", "Offline task", "failed", 9, ["Offline issue"])]));
+                    var baseline = await f.Service.BuildTriagePromptAsync(f.Pr.Key);
+                    var entered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+                    var release = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+                    f.DuringLog = async () =>
+                    {
+                        entered.TrySetResult();
+                        await release.Task.WaitAsync(TimeSpan.FromSeconds(5));
+                    };
+                    async Task<(string Prompt, string? Additional)> Capture()
+                    {
+                        if (copy) return (await f.Service.BuildTriagePromptAsync(f.Pr.Key), null);
+                        var source = await f.Service.GetCopilotSourceAsync(f.Pr.Key);
+                        return (source.Prompt, source.AdditionalInstructions);
+                    }
+                    var capture = Capture();
+                    try
+                    {
+                        await entered.Task.WaitAsync(TimeSpan.FromSeconds(5));
+                        f.Store.Update(settings =>
+                        {
+                            settings.TriageInstructions = "REPLACEMENT ASK";
+                            settings.AdditionalTriageInstructions = null;
+                            settings.FixSkill = "replacement-skill";
+                            settings.FixReviewerModels.Clear();
+                            settings.FixReviewerModels.Add("replacement-model");
+                        });
+                    }
+                    finally { release.TrySetResult(); }
+                    var captured = await capture;
+                    var effective = copy ? captured.Prompt : captured.Prompt + "\n## Additional instructions\n" + captured.Additional;
+                    Check(effective == baseline, "Awaited log fetch mixed settings from different saved generations");
+                    CheckReviewGate(effective);
+                    Check(copy || captured.Additional == additional, "Clearing settings erased an in-flight captured suffix");
+                    var next = await f.Service.BuildTriagePromptAsync(f.Pr.Key);
+                    Check(next.Contains("REPLACEMENT ASK") && next.Contains("Reviewer (model: replacement-model)") &&
+                        !next.Contains("ORIGINAL SUFFIX"), "Snapshot prevented subsequent prompts from using newly saved settings");
+                });
+        foreach (var custom in new[] { false, true })
+            await test($"Copilot additional instructions follow all generated gates without replacing Ask (custom={custom})", async () =>
+            {
+                using var f = new Fixture();
+                if (custom) f.Store.Current.TriageInstructions = "  CUSTOM ASK ONLY  ";
+                var baseline = await f.Service.BuildTriagePromptAsync(f.Pr.Key);
+                const string additional = "  EXTRA ONLY\r\nKeep this final newline.\n";
+                f.Store.Current.AdditionalTriageInstructions = additional;
+                var copy = await f.Service.BuildTriagePromptAsync(f.Pr.Key);
+                var source = await f.Service.GetCopilotSourceAsync(f.Pr.Key);
+                Check(copy == baseline + "\n## Additional instructions\n" + additional &&
+                    source.Prompt == baseline && source.AdditionalInstructions == additional,
+                    "Copy/launch changed the base prompt, normalized the suffix or duplicated it");
+                CheckReviewGate(copy);
+                Check(custom ? copy.Contains("## Ask\r\nCUSTOM ASK ONLY\r\n") :
+                    copy.Contains("Work on this existing PR for the repo repository and drive it to green"),
+                    "Additional instructions replaced the default/custom Ask");
+                foreach (var empty in new string?[] { null, "", " \r\n\t" })
+                {
+                    f.Store.Current.AdditionalTriageInstructions = empty;
+                    Check(await f.Service.BuildTriagePromptAsync(f.Pr.Key) == baseline, "Empty suffix changed existing prompt behavior");
+                }
+                f.Store.Current.TriageInstructions = "CHANGED ASK";
+                f.Store.Current.AdditionalTriageInstructions = "CHANGED SUFFIX";
+                Check(source.Prompt == baseline && source.AdditionalInstructions == additional,
+                    "Later settings changed an already captured launch");
+            });
         foreach (var draft in new bool?[] { null, true, false })
             await test($"Copilot preflight verifies fresh draft status when ignoring drafts: {draft}", async () =>
             {
@@ -208,6 +317,17 @@ static class CopilotSourceTests
         throw new Exception("Unverified source was accepted");
     }
 
+    static async Task RejectPrompt(Func<Task> action)
+    {
+        try { await action(); }
+        catch (InvalidOperationException ex)
+        {
+            Check(ex.Message.Contains("contains NUL, or exceeds 1 MiB"), "Prompt failure was not explicit: " + ex.Message);
+            return;
+        }
+        throw new Exception("Invalid effective prompt was returned for copying or capture");
+    }
+
     sealed class Fixture : IDisposable
     {
         public readonly PrView Pr = new()
@@ -223,21 +343,29 @@ static class CopilotSourceTests
         public int Reads;
         public bool MissingRef;
         public Action? DuringRef;
+        public Func<Task>? DuringLog;
         public Fixture()
         {
-            _http = new(new FakeHandler(req =>
+            _http = new(new FakeHandler(async req =>
             {
                 Check(req.Method == HttpMethod.Get, "Copilot preparation attempted a state-changing ADO request");
                 Check(req.RequestUri!.Host == "dev.azure.com", "Unexpected origin");
                 Reads++;
+                if (req.RequestUri.AbsolutePath.EndsWith("/builds/7/logs"))
+                    return Json("""{"value":[{"id":9,"lineCount":1}]}""");
+                if (req.RequestUri.AbsolutePath.EndsWith("/builds/7/logs/9"))
+                {
+                    if (DuringLog is not null) await DuringLog();
+                    return new(HttpStatusCode.OK) { Content = new StringContent("Offline build log") };
+                }
                 if (req.RequestUri.AbsolutePath.EndsWith("/refs"))
                 {
                     Check(Uri.UnescapeDataString(req.RequestUri.Query).Contains("filter=heads/fix/captured"), "Wrong exact source ref");
                     DuringRef?.Invoke();
-                    return Task.FromResult(Json(MissingRef ? """{"value":[]}""" : $$"""{"value":[{"name":"refs/heads/fix/captured-other","objectId":"2222222222222222222222222222222222222222"},{"name":"refs/heads/fix/captured","objectId":"{{Sha}}"}]}"""));
+                    return Json(MissingRef ? """{"value":[]}""" : $$"""{"value":[{"name":"refs/heads/fix/captured-other","objectId":"2222222222222222222222222222222222222222"},{"name":"refs/heads/fix/captured","objectId":"{{Sha}}"}]}""");
                 }
                 Check(req.RequestUri.AbsolutePath.EndsWith("/pullrequests/123"), "Preflight switched PR");
-                return Task.FromResult(Json(Fresh.ToJsonString()));
+                return Json(Fresh.ToJsonString());
             }));
             Service = new(new AdoClient(_http, _ => Task.FromResult(new AuthenticationHeaderValue("Bearer", "offline"))), Store);
             typeof(PrService).GetField("_snapshot", BindingFlags.Instance | BindingFlags.NonPublic)!.SetValue(Service, new Snapshot { Prs = [Pr] });

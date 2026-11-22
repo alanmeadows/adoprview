@@ -13,7 +13,7 @@ public sealed partial class CopilotRunService
 
     SavedRun Save(Entry e, CopilotRunState? state = null) => new(1, (state ?? e.State) with
     {
-        Request = e.State.Request with { Prompt = "" }, Output = ""
+        Request = e.State.Request with { Prompt = "", AdditionalInstructions = null }, Output = ""
     }, e.Environment is null ? null : e.Environment with { Help = "" },
         e.RunDirectory, e.OwnershipToken, e.LaunchIntent, e.TaskConfirmedStopped, e.TaskIdentity);
 

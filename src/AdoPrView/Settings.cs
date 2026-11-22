@@ -80,6 +80,7 @@ public sealed class AppSettings
     public bool IgnoreDrafts { get; set; }
     public AutoCompleteOptions AutoComplete { get; set; } = new();
     public string? TriageInstructions { get; set; }
+    public string? AdditionalTriageInstructions { get; set; }
     public string? WslDistro { get; set; }
     public Dictionary<string, string> WslRepoDirectories { get; set; } = new(StringComparer.OrdinalIgnoreCase);
     public WindowPlacement? Window { get; set; }
@@ -144,8 +145,10 @@ public sealed class SettingsStore
     {
         lock (_gate)
         {
-            mutate(Current);
-            Save();
+            var next = JsonSerializer.Deserialize<AppSettings>(JsonSerializer.Serialize(Current, Json), Json)!;
+            mutate(next);
+            Save(next);
+            Current = next;
         }
     }
 
@@ -156,17 +159,17 @@ public sealed class SettingsStore
         {
             var previous = Current.Theme;
             Current.Theme = theme;
-            try { Save(); }
+            try { Save(Current); }
             catch { Current.Theme = previous; throw; }
         }
     }
 
-    void Save()
+    void Save(AppSettings settings)
     {
         if (_path is null) return;
         Directory.CreateDirectory(Path.GetDirectoryName(Path.GetFullPath(_path))!);
         var tmp = _path + ".tmp";
-        File.WriteAllText(tmp, JsonSerializer.Serialize(Current, Json));
+        File.WriteAllText(tmp, JsonSerializer.Serialize(settings, Json));
         File.Move(tmp, _path, true);
     }
 }

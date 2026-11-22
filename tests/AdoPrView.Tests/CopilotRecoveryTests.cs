@@ -313,8 +313,13 @@ static class CopilotRecoveryTests
                 f.Transport.RegistryConfig = "/home/offline/config 'registry";
                 f.Transport.RegistryOverride = stateOverride;
                 await using var service = f.Service();
-                var run = await service.StartAsync(Request());
+                var request = Request() with { AdditionalInstructions = "  CAPTURED-REGISTRY-GUIDANCE\r\n" };
+                var run = await service.StartAsync(request);
                 await Wait(service, run.RunId, s => s.Output.Contains("FAKE-READY"));
+                Check(f.Transport.Calls.Single(c => c.Operation == "stage-prompt").StandardInput ==
+                    request.Prompt + CopilotRunService.PublishInstructions(request, "origin", new string('a', 64)) +
+                    "\n## Additional instructions\n" + request.AdditionalInstructions,
+                    "Captured-registry staging changed or duplicated the appended guidance");
                 var saved = f.Store.Load().Single().Saved!;
                 var environment = JsonSerializer.Serialize(saved.Environment);
                 Check(environment.Contains("XdgConfigHome"),
@@ -336,7 +341,7 @@ static class CopilotRecoveryTests
                 await recovery.WaitAsync(TimeSpan.FromSeconds(3));
                 Check(stopped!.Status == "cancelled" && !stopped.MayBeRunning && stopped.WorktreeRetained &&
                     stopped.Output.Contains("FAKE-READY"), "Captured-registry cancellation lost truthful state, output or work");
-                foreach (var call in f.Transport.Calls.Where(c => c.Operation is "launch" or "follow" or "status" or "stop" or "history"))
+                foreach (var call in f.Transport.Calls.Where(c => c.Operation is "stage-prompt" or "launch" or "follow" or "status" or "stop" or "history"))
                 {
                     Check(call.Script.Contains("export XDG_CONFIG_HOME='/home/offline/config '\\''registry'") &&
                         call.Script.Contains(stateOverride.Length == 0 ? "unset BGTASK_STATE_DIR" :
@@ -369,6 +374,57 @@ static class CopilotRecoveryTests
                 f.Store.Load().Single().Saved!.TaskConfirmedStopped &&
                 stopped.Request.Prompt == run.Request.Prompt,
                 "Exact-run retry did not prove stop or mutated the captured prompt/suffix");
+        });
+        await test("Copilot additional instructions stay out of durable history and never rewrite recovered or completed sessions", async () =>
+        {
+            using var f = new Fixture();
+            await using var first = f.Service();
+            const string extra = "  ORIGINAL-PRIVATE-SUFFIX\r\nfinal\n";
+            var request = Request() with { PushToSource = true, AdditionalInstructions = extra };
+            var run = await first.StartAsync(request);
+            await Wait(first, run.RunId, s => s.Output.Contains("FAKE-READY"));
+            var staged = f.Transport.Calls.Single(c => c.Operation == "stage-prompt").StandardInput;
+            Check(staged == request.Prompt + CopilotRunService.PublishInstructions(request, "origin", new string('a', 64)) +
+                "\n## Additional instructions\n" + extra, "Original launch did not capture its exact suffix");
+            void CheckHistory()
+            {
+                var text = File.ReadAllText(f.Record(run.RunId));
+                var saved = f.Store.Load().Single().Saved!;
+                Check(!text.Contains("ORIGINAL PRIVATE PROMPT") && !text.Contains("ORIGINAL-PRIVATE-SUFFIX") &&
+                    saved.State.Request.Prompt == "" && saved.State.Request.AdditionalInstructions is null &&
+                    saved.State.Output == "" && saved.Environment!.Help == "", "Windows history exposed prompt/suffix/output bodies");
+                Check(saved.State.Request.SourceRef == request.SourceRef && saved.State.Request.SourceCommit == request.SourceCommit &&
+                    saved.State.Request.PushToSource && saved.State.SessionId == run.SessionId &&
+                    saved.State.WorktreePath == first.Get(run.RunId)!.WorktreePath, "Minimal scrubbing removed captured recovery/publication identity");
+            }
+            CheckHistory();
+            request = request with { Prompt = "LATER ASK", AdditionalInstructions = "LATER SUFFIX" };
+            Check(first.Get(run.RunId)!.Request.Prompt == Request().Prompt &&
+                first.Get(run.RunId)!.Request.AdditionalInstructions == extra, "Running capture was rewritten");
+            await first.DisposeAsync();
+            f.Transport.End(143, outcome: false);
+            await using var second = f.Service();
+            await second.RecoverAsync();
+            var resumed = await Wait(second, run.RunId, s => s.IsActive && s.ResumeAttempts == 1);
+            var launch = f.Transport.Calls.Last(c => c.Operation == "launch");
+            Check(launch.Arguments[6] == run.SessionId && launch.Arguments[8] == "resume-push" &&
+                launch.Arguments[2] == resumed.WorktreePath &&
+                f.Transport.Calls.Count(c => c.Operation == "stage-prompt") == 1 &&
+                f.Transport.Calls.Single(c => c.Operation == "stage-prompt").StandardInput == staged,
+                "Recovery replayed new instructions or changed the captured session/publication authority");
+            CheckHistory();
+            f.Transport.Cleanup = "RETAINED";
+            f.Transport.End(0);
+            await Wait(second, run.RunId, s => s.Status == "completed" && s.WorktreeStatus == "retained-changes");
+            CheckHistory();
+            await second.DisposeAsync();
+            await using var third = f.Service();
+            await third.RecoverAsync();
+            Check(third.Get(run.RunId)!.Status == "completed" && f.Transport.Launches == 2 &&
+                f.Transport.Calls.Count(c => c.Operation == "stage-prompt") == 1 &&
+                first.Get(run.RunId)!.Request.AdditionalInstructions == extra,
+                "Completed history was relaunched or its original captured suffix rewritten");
+            CheckHistory();
         });
         await test("Copilot durable restart reattaches output without a second launch and cancel remains identity-bound", async () =>
         {

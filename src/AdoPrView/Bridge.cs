@@ -199,6 +199,8 @@ public sealed class Bridge(PrService prs, SettingsStore store, Func<string, Task
                         autoComplete.TransitionWorkItems = ac.TransitionWorkItems;
                     }
                     s.TriageInstructions = string.IsNullOrWhiteSpace(incoming.TriageInstructions) ? null : incoming.TriageInstructions;
+                    if (p["settings"]!.AsObject().Any(field => field.Key.Equals("additionalTriageInstructions", StringComparison.OrdinalIgnoreCase)))
+                        s.AdditionalTriageInstructions = string.IsNullOrWhiteSpace(incoming.AdditionalTriageInstructions) ? null : incoming.AdditionalTriageInstructions;
                     s.WslDistro = string.IsNullOrWhiteSpace(incoming.WslDistro) ? null : incoming.WslDistro.Trim();
                     s.WslRepoDirectories = (incoming.WslRepoDirectories ?? new()).Where(kv => !string.IsNullOrWhiteSpace(kv.Value))
                         .ToDictionary(kv => kv.Key.ToLowerInvariant(), kv => kv.Value.Trim(), StringComparer.OrdinalIgnoreCase);
