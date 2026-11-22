@@ -48,7 +48,8 @@ stash/reset/clean files or discard branch commits to make any row fit.
 | Current-branch has user's staged changes in same/different file | Ordinary commit is unsafe; isolate own fix patch and preserve original staged/unstaged intent, or block if inseparable |
 | Fix depends on uncommitted user source | Ask about exact dependent hunks; do not commit those changes without explicit inclusion |
 | Current PR missing, multiple, mismatched, closed/merged, or branch is default | Block commit/push/new PR creation; explain exact mismatch, retain safe local report |
-| PR head differs/diverges or changes during the run | Block publication, reconcile through user decision; never force-push/rebase |
+| Local HEAD does not descend from the published PR head, or the captured published head unexpectedly changes during the run | Block publication, reconcile through user decision; never force-push/rebase |
+| Local HEAD descends from the unchanged captured published head and contains own fix commits or explicitly authorized unpublished baseline commits | Normal non-force push is allowed after the live PR, preservation and exact publication-set checks; being locally ahead is not divergence |
 | Unpublished prior branch commits would ride along with push | Disclose exact publication set and require authorization before pushing |
 | Auth/search/create/edit fails or outcome is uncertain | Local evidence retained, publication explicitly blocked/partial; verify live state before retry, no fallback account or duplicate |
 | Concurrent PR body edit | Preserve live description/template; guarded edit or stop, never overwrite |
