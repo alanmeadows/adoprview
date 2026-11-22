@@ -418,14 +418,23 @@ public sealed class MainWindow : Window, IApprovalUi
         try
         {
             var state = await _copilot.CancelAsync(run.Key, run.RunId);
-            var confirmed = state is { MayBeRunning: false, Status: "completed" or "cancelled" or "failed" };
-            MessageBox.Show(this, confirmed ? "The owned run is confirmed inactive. " +
-                (state!.WorktreeRetained ? "Its worktree is retained. " : "See its recorded worktree disposition. ") +
-                "Its supervised logs are preserved." :
-                "Stop could not be confirmed. The run may still be active; its work and PR reservation are preserved.",
-                "Copilot stop", MessageBoxButton.OK, confirmed ? MessageBoxImage.Information : MessageBoxImage.Warning);
+            var notice = CopilotStopNotice(state);
+            MessageBox.Show(this, notice.Message, "Copilot stop", MessageBoxButton.OK, notice.Image);
         }
         catch (Exception ex) { ReportNativeActionFailure("copilot-native-stop", ex); }
+    }
+
+    internal static (string Message, MessageBoxImage Image) CopilotStopNotice(CopilotRunState? state)
+    {
+        var confirmed = state is { MayBeRunning: false, Status: "completed" or "cancelled" or "failed" };
+        var message = confirmed ? "The owned run is confirmed inactive. " +
+            (state!.WorktreeRetained ? "Its worktree is retained. " : "See its recorded worktree disposition. ") +
+            "Its supervised logs are preserved." :
+            "Stop could not be confirmed. The run may still be active; its work and PR reservation are preserved.";
+        var diagnostic = state?.Error;
+        var hasDiagnostic = !string.IsNullOrWhiteSpace(diagnostic);
+        if (hasDiagnostic) message += "\n\n" + diagnostic;
+        return (message, confirmed && !hasDiagnostic ? MessageBoxImage.Information : MessageBoxImage.Warning);
     }
 
     async Task PostAsync(string json)

@@ -649,6 +649,9 @@ without changing verified stopped state or removing retained logs/work.
 An interrupted replay retains received output and its offsets instead of
 restarting the same log from the beginning. A new dashboard can replay the
 retained log again; Stop does not duplicate history in the current run.
+Native Stop includes returned cleanup/history diagnostics in its own warning
+dialog, even when the dashboard is unavailable. A warning does not undo verified
+inactive state or imply that an unconfirmed task stopped.
 
 Output uses a grow-on-demand tail buffer with the same retained-output limit,
 so empty or short saved histories do not each reserve the maximum buffer.

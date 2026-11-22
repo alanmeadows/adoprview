@@ -55,6 +55,28 @@ static class CopilotRunTests
 
     public static async Task Run(Func<string, Func<Task>, Task> test)
     {
+        await test("Copilot native Stop notice retains returned warnings without inventing stop proof", () =>
+        {
+            var stopped = new CopilotRunState(new string('a', 32), Request(), "cancelled", "", 143, null,
+                "Ubuntu", "/source", "/work", "retained", DateTimeOffset.UtcNow, DateTimeOffset.UtcNow);
+            foreach (var error in new[] { "Private prompt cleanup could not be confirmed; the private file may remain.",
+                "Saved task logs could not be fully replayed after Stop." })
+            {
+                var notice = MainWindow.CopilotStopNotice(stopped with { Error = error });
+                Check(notice.Message.Contains(error) && notice.Message.Contains("confirmed inactive") &&
+                    notice.Message.Contains("worktree is retained") && notice.Image == MessageBoxImage.Warning,
+                    "Native Stop notice hid a returned cleanup/history warning");
+            }
+            var clean = MainWindow.CopilotStopNotice(stopped with { Error = " \r\n" });
+            Check(clean.Image == MessageBoxImage.Information && clean.Message.Contains("confirmed inactive"),
+                "Clean confirmed stop gained a false warning");
+            var uncertain = MainWindow.CopilotStopNotice(stopped with { MayBeRunning = true, Error = "Execution lock remains held." });
+            Check(uncertain.Message.Contains("Stop could not be confirmed") &&
+                uncertain.Message.Contains("Execution lock remains held.") && uncertain.Image == MessageBoxImage.Warning,
+                "Uncertain native Stop lost its diagnostic or fabricated inactive proof");
+            Check(MainWindow.CopilotStopNotice(null).Image == MessageBoxImage.Warning, "Missing run fabricated stop proof");
+            return Task.CompletedTask;
+        });
         await test("Copilot native menu excludes unreadable records and binds distinguishable exact run identities", () =>
         {
             var a = new CopilotRunState(new string('a', 32), Request(), "needs-attention", "", null, null,

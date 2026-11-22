@@ -255,6 +255,11 @@ progress is entry-local, not a persisted schema change or output reset.
 The clamped countervariant publishes a bounded synthetic tail before Stop;
 incomplete replay still warns when truncation has removed the recovery header.
 Completed replay remains single-pass without a false unavailable-history warning.
+`Copilot native Stop notice` exercises the production message/icon formatter
+used by the native dialog: returned cleanup/history diagnostics remain visible,
+clean stopped results stay informational, and uncertain/missing results never
+claim inactive proof. This is offline notice composition, not a displayed
+WPF dialog or installed-app E2E.
 
 The smaller kernel-control opt-in executes the exact production runner in an
 explicitly selected, already-responsive WSL distribution:
