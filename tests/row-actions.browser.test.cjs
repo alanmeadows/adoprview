@@ -1625,6 +1625,80 @@ test('real row hit testing and action identity across refreshes', { timeout: 900
       }
     });
 
+    await t.test('Fix output applies deferred retention before resuming a cleared cross-log selection', async () => {
+      const results = [];
+      for (const mode of ['forward', 'backward']) for (const lost of [false, true]) {
+        await crossLogSelectionFixture(mode);
+        await evaluate(`window.crossOutput.scrollTop=window.crossOutput.scrollHeight-window.crossOutput.clientHeight;
+          window.scrollTo(0,window.scrollY+window.crossOutput.getBoundingClientRect().top-100);`);
+        await frame();
+        await evaluate(`{const box=window.crossOutput.getBoundingClientRect();
+          const range=document.caretRangeFromPoint(box.left+12,box.top+9);
+          if(range?.startContainer!==window.crossText)throw Error('Expected a visible synthetic log anchor');
+          window.deferredAnchorText=window.crossText.data.slice(range.startOffset).split('\\n')[0];
+          const run=S.runs.get('cross-selected-run'),extra='Deferred retained append\\n'.repeat(100);
+          const retained=${lost}?'':run.output.slice(run.output.indexOf('Cross-log synthetic line 20\\n'));
+          updateCopilotRun({...run,output:'[Earlier output truncated]\\n'+retained+extra,
+            outputOffset:run.outputOffset+extra.length});}`);
+        await frame();
+        assert.equal(await evaluate('window.getSelection().toString()'), await evaluate('window.crossSelected'));
+        assert.equal(await evaluate('S.rowsPending'), true);
+        await evaluate('window.getSelection().removeAllRanges()'); await frame();
+        const result = await evaluate(`(()=>{const el=window.crossOutput,box=el.getBoundingClientRect();
+          const range=document.caretRangeFromPoint(box.left+12,box.top+9);
+          return {top:el.scrollTop,bottom:el.scrollHeight-el.clientHeight-el.scrollTop,
+            anchor:range?.startContainer===el.firstChild?range.startContainer.data.slice(range.startOffset).split('\\n')[0]:null,
+            before:window.deferredAnchorText,notice:el.textContent.startsWith('[Earlier output truncated]\\n')};})()`);
+        await evaluate(`{const run=S.runs.get('cross-selected-run'),extra='After deferred retention\\n'.repeat(40);
+          updateCopilotRun({...run,output:run.output+extra,outputOffset:run.outputOffset+extra.length});}`);
+        await frame();
+        results.push({ ...result, mode, lost, nextTop: await evaluate('window.crossOutput.scrollTop') });
+      }
+      for (const result of results) {
+        assert.equal(result.notice, true);
+        if (result.lost) assert.equal(result.top, 0, `${result.mode}: a lost deferred anchor shows the retained beginning`);
+        else {
+          assert.equal(result.anchor, result.before, `${result.mode}: clearing selection preserves the still-retained visible anchor`);
+          assert.ok(result.bottom > 100, 'Applying deferred retention must not resume against the old displayed bottom');
+        }
+        assert.equal(result.nextTop, result.top, 'A later append remains paused after deferred anchor reconciliation');
+      }
+    });
+
+    await t.test('Fix output remaps a narrowed log selection before restoring deferred retention', async () => {
+      const results = [];
+      for (const mode of ['forward', 'backward']) for (const shortened of [false, true]) {
+        await crossLogSelectionFixture(mode);
+        await evaluate(`window.getSelection().setBaseAndExtent(${mode === 'forward'
+          ? 'window.crossMetadataNode,0,window.crossText,window.crossText.length'
+          : 'window.crossText,window.crossText.length,window.crossMetadataNode,0'});
+          window.narrowStart=window.crossText.data.indexOf('Cross-log synthetic line 140\\n');
+          window.narrowEnd=window.narrowStart+24;
+          window.narrowExpected=window.crossText.data.slice(window.narrowStart,window.narrowEnd);
+          {const run=S.runs.get('cross-selected-run'),cut=run.output.indexOf('Cross-log synthetic line ${shortened ? 80 : 20}\\n');
+          const extra='Narrow selection retained append\\n'.repeat(${shortened ? 1 : 100});
+          updateCopilotRun({...run,output:'[Earlier output truncated]\\n'+run.output.slice(cut)+extra,
+            outputOffset:run.outputOffset+extra.length});}`);
+        await frame();
+        assert.equal(await evaluate('S.rowsPending'), true);
+        await evaluate(`window.deferredSelectionError=null;
+          window.deferredErrorHandler=e=>window.deferredSelectionError=e.message;
+          window.addEventListener('error',window.deferredErrorHandler);
+          window.getSelection().setBaseAndExtent(window.crossText,${mode === 'backward' ? 'window.narrowEnd' : 'window.narrowStart'},
+            window.crossText,${mode === 'backward' ? 'window.narrowStart' : 'window.narrowEnd'});`);
+        await frame();
+        results.push({ mode, shortened, ...await evaluate(`(()=>{window.removeEventListener('error',window.deferredErrorHandler);
+          return {selected:window.getSelection().toString(),expected:window.narrowExpected,error:window.deferredSelectionError,
+            sameNode:window.crossOutput.firstChild===window.crossText,pending:S.rowsPending};})()`) });
+      }
+      for (const result of results) {
+        assert.equal(result.error, null, `${result.mode}/${result.shortened}: shortened text must not restore an invalid old offset`);
+        assert.equal(result.selected, result.expected, `${result.mode}/${result.shortened}: every narrowed selected character survived retention`);
+        assert.equal(result.sameNode, true);
+        assert.equal(result.pending, false, 'Native selectionchange applies the queued retention after narrowing');
+      }
+    });
+
     await t.test('inline output streams without replacing rows, remains on captured PR through refresh/removal, and cancels that run', async () => {
       await send('Emulation.setDeviceMetricsOverride', { width: 1600, height: 1000, deviceScaleFactor: 1, mobile: false });
       await reset(true);

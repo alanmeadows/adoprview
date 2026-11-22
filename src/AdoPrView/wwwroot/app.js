@@ -574,6 +574,14 @@ function rememberRunOutputAnchor(view) {
   view.anchor = { offset: low, top: range.getBoundingClientRect().top - box.top };
 }
 
+function runOutputRetention(before, text, oldOffset, newOffset) {
+  const notice = '[Earlier output truncated]\n';
+  const oldPrefix = before.startsWith(notice) ? notice.length : 0;
+  const newPrefix = text.startsWith(notice) ? notice.length : 0;
+  const removed = newOffset - oldOffset + before.length - oldPrefix - (text.length - newPrefix);
+  return { oldPrefix, newPrefix, removed, retentionMoved: newPrefix && Number.isSafeInteger(removed) && removed > 0 };
+}
+
 function rememberRunOutput(view) {
   const el = view.element;
   if (!el.isConnected || !el.clientHeight) return;
@@ -586,7 +594,11 @@ function rememberRunOutput(view) {
     if (view.following) view.selectionPaused = true;
     view.following = false;
   } else {
-    if (view.selectionPaused && runOutputAtBottom(el)) view.following = true;
+    if (view.selectionPaused && runOutputAtBottom(el)) {
+      const run = S.runs.get(el.dataset.runId);
+      if (!run || !runOutputRetention(el.textContent, run.output, view.offset, run.outputOffset).retentionMoved)
+        view.following = true;
+    }
     view.selectionPaused = false;
   }
   view.top = el.scrollTop;
@@ -595,6 +607,8 @@ function rememberRunOutput(view) {
 }
 
 function captureRunOutputs() {
+  // Apply queued retention before capturing offsets or detaching selected nodes.
+  for (const card of document.querySelectorAll('.copilot-run')) syncRunOutput(card);
   for (const view of S.runOutputs.values()) rememberRunOutput(view);
   const selection = window.getSelection();
   if (!selection || selection.isCollapsed !== false) return null;
@@ -656,11 +670,7 @@ function syncRunOutput(card) {
   }
   output.hidden = false;
   const before = output.textContent, text = r.output;
-  const notice = '[Earlier output truncated]\n';
-  const oldPrefix = before.startsWith(notice) ? notice.length : 0;
-  const newPrefix = text.startsWith(notice) ? notice.length : 0;
-  const removed = r.outputOffset - view.offset + before.length - oldPrefix - (text.length - newPrefix);
-  const retentionMoved = newPrefix && Number.isSafeInteger(removed) && removed > 0;
+  const { oldPrefix, newPrefix, removed, retentionMoved } = runOutputRetention(before, text, view.offset, r.outputOffset);
   if (crossRunOutputSelection()?.output === output && (retentionMoved || !text.startsWith(before))) {
     S.rowsPending = true; renderStatus(); return;
   }

@@ -585,7 +585,9 @@ cancellation controls; live output continues in the existing run panel.
 When a selection crosses the log into metadata in that same run card,
 background changes that would invalidate it wait. Safe log appends, metadata
 outside the selected range and other runs continue updating; queued changes
-flush after the selection and other row interaction end.
+flush after the selection and other row interaction end. Deferred truncation
+is reconciled before selection clearing can resume following; narrowing the
+selection into retained log text keeps the selected characters.
 If the bounded tail drops the text you were reading, its truncation notice and
 remaining beginning are shown instead of silently snapping to the latest text;
 the original supervised log remains available.
