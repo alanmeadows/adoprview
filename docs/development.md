@@ -352,6 +352,52 @@ neighboring action targets. All approval writes in these checks are intercepted.
 synthetic fixtures. The screenshots in [images](images) were captured from that
 mock UI with synthetic data.
 
+## Repository usability skill
+
+This repository includes the
+[`usability-walkthrough` Copilot skill](../.github/skills/usability-walkthrough/SKILL.md).
+Use exactly one explicit mode:
+
+- `/usability-walkthrough main` reviews a pinned clean default-main snapshot in
+  a separate checkout, generates an offline HTML report, and creates one issue
+  and isolated main-based PR per accepted necessary functional/layout finding.
+- `/usability-walkthrough current-branch` reviews the current worktree,
+  including meaningful local changes and PR commits, generates the same report,
+  and adds only its own fix commits and evidence to the existing open PR.
+  It creates no new issues or PRs and preserves unrelated changes and staging.
+
+No argument asks for the mode without executing; invalid or extra arguments
+show the two allowed commands and stop. Main mode still requires an explicit
+decision before excluding active branch/PR work. Current-branch mode blocks
+publication on a missing, ambiguous, mismatched or closed PR or default branch.
+Generated-looking files alone do not establish whether a worktree is active.
+
+The skill uses synthetic safe fixtures, inventories source-only or blocked
+flows honestly, and requires layout/density, button hierarchy and
+progressive-disclosure assessment with KEEP / necessary CHANGE / DEFER advice.
+Grounded layout improvements need no crash reproducer, but implementation still
+requires necessary narrow scope, concrete user cost, source/render evidence and
+observable criteria. It distinguishes functional bugs, observed layout issues,
+expert judgement and untested hypotheses; no broad restyling, invented measured
+benefits or target finding count. It does not authorize real
+model/Speech/approval/PoP/ADO test writes, merging, installing or releasing.
+Reports and screenshots stay outside Git.
+Its [decision cases](../.github/skills/usability-walkthrough/decision-cases.md)
+and [evidence checklist](../.github/skills/usability-walkthrough/evidence.md)
+describe preservation, publication and observable closure requirements.
+
+The skill is repository-local Markdown instructions, not an enforced CLI
+argument parser. `copilot skill list --json` can verify its name, description,
+project source, path and enabled status without invoking a model. This is
+metadata discovery, not proof that a running session can load the skill.
+In Copilot CLI, start a new session or use `/skills reload`,
+then `/skills info usability-walkthrough` to check discovery. Other Copilot
+surfaces use their own skill discovery; do not assume an already-running app
+session or general chat refreshes its skill list automatically. No
+personal/global installation or app configuration is required. See GitHub's
+[agent skills documentation](https://docs.github.com/en/copilot/concepts/customizations/agent-skills)
+and [CLI authoring guide](https://docs.github.com/en/copilot/how-tos/copilot-cli/customize-copilot/add-skills).
+
 ## Theme design and checks
 
 `wwwroot/themes.css` defines semantic canvas, surface, foreground, border,

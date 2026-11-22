@@ -116,6 +116,9 @@ Viewing PRs needs neither WSL nor Copilot.
   ADO calls used.
 - [docs/development.md](docs/development.md): building, offline tests and
   releases.
+- [Repository usability skill](docs/development.md#repository-usability-skill):
+  `/usability-walkthrough main` for isolated issue/PR fixes, or
+  `/usability-walkthrough current-branch` to add fixes to an existing PR.
 
 ## License
 
