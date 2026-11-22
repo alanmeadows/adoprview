@@ -74,6 +74,7 @@ const S = {
   approvalSettings: null,
   approvalSettingsBusy: false,
   runs: new Map(),
+  runOutputs: new Map(),
   explanations: new Map(),
   investigations: new Map(),
   videos: new Map(),
@@ -205,7 +206,7 @@ function rowsInUse() {
 }
 
 function flushRowUpdates() {
-  if (rowsInUse()) return;
+  if (rowsInUse() || crossRunOutputSelection()) return;
   if (S.pendingSnapshot) setSnapshot(S.pendingSnapshot);
   if (S.rowsPending) renderRows();
   renderStatus();
@@ -256,7 +257,7 @@ function setSnapshot(snap) {
   S.orderRevision = revision;
   S.lastSig = sig;
   renderHeader();
-  if (rowsChanged) renderRows();
+  if (rowsChanged) renderRows(true);
 }
 
 function render() { renderHeader(); renderRows(); if (S.drawer) renderDrawer(); }
@@ -310,8 +311,10 @@ function laneVisible(prs) {
 
 function renderRows(whenIdle = false) {
   const focused = expansionControl(document.activeElement);
+  const selection = captureRunOutputs();
   const players = new Map([...document.querySelectorAll('video[data-video-media]')].map(v => [v.dataset.videoMedia, v]));
   renderRowsContent(whenIdle);
+  restoreRunOutputs(selection);
   for (const placeholder of document.querySelectorAll('video[data-video-media]')) {
     const existing = players.get(placeholder.dataset.videoMedia);
     if (existing && existing !== placeholder) placeholder.replaceWith(existing);
@@ -336,10 +339,10 @@ function restoreExpansionFocus(control) {
 }
 
 function renderRowsContent(whenIdle = false) {
-  if (S.rowPointerDown || (whenIdle && rowsInUse())) { S.rowsPending = true; renderStatus(); return; }
+  if (S.rowPointerDown || (whenIdle && (rowsInUse() || crossRunOutputSelection()))) { S.rowsPending = true; renderStatus(); return; }
   S.rowsPending = false;
   const vis = baseVisible();
-  renderRunShelf();
+  renderRunShelfContent();
   renderVideoShelf();
   const rows = $('#rows');
   const empty = $('#empty');
@@ -566,9 +569,190 @@ function runWorktreeText(r) {
     r.logPath && `Supervised log: ${r.logPath}`, r.preparationLogPath && `Private preparation log (if created): ${r.preparationLogPath}`].filter(Boolean).join('\n');
 }
 
+const runOutputAtBottom = el => el.scrollHeight - el.clientHeight - el.scrollTop <= 2;
+function runOutputSelected(el) {
+  const selection = window.getSelection();
+  return selection?.isCollapsed === false && (el.contains(selection.anchorNode) || el.contains(selection.focusNode));
+}
+
+function crossRunOutputSelection() {
+  const selection = window.getSelection();
+  if (selection?.isCollapsed !== false) return null;
+  const anchor = selection.anchorNode;
+  const card = (anchor?.nodeType === 1 ? anchor : anchor?.parentElement)?.closest('.copilot-run');
+  if (!card?.contains(selection.focusNode)) return null;
+  const output = $('.run-output', card);
+  if (!output || (output.contains(anchor) && output.contains(selection.focusNode))) return null;
+  const range = selection.getRangeAt(0);
+  return range.intersectsNode(output) ? { card, output, range } : null;
+}
+
+function rememberRunOutputAnchor(view) {
+  const el = view.element, node = el.firstChild;
+  view.anchor = null;
+  if (view.following || node?.nodeType !== 3 || !node.length) return;
+  const box = el.getBoundingClientRect(), y = box.top + parseFloat(getComputedStyle(el).paddingTop) + 1;
+  const range = document.createRange();
+  let low = 0, high = node.length - 1;
+  // Range geometry works even outside the dashboard viewport, unlike caret hit testing.
+  while (low < high) {
+    const middle = Math.floor((low + high) / 2);
+    range.setStart(node, middle); range.setEnd(node, middle + 1);
+    if (range.getBoundingClientRect().bottom <= y) low = middle + 1;
+    else high = middle;
+  }
+  range.setStart(node, low); range.setEnd(node, low + 1);
+  view.anchor = { offset: low, top: range.getBoundingClientRect().top - box.top };
+}
+
+function runOutputRetention(before, text, oldOffset, newOffset) {
+  const notice = '[Earlier output truncated]\n';
+  const oldPrefix = before.startsWith(notice) ? notice.length : 0;
+  const newPrefix = text.startsWith(notice) ? notice.length : 0;
+  const removed = newOffset - oldOffset + before.length - oldPrefix - (text.length - newPrefix);
+  return { oldPrefix, newPrefix, removed, retentionMoved: newPrefix && Number.isSafeInteger(removed) && removed > 0 };
+}
+
+function rememberRunOutput(view) {
+  const el = view.element;
+  if (!el.isConnected || !el.clientHeight) return;
+  const selected = runOutputSelected(el);
+  if (el.scrollTop !== view.top) {
+    view.following = runOutputAtBottom(el);
+    view.selectionPaused = selected && view.following;
+  }
+  if (selected) {
+    if (view.following) view.selectionPaused = true;
+    view.following = false;
+  } else {
+    if (view.selectionPaused && runOutputAtBottom(el)) {
+      const run = S.runs.get(el.dataset.runId);
+      if (!run || !runOutputRetention(el.textContent, run.output, view.offset, run.outputOffset).retentionMoved)
+        view.following = true;
+    }
+    view.selectionPaused = false;
+  }
+  view.top = el.scrollTop;
+  view.left = el.scrollLeft;
+  rememberRunOutputAnchor(view);
+}
+
+function captureRunOutputs() {
+  // Apply queued retention before capturing offsets or detaching selected nodes.
+  for (const card of document.querySelectorAll('.copilot-run')) syncRunOutput(card);
+  for (const view of S.runOutputs.values()) rememberRunOutput(view);
+  const selection = window.getSelection();
+  if (!selection || selection.isCollapsed !== false) return null;
+  const anchor = selection.anchorNode;
+  const output = (anchor?.nodeType === 1 ? anchor : anchor?.parentElement)?.closest('.run-output');
+  if (!output?.contains(selection.focusNode)) return null;
+  return { anchor: selection.anchorNode, anchorOffset: selection.anchorOffset,
+    focus: selection.focusNode, focusOffset: selection.focusOffset };
+}
+
+function restoreRunOutputs(selection) {
+  for (const card of document.querySelectorAll('.copilot-run')) syncRunOutput(card);
+  for (const [id, view] of S.runOutputs) {
+    if (!S.runs.has(id)) S.runOutputs.delete(id);
+    // Hiding a panel can clear selection without a deliberate return to the bottom.
+    else if (!view.element.isConnected) view.selectionPaused = false;
+  }
+  restoreRunOutputSelection(selection);
+}
+
+function restoreRunOutputSelection(selection) {
+  if (selection?.anchor.isConnected && selection.focus.isConnected)
+    window.getSelection().setBaseAndExtent(selection.anchor, selection.anchorOffset, selection.focus, selection.focusOffset);
+}
+
+function syncRunOutput(card) {
+  const r = S.runs.get(card.dataset.runId);
+  if (!r) return;
+  let output = $('.run-output', card), view = S.runOutputs.get(r.runId);
+  if (view?.element === output) rememberRunOutput(view);
+  if (!view) {
+    // A different run starts following; never reuse the earlier run's reading state.
+    if (output.dataset.runId && output.dataset.runId !== r.runId) {
+      const fresh = output.cloneNode(false);
+      output.replaceWith(fresh); output = fresh;
+    }
+    view = { element: output, following: true, top: 0, left: 0 };
+    output.dataset.runId = r.runId;
+    S.runOutputs.set(r.runId, view);
+    output.addEventListener('scroll', () => rememberRunOutput(view));
+    output.addEventListener('wheel', e => {
+      if (e.deltaY < 0 && output.scrollTop > 0) { view.following = false; view.selectionPaused = false; }
+      else if (e.deltaY > 0 && runOutputAtBottom(output)) {
+        if (runOutputSelected(output)) view.selectionPaused = true;
+        else view.following = true;
+      }
+    }, { passive: true });
+    output.addEventListener('keydown', e => {
+      if (output.scrollTop > 0 && ['ArrowUp', 'PageUp', 'Home'].includes(e.key)) { view.following = false; view.selectionPaused = false; }
+      else if (!e.shiftKey && ['ArrowDown', 'PageDown', 'End'].includes(e.key) &&
+        runOutputAtBottom(output)) {
+        if (runOutputSelected(output)) view.selectionPaused = true;
+        else view.following = true;
+      }
+    });
+  } else if (view.element !== output) {
+    output.replaceWith(view.element);
+    output = view.element;
+  }
+  output.hidden = false;
+  const before = output.textContent, text = r.output;
+  const { oldPrefix, newPrefix, removed, retentionMoved } = runOutputRetention(before, text, view.offset, r.outputOffset);
+  if (crossRunOutputSelection()?.output === output && (retentionMoved || !text.startsWith(before))) {
+    S.rowsPending = true; renderStatus(); return;
+  }
+  const selectionPaused = view.selectionPaused, topBeforeMutation = output.scrollTop;
+  if (retentionMoved && !view.following) view.selectionPaused = false;
+  if (text !== before || retentionMoved) {
+    const node = output.firstChild;
+    if (node?.nodeType === 3 && !retentionMoved && text.startsWith(before)) node.appendData(text.slice(before.length));
+    else if (node?.nodeType === 3) {
+      const retained = before.slice(oldPrefix + removed);
+      if (newPrefix && Number.isSafeInteger(removed) && removed >= 0 && removed < before.length - oldPrefix &&
+        text.slice(newPrefix).startsWith(retained)) {
+        const anchor = view.following ? null : view.anchor;
+        const selection = window.getSelection(), cut = oldPrefix + removed;
+        const selected = selection?.isCollapsed === false && selection.anchorNode === node && selection.focusNode === node &&
+          Math.min(selection.anchorOffset, selection.focusOffset) >= cut
+          ? { anchor: selection.anchorOffset - cut + newPrefix, focus: selection.focusOffset - cut + newPrefix } : null;
+        node.deleteData(0, oldPrefix + removed);
+        node.insertData(0, text.slice(0, newPrefix));
+        node.appendData(text.slice(newPrefix + retained.length));
+        if (selected) selection.setBaseAndExtent(node, selected.anchor, node, selected.focus);
+        if (!view.following) {
+          if (anchor && anchor.offset >= oldPrefix + removed) {
+            const range = document.createRange(), offset = anchor.offset - oldPrefix - removed + newPrefix;
+            range.setStart(node, offset); range.setEnd(node, offset + 1);
+            view.top = output.scrollTop + range.getBoundingClientRect().top - output.getBoundingClientRect().top - anchor.top;
+            view.selectionPaused = selectionPaused && !!selected && output.scrollTop === topBeforeMutation;
+          } else view.top = 0;
+        }
+      } else {
+        node.replaceData(0, node.length, text);
+        if (newPrefix && !view.following) view.top = 0;
+      }
+    } else output.textContent = text;
+  }
+  view.offset = r.outputOffset;
+  if (output.clientHeight) {
+    output.scrollTop = view.following ? output.scrollHeight : view.top;
+    output.scrollLeft = view.left;
+    // Programmatic restoration/clamping must not turn a paused reader into a follower.
+    view.top = output.scrollTop;
+    view.left = output.scrollLeft;
+    if (view.selectionPaused && !runOutputAtBottom(output)) view.selectionPaused = false;
+    rememberRunOutputAnchor(view);
+  }
+}
+
+const runCardTitle = earlier => earlier ? 'Earlier run · Copilot in WSL' : 'Fix PR · Copilot in WSL';
 function renderRunCard(key, r = runForPr(key), earlier = false) {
   return `<div class="card copilot-run${earlier ? ' run-earlier' : ''}" data-run-key="${esc(key)}" data-run-id="${esc(r?.runId || '')}">
-    <h3><span class="grow">${earlier ? 'Earlier run · Copilot in WSL' : 'Fix PR · Copilot in WSL'}</span>
+    <h3><span class="grow">${runCardTitle(earlier)}</span>
       <button class="mini" data-act="cancelRun" data-run-id="${esc(r?.runId || '')}" ${runCancelable(r) ? '' : 'hidden'}>${svg('x')} Cancel run</button></h3>
     <div class="body">
       <p class="small">Starts in a separate PR worktree with --yolo: tools, paths and URLs are allowed without confirmation for this run, not globally. This is not a filesystem sandbox. New runs are told to commit validated fixes and ordinary-push them only to this PR's captured source branch; that limit is a prompt instruction, not enforced. Merge/PR-update command denies and the prompt's approval/policy boundaries remain; earlier runs keep their original no-push scope. Sign-in is required beforehand; this panel is noninteractive. Exit 0 does not verify the PR fix.</p>
@@ -586,7 +770,15 @@ function earlierRunCards(key) {
 
 // Runs stay inside their PR row. Departed PRs and ignored drafts keep collapsible
 // run entries here (unless hidden), only in the unfiltered view.
-function renderRunShelf() {
+function renderRunShelf(whenIdle = false) {
+  if (!$('#runShelf')) return;
+  if (whenIdle && (rowsInUse() || crossRunOutputSelection()?.card.closest('#runShelf'))) { S.rowsPending = true; renderStatus(); return; }
+  const selection = captureRunOutputs();
+  renderRunShelfContent();
+  restoreRunOutputs(selection);
+}
+
+function renderRunShelfContent() {
   const shelf = $('#runShelf');
   if (!shelf) return;
   const focused = shelf.contains?.(document.activeElement) ? expansionControl(document.activeElement) : null;
@@ -620,27 +812,70 @@ function updateCopilotRun(r) {
   if (old?.runId === r.runId && old.updatedAt && r.updatedAt && Date.parse(r.updatedAt) < Date.parse(old.updatedAt)) return;
   if (Number.isFinite(old?.outputOffset) && Number.isFinite(r.outputOffset) && r.outputOffset < old.outputOffset) return;
   S.runs.set(r.runId, r);
+  const previousSelection = old ? null : captureRunOutputs();
   syncCopilotButton(r.key);
-  // Stream only into this panel; never replace rows or move another click target.
-  const latest = runForPr(r.key)?.runId === r.runId;
-  const cards = [...document.querySelectorAll('.copilot-run')].filter(el => el.dataset.runKey === r.key &&
-    (el.dataset.runId === r.runId || (latest && !el.classList.contains('run-earlier'))));
-  if (!cards.length) { renderRunShelf(); if (!old) renderRows(true); return; }
+  // Stream only into this PR's panels; preserve controls while rows are in use.
+  const latestId = runForPr(r.key)?.runId, latest = latestId === r.runId;
+  const runCards = [...document.querySelectorAll('.copilot-run')].filter(el => el.dataset.runKey === r.key);
+  const main = runCards.find(el => !el.classList.contains('run-earlier'));
+  const promoted = runCards.find(el => el.dataset.runId === latestId);
+  if (latest && !promoted && main?.dataset.runId) {
+    renderRows(true);
+    return;
+  }
+  const crossSelection = crossRunOutputSelection();
+  const deferMain = !!main?.dataset.runId && main.dataset.runId !== latestId &&
+    (rowsInUse() || crossSelection?.card.dataset.runKey === r.key);
+  if (deferMain) { S.rowsPending = true; renderStatus(); }
+  else if (main && promoted && main !== promoted) {
+    const selection = captureRunOutputs();
+    main.classList.add('run-earlier'); $('h3 .grow', main).textContent = runCardTitle(true);
+    promoted.classList.remove('run-earlier'); $('h3 .grow', promoted).textContent = runCardTitle(false);
+    main.before(promoted);
+    let previous = promoted;
+    for (const run of runsForPr(r.key).filter(run => run.runId !== latestId)) {
+      const card = runCards.find(card => card.dataset.runId === run.runId);
+      if (!card) continue;
+      if (previous.nextElementSibling !== card) previous.after(card);
+      previous = card;
+    }
+    for (const card of runCards) {
+      const view = S.runOutputs.get(card.dataset.runId);
+      if (view) {
+        view.element.scrollTop = view.top;
+        view.element.scrollLeft = view.left;
+        view.top = view.element.scrollTop;
+      }
+    }
+    restoreRunOutputSelection(selection);
+  }
+  const cards = runCards.filter(el =>
+    (el.dataset.runId === r.runId || (latest && !promoted && !deferMain && !el.classList.contains('run-earlier'))));
+  if (!cards.length) {
+    renderRunShelf(true);
+    if (!old) { renderRows(true); restoreRunOutputs(previousSelection); }
+    return;
+  }
   for (const card of cards) {
+    const previousView = S.runOutputs.get(card.dataset.runId);
+    if (previousView) rememberRunOutput(previousView);
     card.dataset.runId = r.runId;
-    $('.run-status', card).textContent = runSummary(r);
-    $('.run-worktree', card).textContent = runWorktreeText(r);
-    const output = $('.run-output', card);
-    const atBottom = output.scrollHeight - output.clientHeight - output.scrollTop < 30;
-    output.hidden = false;
-    output.textContent = r.output;
-    if (atBottom) output.scrollTop = output.scrollHeight;
+    for (const [element, text] of [[$('.run-status', card), runSummary(r)], [$('.run-worktree', card), runWorktreeText(r)]]) {
+      if (element.textContent === text) continue;
+      if (crossSelection?.card === card && crossSelection.range.intersectsNode(element)) {
+        S.rowsPending = true; renderStatus();
+      } else element.textContent = text;
+    }
+    syncRunOutput(card);
     const cancel = $('[data-act="cancelRun"]', card);
-    cancel.hidden = !runCancelable(r);
+    const hidden = !runCancelable(r);
+    if (cancel.hidden !== hidden && crossSelection?.card === card && crossSelection.range.intersectsNode(cancel)) {
+      S.rowsPending = true; renderStatus();
+    } else cancel.hidden = hidden;
     cancel.disabled = isBusy(r.key, 'cancelRun');
     cancel.dataset.runId = r.runId;
   }
-  if (!old) { renderRunShelf(); renderRows(true); }
+  if (!old) { renderRunShelf(true); renderRows(true); restoreRunOutputs(previousSelection); }
 }
 
 function syncCopilotButton(key) {
@@ -1730,8 +1965,15 @@ function wire() {
     message.hidden = false;
   }, true);
   document.addEventListener('contextmenu', openRowMenu);
-  rows.addEventListener('pointerenter', () => { S.pointerInRows = true; });
-  rows.addEventListener('pointerleave', () => { S.pointerInRows = false; flushRowUpdates(); });
+  const rowRegions = [rows, $('#runShelf')];
+  for (const region of rowRegions) {
+    region.addEventListener('pointerenter', () => { S.pointerInRows = true; });
+    region.addEventListener('pointerleave', e => {
+      S.pointerInRows = !!e.relatedTarget?.nodeType && rowRegions.some(root => root.contains(e.relatedTarget));
+      flushRowUpdates();
+    });
+    region.addEventListener('focusout', () => requestAnimationFrame(flushRowUpdates));
+  }
   document.addEventListener('pointerdown', (e) => {
     if (S.rowMenu && !e.target.closest('#rowMenu')) { closeRowMenu(); requestAnimationFrame(flushRowUpdates); }
     if (e.target.closest('.pr')) S.rowPointerDown = true;
@@ -1742,8 +1984,7 @@ function wire() {
   };
   document.addEventListener('pointerup', endPointer, true);
   document.addEventListener('pointercancel', endPointer, true);
-  rows.addEventListener('focusout', () => requestAnimationFrame(flushRowUpdates));
-  $('#runShelf').addEventListener('focusout', () => requestAnimationFrame(flushRowUpdates));
+  document.addEventListener('selectionchange', () => requestAnimationFrame(flushRowUpdates));
   window.addEventListener('blur', () => {
     closeRowMenu();
     S.pointerInRows = false;

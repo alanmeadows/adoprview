@@ -602,6 +602,25 @@ panel. **This private file may contain remote URLs or authentication details:
 review and redact it before sharing.** Raw Git errors never go into the dashboard
 or lifecycle log. Failed prelaunch records are not resumed.
 
+The Fix output panel starts at the latest text and follows new output while you
+are at the bottom. Scroll or select text to read earlier output without being
+pulled back; reaching the bottom resumes following once any text selection is
+cleared. Hiding a selected panel or losing the selected text to truncation does
+not resume following. A selection surviving retention at an unchanged,
+unclamped bottom still resumes when cleared. Each run keeps its own
+reading position across collapse, filtering and ordinary dashboard rerenders.
+Background changes to run-shelf cards wait while you interact with their
+cancellation controls; live output continues in the existing run panel.
+When a selection crosses the log into metadata in that same run card,
+background changes that would invalidate it wait. Safe log appends, metadata
+outside the selected range and other runs continue updating; queued changes
+flush after the selection and other row interaction end. Deferred truncation
+is reconciled before selection clearing can resume following; narrowing the
+selection into retained log text keeps the selected characters.
+If the bounded tail drops the text you were reading, its truncation notice and
+remaining beginning are shown instead of silently snapping to the latest text;
+the original supervised log remains available.
+
 The inline output is noninteractive, safely rendered and bounded. Each deliberate
 Fix PR run uses **`--yolo`**, the documented equivalent of `--allow-all-tools
 --allow-all-paths --allow-all-urls`. These permissions apply to that process only;

@@ -1380,6 +1380,20 @@ test('late start replies and old run events cannot overwrite completed or newer 
   assert.equal(hooks.S.runs.get(first.runId).output, 'Old final');
 });
 
+test('Fix output rejects stale UTF-16 offsets without blocking same-offset status changes or another run', () => {
+  const { hooks, pr } = setup();
+  const output = 'Synthetic \u{1f680} output\n';
+  const run = { key: pr.key, runId: 'offset-run', status: 'running', output, outputOffset: output.length,
+    updatedAt: '2026-01-01T00:00:00Z' };
+  hooks.updateCopilotRun(run);
+  hooks.updateCopilotRun({ ...run, output: 'Synthetic ', outputOffset: 10, updatedAt: '2026-01-01T00:00:01Z' });
+  assert.equal(hooks.S.runs.get(run.runId).output, output);
+  hooks.updateCopilotRun({ ...run, status: 'completed', updatedAt: '2026-01-01T00:00:02Z' });
+  assert.equal(hooks.S.runs.get(run.runId).status, 'completed');
+  hooks.updateCopilotRun({ ...run, runId: 'another-offset-run', output: 'New', outputOffset: 3 });
+  assert.equal(hooks.S.runs.get('another-offset-run').output, 'New');
+});
+
 test('recovered sessions keep independent history, recovered spinner and original run cancellation identity', async () => {
   const { hooks, pr, elements, window } = setup();
   const old = { key: pr.key, id: pr.id, repo: pr.repo, title: pr.title, runId: 'old-completed',
