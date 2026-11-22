@@ -244,7 +244,7 @@ function setSnapshot(snap) {
   S.orderRevision = revision;
   S.lastSig = sig;
   renderHeader();
-  if (rowsChanged) renderRows();
+  if (rowsChanged) renderRows(true);
 }
 
 function render() { renderHeader(); renderRows(); if (S.drawer) renderDrawer(); }
