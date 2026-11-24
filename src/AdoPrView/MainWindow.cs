@@ -149,29 +149,32 @@ public sealed class MainWindow : Window, IApprovalUi
             _diagnostics.Record("shutdown-started", _shutdownReason);
             try
             {
-                if (_copilotDelivery is not null) await _copilotDelivery.DisposeAsync();
-                // Browser output detaches early; exact-run controls survive blocked or failed teardown.
-                await DisposeCopilotAfterAsync(_copilot, async () =>
+                var staged = await TeardownForUpdateAsync(async () =>
                 {
-                    _speechSetup?.Cancel();
-                    if (_speechSetupWork is not null)
-                        try { await _speechSetupWork; } catch (Exception ex) { _diagnostics.Record("speech-setup-stopped", ex.Message); }
-                    await _video.DisposeAsync();
-                    _speechSetup?.Dispose();
-                    _speechSetup = null;
-                    _speech.Dispose();
-                    await _explain.DisposeAsync();
-                    await _investigation.DisposeAsync();
-                    _pop.Dispose();
-                    _attentionSound.Dispose();
-                });
+                    if (_copilotDelivery is not null) await _copilotDelivery.DisposeAsync();
+                    // Browser output detaches early; exact-run controls survive blocked or failed teardown.
+                    await DisposeCopilotAfterAsync(_copilot, async () =>
+                    {
+                        _speechSetup?.Cancel();
+                        if (_speechSetupWork is not null)
+                            try { await _speechSetupWork; } catch (Exception ex) { _diagnostics.Record("speech-setup-stopped", ex.Message); }
+                        await _video.DisposeAsync();
+                        _speechSetup?.Dispose();
+                        _speechSetup = null;
+                        _speech.Dispose();
+                        await _explain.DisposeAsync();
+                        await _investigation.DisposeAsync();
+                        _pop.Dispose();
+                        _attentionSound.Dispose();
+                    });
+                }, _updates, () => _pendingInstaller);
+                _pendingInstaller = null;
                 _shutdownComplete = true;
                 _tray.Visible = false;
                 _tray.Dispose();
                 _diagnostics.Record("shutdown-teardown-completed", _shutdownReason);
-                if (_pendingInstaller is { } installer)
+                if (staged is { } installer)
                 {
-                    _pendingInstaller = null;
                     try
                     {
                         Process.Start(UpdateService.InstallerStartInfo(installer))?.Dispose();
@@ -196,7 +199,6 @@ public sealed class MainWindow : Window, IApprovalUi
                 }
                 _shutdownInProgress = false;
                 _quitting = false;
-                if (_pendingInstaller is { } abandoned) _updates.Abandon(abandoned);
                 _pendingInstaller = null;
                 _updateLoop = new();
                 if (_updateLoopStarted) _ = UpdateLoopAsync(_updateLoop.Token);
@@ -212,6 +214,18 @@ public sealed class MainWindow : Window, IApprovalUi
             _diagnostics.Record("window-closed", _shutdownReason);
             Application.Current.Shutdown();
         };
+    }
+
+    // Returns the staged installer to launch only after teardown succeeds; a blocked teardown abandons it so the upgrade can be retried.
+    internal static async Task<string?> TeardownForUpdateAsync(Func<Task> teardown, UpdateService updates, Func<string?> pendingInstaller)
+    {
+        try { await teardown(); }
+        catch
+        {
+            if (pendingInstaller() is { } staged) updates.Abandon(staged);
+            throw;
+        }
+        return pendingInstaller();
     }
 
     internal static async Task DisposeCopilotAfterAsync(CopilotRunService copilot, Func<Task> teardown)

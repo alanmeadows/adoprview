@@ -110,6 +110,25 @@ static class UpdateTests
             Check(File.Exists(retried), "Abandoning a stale handoff removed the current installer");
             service.Abandon(retried);
         }));
+        await test("blocked upgrade shutdown never hands off setup and allows a retry", () => InDir(async dir =>
+        {
+            var service = Service(dir, Release("v0.2.0"));
+            await service.CheckAsync(default);
+            var path = await service.DownloadAsync(default);
+            string? launch = "unset";
+            try
+            {
+                launch = await MainWindow.TeardownForUpdateAsync(() => throw new InvalidOperationException("Copilot task still running"), service, () => path);
+                Check(false, "Blocked teardown did not stop the shutdown");
+            }
+            catch (InvalidOperationException ex) { Check(ex.Message == "Copilot task still running", "Blocked teardown error was replaced"); }
+            Check(launch == "unset", "Blocked teardown handed off setup");
+            Check(!Directory.Exists(Path.GetDirectoryName(path)), "Blocked teardown left the staged installer");
+            var retried = await service.DownloadAsync(default);
+            Check(await MainWindow.TeardownForUpdateAsync(() => Task.CompletedTask, service, () => retried) == retried && File.Exists(retried),
+                "Completed teardown did not hand off the retried installer");
+            service.Abandon(retried);
+        }));
         await test("update download rejects hash or size mismatches and allows a retry", () => InDir(async dir =>
         {
             foreach (var bad in new[] { Encoding.UTF8.GetBytes("synthetic installer BYTES"), Payload[..^1] })
