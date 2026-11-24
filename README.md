@@ -23,10 +23,10 @@ Screenshots use the default Light Mode with synthetic PR data.
   `%LOCALAPPDATA%\AdoPrView`.
 - **Updates:** the app checks GitHub releases at startup and every 12 hours
   and shows a notice when a newer version is published; **Settings > Updates**
-  also has **Check for updates**. **Upgrade** closes the app (shutting down any
-  running Copilot work first), runs the verified release installer and reopens
-  it; your settings in `%LOCALAPPDATA%\AdoPrView` are preserved. Portable/ZIP
-  or self-built copies get a link to the release page instead.
+  also has **Check for updates**. **Upgrade** closes the app, runs the
+  verified release installer and reopens it; running Copilot tasks keep going
+  and reconnect, and your settings in `%LOCALAPPDATA%\AdoPrView` are preserved.
+  Portable/ZIP or self-built copies get a link to the release page instead.
 - **Set it up with an agent:** give [INSTALL.md](INSTALL.md) to a CLI coding
   agent. It has a copyable kickoff prompt. The agent finds your existing Azure
   sign-in, repositories and settings, checks your ADO identity with read-only

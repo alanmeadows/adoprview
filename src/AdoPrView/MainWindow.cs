@@ -445,7 +445,7 @@ public sealed class MainWindow : Window, IApprovalUi
         _announcedUpdate = state.Latest;
         await Dispatcher.InvokeAsync(() =>
         {
-            if (!_shutdownComplete && _tray.Visible && (!IsVisible || WindowState == WindowState.Minimized))
+            if (!_shutdownComplete && _store.Current.Notifications && _tray.Visible && (!IsVisible || WindowState == WindowState.Minimized))
                 _tray.ShowBalloonTip(6000, $"ADO PR View v{state.Latest} is available", "Open ADO PR View to upgrade.", System.Windows.Forms.ToolTipIcon.Info);
         });
     }

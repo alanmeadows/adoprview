@@ -208,7 +208,7 @@ async function checkForUpdate() {
 async function installUpdate() {
   const u = S.update;
   if (!u?.canInstall || S.updateBusy) return;
-  if (!confirm(`ADO PR View will close, install v${u.latest} from GitHub, and reopen. Any running Copilot work is shut down first. Continue?`)) return;
+  if (!confirm(`ADO PR View will close, install v${u.latest} from GitHub, and reopen. Running Copilot tasks keep going and reconnect when it reopens. Continue?`)) return;
   S.updateBusy = 'install'; if (S.drawer) renderDrawer();
   toast(`Downloading v${u.latest} from GitHub…`, 'info');
   try { await rpc('installUpdate'); }
