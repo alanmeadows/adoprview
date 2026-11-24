@@ -51,8 +51,10 @@ public sealed partial class PrService
         foreach (var pr in s.Prs)
         {
             pr.IsIgnoredDraft = _store.Current.IgnoreDrafts && pr.IsDraft;
-            if (pr.IsIgnoredDraft || pr.IsWatched != wasWatched.Contains(pr)) Classify(pr);
-            if (pr.IsWatched != wasWatched.Contains(pr)) SetMergeRecheckError(pr);
+            var watchFlipped = pr.IsWatched != wasWatched.Contains(pr);
+            if (watchFlipped) SetMergeRecheckError(pr);
+            // Views that failed to load keep their fallback lane until enrichment succeeds.
+            if (pr.IsIgnoredDraft || watchFlipped && pr.Error is null) Classify(pr);
         }
         if (_approval is not null)
         {

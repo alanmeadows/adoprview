@@ -721,6 +721,9 @@ static class MergeChecksTests
             try { await f.Service.RestartMergeAsync(stranger.Key); } catch (InvalidOperationException ex) { error = ex.Message; }
             Check(error.EndsWith(" Use Re-check merge to retry.") && f.View(stranger).MergeRecheckError?.EndsWith(" Use Re-check merge to retry.") == true,
                 "Wrong retry guidance: " + error + " | " + f.View(stranger).MergeRecheckError);
+            f.Store.Current.Whitelist.Add("stranger");
+            f.Service.ApplyMonitoringSettings();
+            Check(f.View(stranger).Gates["merge"].Detail?.EndsWith("paused while ADO reports conflicts.") == true, "Watching did not refresh the merge tooltip: " + f.View(stranger).Gates["merge"].Detail);
         });
 
         await test("active list: a full 1000-PR page warns that some PRs may be missing", async () =>
