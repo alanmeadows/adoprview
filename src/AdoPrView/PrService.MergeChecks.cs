@@ -62,7 +62,8 @@ public sealed partial class PrService
         pr.MergeRecheckPending = pr.MergeStatus == "queued";
         pr.MergeRecheckError = check.Error is null ? null : check.Error + (MergeConflicted(pr.MergeStatus)
             ? " Automatic re-checks are paused while ADO reports conflicts."
-            : $" Retrying on a later refresh (not before {check.NextAttempt:u}).");
+            : pr.IsMine || pr.IsWatched ? $" Retrying on a later refresh (not before {check.NextAttempt:u})."
+            : " Use Re-check merge to retry.");
     }
 
     async Task<string> RecheckMergesAsync(List<PrView> prs, ConcurrentDictionary<string, Lazy<Task<string>>> heads,
@@ -169,6 +170,10 @@ public sealed partial class PrService
         if (!Monitored(pr)) return new(false, $"!{pr.Id} is an ignored draft or no longer monitored; no merge re-check requested.");
         if (!pr.IsActive) return new(false, $"!{pr.Id} is no longer active; no merge re-check requested.");
         if (MergeRestartDeferred(pr.MergeStatus)) return new(false, $"!{pr.Id} reports merge status {pr.MergeStatus}; it was not restarted.");
+        // The watch list may have changed during the sweep or the read above.
+        MarkWatched([pr]);
+        if (automatic && !pr.IsMine && !pr.IsWatched)
+            return new(false, $"!{pr.Id} is not by you or a watched author; no automatic merge re-check requested.");
         if (automatic && !AutomaticMergeCheckEligible(pr))
         {
             ApplyMergeCheckState(pr);

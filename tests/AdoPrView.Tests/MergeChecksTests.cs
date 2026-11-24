@@ -696,6 +696,18 @@ static class MergeChecksTests
             Check((await f.Service.RestartMergeAsync(stranger.Key)).Requested && f.Patches.Contains(stranger.Key), "Explicit re-check of another author's PR was refused");
         });
 
+        await test("unwatching an author during the automatic preflight read stops its re-check", async () =>
+        {
+            using var f = new Fixture();
+            f.Store.Current.Whitelist.Add("Friend");
+            var mine = f.Add(); mine.Preview = Fixture.New;
+            var friend = f.Add(id: 2); friend.Author = "Friend"; friend.Preview = Fixture.New;
+            f.BeforePrRead = (pr, n) => { if (pr.Key == friend.Key && n == 2) f.Store.Current.Whitelist.Clear(); };
+            await f.Service.RefreshAsync();
+            Check(f.Patches.SequenceEqual([mine.Key]), "Unwatched author's PR was re-checked automatically: " + string.Join(",", f.Patches));
+            Check(f.View(friend).Gates["merge"].Detail?.Contains("Re-check merge") == true, "Unwatched stale PR promised an automatic re-check: " + f.View(friend).Gates["merge"].Detail);
+        });
+
         await test("active list: a full 1000-PR page warns that some PRs may be missing", async () =>
         {
             using var f = new Fixture();

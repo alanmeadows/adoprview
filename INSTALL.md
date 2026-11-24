@@ -316,7 +316,7 @@ those authors and hidden keys. Empty `value: []` is valid; missing/invalid data,
 | Field | Shape / new-install default |
 |---|---|
 | `repos` | Array of `{org, project, repo, repoId, projectId}`; verified selected scope |
-| `whitelist` | String array; `[]` means only the actual authenticated user's PRs |
+| `whitelist` | String array of watched authors; `[]` means none. It never narrows **All**; it defines **Mine + watched** and alert scope |
 | `hidden` | String array of `repoId:prId`; preserve |
 | `refreshSeconds` / `mergeCheckMinutes` | Integers; `120` / `10` |
 | `notifications` | Boolean; `true` |
@@ -551,8 +551,10 @@ identity and status/error line. Use read-only UI inspection if available.
 If you cannot inspect that outcome, report the unverified part rather than
 claiming a ready dashboard merely because a process exists.
 
-Compare live GET results with own/watched-author scope and hidden/filter state.
-"No active PRs for the configured authors" is meaningful only after successful
+Compare live GET results with the selected author scope (**All**: every author;
+**Mine**: the signed-in user; **Mine + watched**: plus whitelisted authors) and
+hidden/filter state.
+"No active PRs" is meaningful only after successful
 identity/repo/list access and no dashboard repo/row errors. Reset only temporary
 UI filters when appropriate, not the user's saved whitelist/hidden list.
 

@@ -357,7 +357,7 @@ public sealed partial class PrService
     {
         var createdBy = pr["createdBy"];
         var id = I(pr["pullRequestId"])!.Value;
-        return new PrView
+        var view = new PrView
         {
             Key = $"{S(pr["repository"]?["id"])}:{id}",
             Id = id,
@@ -385,6 +385,8 @@ public sealed partial class PrService
             MergeStrategy = S(pr["completionOptions"]?["mergeStrategy"]),
             Lane = Lane.Waiting,
         };
+        MarkWatched([view]);
+        return view;
     }
 
     static string? AutoCompleteBy(JsonNode pr)
@@ -454,6 +456,7 @@ public sealed partial class PrService
             MergeStrategy = S(pr["completionOptions"]?["mergeStrategy"]),
         };
         SetMergeStaleness(view);
+        MarkWatched([view]);
 
         foreach (var r in Arr(pr["reviewers"]))
             view.Reviewers.Add(new ReviewerView(S(r["displayName"]), I(r["vote"]) ?? 0, B(r["isRequired"]), B(r["isContainer"]), S(r["id"])));
@@ -694,7 +697,8 @@ public sealed partial class PrService
             case "succeeded":
                 v.Gates["merge"] = v.MergeRecheckError is not null ? new("warn", "Retry needed")
                     : v.MergeCheckError is not null ? new("warn", "Unverified")
-                    : v.MergeStale ? new("warn", "Stale", $"{v.TargetBranch} moved or the preview target is missing; awaiting scheduled re-check")
+                    : v.MergeStale ? new("warn", "Stale", $"{v.TargetBranch} moved or the preview target is missing; " +
+                        (v.IsMine || v.IsWatched ? "awaiting scheduled re-check" : "use Re-check merge to refresh it"))
                     : new("ok", "Clean");
                 break;
             case "queued": v.Gates["merge"] = new("pending", "Queued", "ADO reports a queued merge evaluation; human actions can proceed."); break;
