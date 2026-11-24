@@ -93,6 +93,41 @@ finally {
     if (-not $running.HasExited) { Stop-Process -Id $running.Id; $running.WaitForExit() }
 }
 
+# /UPDATE (the in-app updater's handoff) waits for the app to exit, installs, then relaunches it.
+$exe = Join-Path $dir 'AdoPrView.exe'
+$updateLog = Join-Path $env:RUNNER_TEMP 'setup-update.log'
+$running = Start-Process -FilePath $exe -ArgumentList '--mock' -PassThru
+$setupProc = $null
+try {
+    Start-Sleep -Seconds 5
+    if ($running.HasExited) { throw "Installed app exited early with code $($running.ExitCode)." }
+    # No -Wait: it would also wait for the relaunched app.
+    $setupProc = Start-Process -FilePath $setup -ArgumentList '/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART', '/UPDATE', "/DIR=`"$dir`"", "/LOG=`"$updateLog`"" -PassThru
+        $null = $setupProc.Handle # keeps ExitCode readable after a non -Wait start    $deadline = (Get-Date).AddSeconds(60)
+    while (-not ((Test-Path -LiteralPath $updateLog) -and (Get-Content -LiteralPath $updateLog -Raw).Contains('Waiting for ADO PR View to exit before updating.'))) {
+        if ($setupProc.HasExited) { throw "Update setup exited with code $($setupProc.ExitCode) before waiting for the dashboard." }
+        if ((Get-Date) -gt $deadline) { throw 'Update setup did not start waiting for the dashboard within 60 seconds.' }
+        Start-Sleep -Milliseconds 500
+    }
+    if ($running.HasExited) { throw 'Update setup closed the running dashboard itself.' }
+    Stop-Process -Id $running.Id; $running.WaitForExit()
+    if (-not $setupProc.WaitForExit(120000)) { throw 'Update setup did not finish within 120 seconds of the dashboard exiting.' }
+    if ($setupProc.ExitCode -ne 0) { throw "Update setup failed with exit code $($setupProc.ExitCode)." }
+    $deadline = (Get-Date).AddSeconds(30)
+    while (-not (@(Get-Process AdoPrView -ErrorAction SilentlyContinue | Where-Object { $_.Id -ne $running.Id -and $_.Path -eq $exe }))) {
+        if ((Get-Date) -gt $deadline) { throw 'Update setup did not relaunch the installed app.' }
+        Start-Sleep -Milliseconds 500
+    }
+    Write-Output 'Update setup waited for the dashboard to exit, installed, and relaunched it.'
+}
+finally {
+    if (-not $running.HasExited) { Stop-Process -Id $running.Id; $running.WaitForExit() }
+    if ($setupProc -and -not $setupProc.HasExited) { Stop-Process -Id $setupProc.Id -Force -ErrorAction SilentlyContinue }
+    foreach ($proc in @(Get-Process AdoPrView -ErrorAction SilentlyContinue | Where-Object { $_.Path -eq $exe })) {
+        Stop-Process -Id $proc.Id -ErrorAction SilentlyContinue; $proc.WaitForExit(30000) | Out-Null
+    }
+}
+
 $code = Invoke-Uninstall
 if ($code -ne 0) { throw "Silent uninstall failed with exit code $code." }
 if (Test-Path -LiteralPath (Join-Path $dir 'AdoPrView.exe')) { throw 'Uninstall left the app executable behind.' }
