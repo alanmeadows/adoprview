@@ -103,7 +103,8 @@ try {
     if ($running.HasExited) { throw "Installed app exited early with code $($running.ExitCode)." }
     # No -Wait: it would also wait for the relaunched app.
     $setupProc = Start-Process -FilePath $setup -ArgumentList '/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART', '/UPDATE', "/DIR=`"$dir`"", "/LOG=`"$updateLog`"" -PassThru
-        $null = $setupProc.Handle # keeps ExitCode readable after a non -Wait start    $deadline = (Get-Date).AddSeconds(60)
+    $null = $setupProc.Handle # keeps ExitCode readable after a non -Wait start
+    $deadline = (Get-Date).AddSeconds(60)
     while (-not ((Test-Path -LiteralPath $updateLog) -and (Get-Content -LiteralPath $updateLog -Raw).Contains('Waiting for ADO PR View to exit before updating.'))) {
         if ($setupProc.HasExited) { throw "Update setup exited with code $($setupProc.ExitCode) before waiting for the dashboard." }
         if ((Get-Date) -gt $deadline) { throw 'Update setup did not start waiting for the dashboard within 60 seconds.' }
@@ -121,8 +122,9 @@ try {
     Write-Output 'Update setup waited for the dashboard to exit, installed, and relaunched it.'
 }
 finally {
+    # Kill the setup tree (SetupLdr spawns the real installer) before the dashboard so a failed run cannot finish later.
+    if ($setupProc -and -not $setupProc.HasExited) { taskkill.exe /PID $setupProc.Id /T /F | Out-Null; $setupProc.WaitForExit(30000) | Out-Null }
     if (-not $running.HasExited) { Stop-Process -Id $running.Id; $running.WaitForExit() }
-    if ($setupProc -and -not $setupProc.HasExited) { Stop-Process -Id $setupProc.Id -Force -ErrorAction SilentlyContinue }
     foreach ($proc in @(Get-Process AdoPrView -ErrorAction SilentlyContinue | Where-Object { $_.Path -eq $exe })) {
         Stop-Process -Id $proc.Id -ErrorAction SilentlyContinue; $proc.WaitForExit(30000) | Out-Null
     }
