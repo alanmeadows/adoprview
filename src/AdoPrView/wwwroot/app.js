@@ -98,6 +98,7 @@ const S = {
   update: null,
   updateBusy: false,      // false | 'check' | 'install'
   updateAnnounced: null,
+  updateToast: null,
 };
 
 const LANES = {
@@ -179,13 +180,17 @@ function toast(text, kind = 'ok', action, sticky = false) {
   }
   $('#toasts').appendChild(el);
   if (!sticky) setTimeout(() => el.remove(), kind === 'error' ? 9000 : 5000);
+  return el;
 }
 
 function setUpdate(state) {
   S.update = state;
-  if (state?.available && state.latest !== S.updateAnnounced) {
-    S.updateAnnounced = state.latest;
-    toast(`ADO PR View v${state.latest} is available (you have v${state.current}). Upgrade to get the latest version.`, 'info',
+  // A notice is tied to the version and install path it offered; replace it if a later check changes either.
+  const key = state?.available ? `${state.latest}|${state.canInstall}` : null;
+  if (key !== S.updateAnnounced) {
+    S.updateToast?.remove(); S.updateToast = null;
+    S.updateAnnounced = key;
+    if (key) S.updateToast = toast(`ADO PR View v${state.latest} is available (you have v${state.current}). Upgrade to get the latest version.`, 'info',
       state.canInstall ? { label: 'Upgrade', run: () => void installUpdate() }
         : state.releaseUrl ? { label: 'View release', run: () => void openRelease() } : null, true);
   }

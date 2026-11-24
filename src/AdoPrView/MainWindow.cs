@@ -196,6 +196,7 @@ public sealed class MainWindow : Window, IApprovalUi
                 }
                 _shutdownInProgress = false;
                 _quitting = false;
+                if (_pendingInstaller is { } abandoned) _updates.Abandon(abandoned);
                 _pendingInstaller = null;
                 _updateLoop = new();
                 if (_updateLoopStarted) _ = UpdateLoopAsync(_updateLoop.Token);

@@ -167,6 +167,14 @@ public sealed partial class UpdateService
         }
     }
 
+    // Gives up a staged handoff whose installer was never started, so a later upgrade can retry.
+    public void Abandon(string installerPath)
+    {
+        try { Directory.Delete(Path.GetDirectoryName(installerPath)!, true); }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException) { }
+        lock (_gate) { _lock?.Dispose(); _lock = null; }
+    }
+
     public static ProcessStartInfo InstallerStartInfo(string installerPath)
     {
         var info = new ProcessStartInfo(installerPath) { UseShellExecute = false, WorkingDirectory = Path.GetDirectoryName(installerPath)! };

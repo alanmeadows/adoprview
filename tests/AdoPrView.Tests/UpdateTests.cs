@@ -98,7 +98,11 @@ static class UpdateTests
                 catch (InvalidOperationException ex) { Check(ex.Message == "Another ADO PR View update is already in progress.", "Wrong busy message"); }
             }
             Check(File.Exists(path), "Rejected handoff disturbed the staged installer");
-            ReleaseLock(service);
+            service.Abandon(path);
+            Check(!Directory.Exists(Path.GetDirectoryName(path)), "Abandoned handoff left its installer");
+            var retried = await service.DownloadAsync(default);
+            Check(File.Exists(retried), "Upgrade could not be retried after abandoning a handoff");
+            service.Abandon(retried);
         }));
         await test("update download rejects hash or size mismatches and allows a retry", () => InDir(async dir =>
         {
@@ -112,8 +116,9 @@ static class UpdateTests
             }
             var retry = Service(dir, Release("v0.2.0"));
             await retry.CheckAsync(default);
-            Check(File.Exists(await retry.DownloadAsync(default)), "Retry after failed download was blocked");
-            ReleaseLock(retry);
+            var staged = await retry.DownloadAsync(default);
+            Check(File.Exists(staged), "Retry after failed download was blocked");
+            retry.Abandon(staged);
         }));
         await test("update download rechecks the registered install location", () => InDir(async dir =>
         {
@@ -133,10 +138,6 @@ static class UpdateTests
             return Task.CompletedTask;
         });
     }
-
-    // The service intentionally keeps its handoff lock for the process lifetime; tests release it to clean up temp dirs.
-    static void ReleaseLock(UpdateService service) =>
-        ((IDisposable?)typeof(UpdateService).GetField("_lock", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance)!.GetValue(service))?.Dispose();
 
     static async Task InDir(Func<string, Task> body)
     {

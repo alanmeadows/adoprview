@@ -2263,8 +2263,12 @@ test('real row hit testing and action identity across refreshes', { timeout: 900
         assert.match((await evaluate('window.confirmations')).at(-1), /close, install v0\.2\.0 from GitHub, and reopen/);
         await evaluate(`document.querySelector('[data-dact="checkUpdate"]').click()`); await frame();
         assert.deepEqual((await calls()).map(c => c.method).filter(m => /Update/.test(m)), ['checkForUpdate'], 'Declined upgrade must not install');
+        await evaluate(`new Promise(r=>{const t=setInterval(()=>{if(!S.updateBusy){clearInterval(t);r();}},20);})`);
+        assert.equal(await evaluate(`document.querySelectorAll('#toasts .toast').length`), 0, 'A check without an available update must retire the notice');
+        await evaluate(`onHostMessage({event:'update',data:{current:'0.1.3',latest:'0.2.0',available:true,canInstall:true,releaseUrl:null,checkedAt:null,error:null}})`);
+        assert.equal(await evaluate(`document.querySelectorAll('#toasts .toast').length`), 1, 'The same version is re-announced after the notice was retired');
       } finally {
-        await evaluate(`if(S.drawer)closeDrawer();S.update=null;S.updateAnnounced=null;S.updateBusy=false;document.querySelector('#toasts').replaceChildren();`);
+        await evaluate(`if(S.drawer)closeDrawer();S.update=null;S.updateAnnounced=null;S.updateToast=null;S.updateBusy=false;document.querySelector('#toasts').replaceChildren();`);
       }
     });
 
