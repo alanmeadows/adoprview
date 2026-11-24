@@ -159,7 +159,7 @@ Fixes AB#1234`;
     const list = settings.whitelist.map((w) => w.trim().toLowerCase()).filter(Boolean);
     for (const p of [...prs, ...completed]) {
       const name = p.author.name.toLowerCase(), unique = (p.author.uniqueName || '').toLowerCase();
-      p.isWatched = !p.isMine && list.some((w) => name === w || unique === w || unique.startsWith(w + '@'));
+      p.isWatched = !p.isMine && list.some((w) => name === w || unique === w || unique.startsWith(w + '@') || unique.endsWith('\\' + w));
     }
   };
   markWatched();
