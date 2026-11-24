@@ -154,6 +154,15 @@ Fixes AB#1234`;
     done(96, 'sample-api', 'Retire the v1 health endpoint', 90),
     done(94, 'sample-operator', 'Bump controller-runtime to the current minor', 60 * 30, { name: 'Riley Reviewer', uniqueName: 'riley@contoso.example', id: 'riley' }),
   ];
+  // Mirrors the native watch-list match so Mine + watched follows saved settings.
+  const markWatched = () => {
+    const list = settings.whitelist.map((w) => w.trim().toLowerCase()).filter(Boolean);
+    for (const p of [...prs, ...completed]) {
+      const name = p.author.name.toLowerCase(), unique = (p.author.uniqueName || '').toLowerCase();
+      p.isWatched = !p.isMine && list.some((w) => name === w || unique === w || unique.startsWith(w + '@'));
+    }
+  };
+  markWatched();
   const snapshot = { prs, completed, completedWarnings: ['sample-service: Checked 100 completions in this repository; some PRs may be missing.'], lastRefresh: iso(0.4), refreshing: false, error: null, repoErrors: [], me: 'Sam Example',
     approvalProvider: { name: 'Sample approval', linkUrl: null, linkLabel: null }, approvalProviderError: null };
   const runs = new Map();
@@ -316,7 +325,7 @@ Fixes AB#1234`;
           if (!window.AppTheme.supported.includes(p.theme)) throw new Error('Unsupported theme.');
           settings.theme = p.theme;
           return settings;
-        case 'saveSettings': { const { scope: _ignored, ...rest } = p.settings; Object.assign(settings, rest); return settings; }
+        case 'saveSettings': { const { scope: _ignored, ...rest } = p.settings; Object.assign(settings, rest); markWatched(); return settings; }
         case 'setScope':
           if (!['all', 'mine', 'watched'].includes(p.scope)) throw new Error('Choose All, Mine or Mine + watched.');
           settings.scope = p.scope;
