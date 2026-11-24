@@ -26,6 +26,7 @@ public sealed partial class UpdateService
     readonly object _gate = new();
     Installer? _installer;
     FileStream? _lock;
+    string? _staged;
 
     public UpdateService(HttpMessageHandler? handler = null, Version? current = null, string? updatesRoot = null,
         string? appDir = null, Func<string?>? installLocation = null)
@@ -156,6 +157,7 @@ public sealed partial class UpdateService
                 if (!string.Equals(Convert.ToHexString(hash.GetHashAndReset()), installer.Sha256, StringComparison.OrdinalIgnoreCase))
                     throw new InvalidDataException("Downloaded installer SHA-256 does not match the release digest.");
             }
+            lock (_gate) _staged = path;
             return path;
         }
         catch
@@ -170,9 +172,14 @@ public sealed partial class UpdateService
     // Gives up a staged handoff whose installer was never started, so a later upgrade can retry.
     public void Abandon(string installerPath)
     {
+        lock (_gate)
+        {
+            if (_staged != installerPath) return;
+            _staged = null;
+            _lock?.Dispose(); _lock = null;
+        }
         try { Directory.Delete(Path.GetDirectoryName(installerPath)!, true); }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException) { }
-        lock (_gate) { _lock?.Dispose(); _lock = null; }
     }
 
     public static ProcessStartInfo InstallerStartInfo(string installerPath)

@@ -102,6 +102,12 @@ static class UpdateTests
             Check(!Directory.Exists(Path.GetDirectoryName(path)), "Abandoned handoff left its installer");
             var retried = await service.DownloadAsync(default);
             Check(File.Exists(retried), "Upgrade could not be retried after abandoning a handoff");
+            service.Abandon(path);
+            var rival = Service(dir, Release("v0.2.0"));
+            await rival.CheckAsync(default);
+            try { await rival.DownloadAsync(default); Check(false, "Abandoning a stale handoff released the current one"); }
+            catch (InvalidOperationException) { }
+            Check(File.Exists(retried), "Abandoning a stale handoff removed the current installer");
             service.Abandon(retried);
         }));
         await test("update download rejects hash or size mismatches and allows a retry", () => InDir(async dir =>
