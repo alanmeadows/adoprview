@@ -111,7 +111,8 @@ public sealed partial class PrService
             var retry = retryNeeded && now >= check.NextAttempt;
             var recovered = check.DetectionFailed && pr.MergeCheckError is null;
             var due = check.RequestedAt is null || now >= check.NextAttempt;
-            if (AutomaticMergeCheckEligible(pr) &&
+            // Automatic re-checks write to ADO, so they stay limited to your and watched authors' PRs.
+            if ((pr.IsMine || pr.IsWatched) && AutomaticMergeCheckEligible(pr) &&
                 (!retryNeeded || now >= check.NextAttempt) &&
                 (sweep || retry || pr.MergeStale && due && (periodic || recovered || check.RequestedAt is not null)))
             {

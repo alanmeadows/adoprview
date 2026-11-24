@@ -65,7 +65,6 @@ public sealed partial class PrService
 
     bool ReviewMonitored(PrView scope) =>
         Monitored(scope) && scope.Error is null &&
-        (scope.IsMine || MatchesWhitelist(scope.Author.Name, scope.Author.UniqueName ?? "", _store.Current.Whitelist)) &&
         _store.Current.Repos.Any(r => r.Key == $"{scope.Org}/{scope.Project}/{scope.Repo}".ToLowerInvariant() &&
                 string.Equals(r.RepoId, scope.RepoId, StringComparison.OrdinalIgnoreCase) &&
                 string.Equals(r.ProjectId, scope.ProjectId, StringComparison.OrdinalIgnoreCase));

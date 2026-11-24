@@ -59,11 +59,11 @@ var bot = new ReviewBotSettings { Name = "Review bot", AuthorId = BotId };
 var tests = 0;
 
 PrView Pr(string repo = "sample-repo", string org = "contoso", string project = "Sample", int id = 123,
-    string mergeStatus = "succeeded", string? autoCompleteBy = "Offline", bool draft = false, bool hidden = false, bool active = true) => new()
+    string mergeStatus = "succeeded", string? autoCompleteBy = "Offline", bool draft = false, bool hidden = false, bool active = true, bool mine = true) => new()
 {
     Key = $"repo-id:{id}", Id = id, Title = "Offline PR", Url = "https://dev.azure.com/offline",
     Org = org, Project = project, ProjectId = "project-id", Repo = repo, RepoId = "repo-id",
-    Author = new("Offline", null, null),
+    Author = new("Offline", null, null), IsMine = mine,
     MergeStatus = mergeStatus, AutoCompleteBy = autoCompleteBy, IsDraft = draft, IsHidden = hidden, IsActive = active,
     Agency = new("clean", 1, 1, "Clean offline review"),
 };
@@ -455,12 +455,21 @@ await Test("new and transitioned human PRs are detected, including single refres
 {
     var waiting = Pr(); waiting.Lane = Lane.Waiting;
     var human = Pr(); human.Lane = Lane.NeedsHuman;
-    var newHuman = Pr(id: 456); newHuman.Lane = Lane.NeedsHuman;
+    var newHuman = Pr(id: 456, mine: false); newHuman.IsWatched = true; newHuman.Lane = Lane.NeedsHuman;
     var changes = PrService.GetLaneChanges(Snap(waiting), Snap(human, newHuman)).ToList();
     Check(changes.Count == 2 && changes.All(c => c.Pr.Lane == Lane.NeedsHuman), "Human arrivals missing");
     Check(changes.Single(c => c.Pr.Id == 123).Previous == Lane.Waiting && changes.Single(c => c.Pr.Id == 456).Previous is null, "Wrong prior lanes");
     var midRefresh = new Snapshot { Prs = [human], LastRefresh = DateTimeOffset.UtcNow, Refreshing = true };
     Check(PrService.GetLaneChanges(Snap(waiting), midRefresh).Count() == 1, "Single-PR transition lost during full refresh");
+    return Task.CompletedTask;
+});
+
+await Test("lane changes on PRs by unwatched authors never notify", () =>
+{
+    var waiting = Pr(mine: false); waiting.Lane = Lane.Waiting;
+    var human = Pr(mine: false); human.Lane = Lane.NeedsHuman;
+    var arrival = Pr(id: 456, mine: false); arrival.Lane = Lane.NeedsHuman;
+    Check(!PrService.GetLaneChanges(Snap(waiting), Snap(human, arrival)).Any(), "Unwatched author's lane change would notify");
     return Task.CompletedTask;
 });
 

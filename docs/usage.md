@@ -39,7 +39,10 @@ calls used see [DESIGN.md](DESIGN.md); for building and tests see
   inputs, newer edits, and drafts in a reopened Settings drawer.
 - **My PRs** are those created by your authenticated ADO identity in each
   organization. Watched authors match display name, UPN or alias. The **All /
-  Mine / Watched** switch filters the table by author; ownership is not a lane.
+  Mine / Mine + watched** switch filters the table by author and is remembered;
+  ownership is not a lane. **All** shows every PR in your repositories; only your
+  and watched authors' PRs trigger notifications, the title/tray count and
+  automatic merge re-checks.
 - Closing the window keeps it in the tray while notifications are on; exit from the tray menu.
 - A custom four-note chime announces new **Needs Human** arrivals, even while
   the app is focused. Initial load and unchanged rows stay silent; simultaneous
@@ -130,11 +133,12 @@ each lane. Click a counter to filter by it.
   merge verification remains and no human action is available, or nothing is
   left but for ADO to complete the PR with its auto-complete ("Auto-complete is
   set; waiting for Azure DevOps to complete the PR.").
-- **Completed** — read-only history of your and watched authors' PRs that ADO
-  reports as completed (merged) in the last 7 days, newest first. It is opt-in:
-  **All** and the counts beside it stay active-only. Each full refresh checks
-  up to 100 completions per repository; when that limit is reached, a note says
-  watched PRs may be missing, even if none matched. If history cannot be read,
+- **Completed** — read-only history of PRs in your repositories that ADO
+  reports as completed (merged) in the last 7 days, newest first, narrowed by
+  the scope switch. It is opt-in: **All** and the counts beside it stay
+  active-only. Each full refresh checks up to 100 completions per repository;
+  when that limit is reached, a note says some PRs may be missing, even if none
+  matched. If history cannot be read,
   the note says so and active PRs are unaffected. Completed rows have only
   **Open** (and **Hide** from the row menu, undone with Ctrl+Z). A PR that ADO
   reports completed during a refresh moves there once; abandoned PRs never

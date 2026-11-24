@@ -75,14 +75,13 @@ static class ReviewerVoteTests
                 await Rejected(f);
                 Check(f.Puts == 0, "Unsafe preflight reached vote API");
             });
-        foreach (var change in new[] { "hidden", "unmonitored", "changed-repo", "unwatched" })
+        foreach (var change in new[] { "hidden", "unmonitored", "changed-repo" })
             await test("Reviewer vote rejects " + change + " settings without a PUT", async () =>
             {
                 using var f = new Fixture();
                 await f.Init();
                 if (change == "hidden") f.Store.Current.Hidden.Add("repo-id:123");
                 else if (change == "changed-repo") f.Store.Current.Repos[0].RepoId = "different-repository";
-                else if (change == "unwatched") f.Store.Current.Whitelist.Clear();
                 else f.Store.Current.Repos.Clear();
                 await Rejected(f);
                 Check(f.Puts == 0, "Ineligible PR reached vote API");
@@ -185,7 +184,7 @@ static class ReviewerVoteTests
         public Fixture(IApprovalProvider? provider = null)
         {
             Store.Current.Repos.Add(new RepoRef { Org = "offline", Project = "project", ProjectId = "project-id", Repo = "repo", RepoId = "repo-id" });
-            Store.Current.Whitelist.Add("Author");
+            // The author is deliberately not watched: any PR in a configured repository can be approved.
             http = new HttpClient(new FakeHandler(Respond));
             Service = new PrService(new AdoClient(http, _ => Task.FromResult(new AuthenticationHeaderValue("Bearer", "offline"))), Store, provider);
             typeof(PrService).GetField("_snapshot", BindingFlags.Instance | BindingFlags.NonPublic)!.SetValue(Service,

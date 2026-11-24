@@ -11,7 +11,7 @@
   const base = (id, repo, title, lane, o = {}) => ({
     key: `${repo}-id:${id}`, id, title, url: url(repo, id), org, project, projectId: 'p', repo, repoId: `${repo}-id`,
     sourceBranch: o.branch || `user/sam/${title.toLowerCase().replace(/[^a-z0-9]+/g, '-').slice(0, 38)}`, targetBranch: 'main',
-    author: o.author || me, isMine: !o.author, isHidden: false, isDraft: !!o.draft,
+    author: o.author || me, isMine: !o.author, isWatched: !!o.author && !o.stranger, isHidden: false, isDraft: !!o.draft,
     isActive: true,
     reviewVote: { reviewerId: me.id, reviewerName: me.name, vote: 0, canApprove: true,
       detail: 'Offline demonstration only. This records no real vote; other reviewers and policies remain unchanged.',
@@ -127,6 +127,10 @@ Fixes AB#1234`;
     base(110, 'sample-deploy', 'Rotate ingress certificates for sample sites', 'waiting', {
       autoCompleteBy: 'Sam Example', updated: 1, waiting: ['Auto-complete is set; waiting for Azure DevOps to complete the PR.'], gates: okGates,
     }),
+    base(111, 'sample-api', 'Document sample API pagination limits', 'waiting', {
+      author: { name: 'Alex Contributor', uniqueName: 'alex@contoso.example', id: 'alex' }, stranger: true, updated: 15,
+      waiting: ['Build running: sample-api-PR'], gates: { ...okGates, build: g('pending', 'Running') },
+    }),
   ];
 
   const settings = {
@@ -143,14 +147,14 @@ Fixes AB#1234`;
     triageInstructions: null,
     wslDistro: null, wslRepoDirectories: {},
   };
-  // Watched completions from the last 7 days; read-only and separate from active prs.
+  // Completions from the last 7 days; read-only and separate from active prs.
   const done = (id, repo, title, mins, author) => ({ key: `${repo}-id:${id}`, id, title, url: url(repo, id), org, project, repo, repoId: `${repo}-id`,
-    author: author || me, isMine: !author, isHidden: false, closed: iso(mins), closedBy: author ? null : me.name });
+    author: author || me, isMine: !author, isWatched: !!author, isHidden: false, closed: iso(mins), closedBy: author ? null : me.name });
   const completed = [
     done(96, 'sample-api', 'Retire the v1 health endpoint', 90),
     done(94, 'sample-operator', 'Bump controller-runtime to the current minor', 60 * 30, { name: 'Riley Reviewer', uniqueName: 'riley@contoso.example', id: 'riley' }),
   ];
-  const snapshot = { prs, completed, completedWarnings: ['sample-service: Checked 100 completions in this repository; watched PRs may be missing.'], lastRefresh: iso(0.4), refreshing: false, error: null, repoErrors: [], me: 'Sam Example',
+  const snapshot = { prs, completed, completedWarnings: ['sample-service: Checked 100 completions in this repository; some PRs may be missing.'], lastRefresh: iso(0.4), refreshing: false, error: null, repoErrors: [], me: 'Sam Example',
     approvalProvider: { name: 'Sample approval', linkUrl: null, linkLabel: null }, approvalProviderError: null };
   const runs = new Map();
   const explanations = new Map();
@@ -312,7 +316,11 @@ Fixes AB#1234`;
           if (!window.AppTheme.supported.includes(p.theme)) throw new Error('Unsupported theme.');
           settings.theme = p.theme;
           return settings;
-        case 'saveSettings': Object.assign(settings, p.settings); return settings;
+        case 'saveSettings': { const { scope: _ignored, ...rest } = p.settings; Object.assign(settings, rest); return settings; }
+        case 'setScope':
+          if (!['all', 'mine', 'watched'].includes(p.scope)) throw new Error('Choose All, Mine or Mine + watched.');
+          settings.scope = p.scope;
+          return settings;
         case 'discoverRepos': return [{ org, project, repo: 'sample-tools' }];
         case 'addRepo': case 'addRepos': case 'removeRepo': return settings;
         case 'autoComplete': {

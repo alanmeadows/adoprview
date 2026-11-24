@@ -78,6 +78,11 @@ public sealed class Bridge(PrService prs, SettingsStore store, Func<string, Task
                 store.SetTheme(theme);
                 themeChanged?.Invoke(theme);
                 return store.Current;
+            case "setScope":
+                var scope = Str(p, "scope");
+                if (scope is not ("all" or "mine" or "watched")) throw new ArgumentException("Choose All, Mine or Mine + watched.");
+                store.Update(s => s.Scope = scope);
+                return store.Current;
             case "refreshOne":
                 await prs.RefreshOneAsync(Str(p, "key"));
                 return null;

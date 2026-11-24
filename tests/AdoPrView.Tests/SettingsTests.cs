@@ -121,6 +121,33 @@ static class SettingsTests
             Check(reply!.Contains("\"error\"") && !applied && store.Current.Theme == "light" && File.ReadAllText(path) == text,
                 "Failed theme save changed current settings, applied native chrome, or damaged the original file");
         }));
+        foreach (var (json, expected) in new[] { ("""{"whitelist":["Friend"]}""", "watched"), ("""{"whitelist":["Friend"],"Scope":"all"}""", "all"), ("""{"whitelist":[]}""", null) })
+            await test($"scope migration from {json} starts on {expected ?? "null"} without rewriting the file", () => InDir(dir =>
+            {
+                var path = Path.Combine(dir, "settings.json");
+                File.WriteAllText(path, json);
+                Check(new SettingsStore(path).Current.Scope == expected && File.ReadAllText(path) == json, "Scope migration wrong or rewrote settings");
+            }));
+        await test("scope bridge saves only valid scopes without refreshing and settings Save never changes it", () => InDir(dir =>
+        {
+            var path = Path.Combine(dir, "settings.json");
+            File.WriteAllText(path, """{"whitelist":["Friend"],"refreshSeconds":45}""");
+            var store = new SettingsStore(path);
+            using var http = new HttpClient();
+            var service = new PrService(new AdoClient(http, _ => Task.FromResult(new AuthenticationHeaderValue("Bearer", "offline"))), store);
+            string? reply = null;
+            var kicks = 0;
+            var bridge = new Bridge(service, store, text => { reply = text; return Task.CompletedTask; }, _ => kicks++);
+            bridge.HandleAsync("""{"id":1,"method":"setScope","params":{"scope":"mine"}}""").GetAwaiter().GetResult();
+            Check(reply is not null && !reply.Contains("\"error\"") && new SettingsStore(path).Current.Scope == "mine" && kicks == 0, "Scope was not saved alone: " + reply);
+            bridge.HandleAsync("""{"id":2,"method":"setScope","params":{"scope":"drafts"}}""").GetAwaiter().GetResult();
+            Check(reply!.Contains("\"error\"") && store.Current.Scope == "mine", "Invalid scope was accepted");
+            var form = JsonSerializer.SerializeToNode(store.Current, Bridge.Json)!.AsObject();
+            form["scope"] = "all";
+            bridge.HandleAsync(new JsonObject { ["id"] = 3, ["method"] = "saveSettings", ["params"] = new JsonObject { ["settings"] = form } }.ToJsonString())
+                .GetAwaiter().GetResult();
+            Check(reply is not null && !reply.Contains("\"error\"") && new SettingsStore(path).Current.Scope == "mine", "Settings Save changed the saved scope");
+        }));
         foreach (var notifications in new[] { false, true })
         {
             await test($"legacy sound migration preserves notifications={notifications} without rewriting the file", () => InDir(dir =>

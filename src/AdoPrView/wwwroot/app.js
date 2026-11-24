@@ -98,9 +98,15 @@ const LANES = {
   needsHuman: { label: 'Needs Human', hint: 'Human actions available; merge preview may still be pending or unverified', short: 'Reviewer · PoP · Auto', c: 'var(--needs)' },
   blocked: { label: 'Blocked', hint: 'Agent-fixable problems', short: 'Fix with agent', c: 'var(--blocked)' },
   waiting: { label: 'Waiting', hint: 'Other automated work is pending, or merge verification remains with no human actions', short: 'Pending', c: 'var(--waiting)' },
-  completed: { label: 'Completed', hint: 'Watched PRs Azure DevOps completed (merged) in the last 7 days; read-only and not counted in active totals', short: 'Merged · 7 days', c: 'var(--ready)' },
+  completed: { label: 'Completed', hint: 'PRs Azure DevOps completed (merged) in the last 7 days; read-only and not counted in active totals', short: 'Merged · 7 days', c: 'var(--ready)' },
 };
 const GATES = ['merge', 'build', 'checks', 'comments', 'agency'];
+const SCOPES = ['all', 'mine', 'watched'];
+const EMPTY_SCOPE = {
+  all: 'No active pull requests in your repositories.',
+  mine: 'You have no active pull requests in these repositories.',
+  watched: 'No active pull requests from you or your watched authors.',
+};
 
 const I = {
   key: '<circle cx="7.5" cy="15.5" r="5.5"/><path d="m21 2-9.6 9.6M15.5 7.5l3 3L22 7l-3-3"/>',
@@ -194,7 +200,7 @@ function baseVisible() {
     if (hidden.has(p.key.toLowerCase())) return false;
     if (S.scope === 'drafts' ? !ignoredDraft(p) : ignoredDraft(p)) return false;
     if (S.scope === 'mine' && !p.isMine) return false;
-    if (S.scope === 'watched' && p.isMine) return false;
+    if (S.scope === 'watched' && !p.isMine && !p.isWatched) return false;
     if (S.repo && p.repo !== S.repo) return false;
     if (q) {
       const hay = `${p.id} !${p.id} ${p.title} ${p.sourceBranch} ${p.repo} ${p.author?.name} ${p.author?.uniqueName}`.toLowerCase();
@@ -211,7 +217,7 @@ function completedVisible() {
   return (S.snap.completed || []).filter((c) => {
     if (hidden.has(c.key.toLowerCase())) return false;
     if (S.scope === 'mine' && !c.isMine) return false;
-    if (S.scope === 'watched' && c.isMine) return false;
+    if (S.scope === 'watched' && !c.isMine && !c.isWatched) return false;
     if (S.repo && c.repo !== S.repo) return false;
     const hay = `${c.id} !${c.id} ${c.title} ${c.repo} ${c.author?.name} ${c.author?.uniqueName}`.toLowerCase();
     return !q || q.split(/\s+/).every((t) => hay.includes(t));
@@ -405,7 +411,7 @@ function renderRowsContent(whenIdle = false) {
   if (!shown.length) {
     rows.innerHTML = '';
     empty.hidden = false;
-    empty.innerHTML = `<div class="big">✨</div><h2>Nothing here</h2><div>${S.q || S.lane || S.repo || S.scope !== 'all' ? 'No PRs match the current filters.' : 'You have no active pull requests in the watched repositories.'}</div>`;
+    empty.innerHTML = `<div class="big">✨</div><h2>Nothing here</h2><div>${S.q || S.lane || S.repo ? 'No PRs match the current filters.' : EMPTY_SCOPE[S.scope] || 'No PRs match the current filters.'}</div>`;
     return;
   }
   empty.hidden = true;
@@ -443,7 +449,7 @@ function renderCompletedRows() {
     </div>
   </div>`).join('');
   empty.hidden = !!shown.length;
-  if (!shown.length) empty.innerHTML = '<div class="big">✨</div><h2>Nothing here</h2><div>No completed watched PRs from the last 7 days match the current filters.</div>';
+  if (!shown.length) empty.innerHTML = '<div class="big">✨</div><h2>Nothing here</h2><div>No completed PRs from the last 7 days match the current filters.</div>';
   syncIdCues();
 }
 
@@ -1961,7 +1967,7 @@ function renderDrawer() {
     </div>
     <div class="section">
       <h4>Watched authors</h4>
-      <p class="help">Also show active PRs created by these people or service identities. Match by alias, UPN or display name.</p>
+      <p class="help">Your PRs and PRs by these people or service identities appear under Mine + watched and trigger notifications. All always shows every PR in your repositories. Match by alias, UPN or display name.</p>
       <div class="chips">${st.whitelist.map((w, i) => `<span class="chip">${esc(w)}<button data-dact="removeWl" data-i="${i}" title="Remove">${svg('x')}</button></span>`).join('')}</div>
       <div class="field"><input type="text" id="wlInput" placeholder="e.g. jdoe, jdoe@contoso.com or Build Service" /><button class="btn" data-dact="addWl">${svg('plus')} Add</button></div>
     </div>
@@ -2258,6 +2264,9 @@ function wire() {
     S.laneRetained.clear();
     $('#scope').querySelectorAll('button').forEach((x) => x.classList.toggle('on', x === b));
     render();
+    if (SCOPES.includes(S.scope))
+      rpc('setScope', { scope: S.scope }).then((saved) => { S.settings = saved; })
+        .catch((err) => toast(`The view could not be saved: ${err.message || err}`, 'error'));
   });
   $('#refreshBtn').addEventListener('click', () => rpc('refresh'));
   $('#settingsBtn').addEventListener('click', openDrawer);
@@ -2318,6 +2327,7 @@ async function boot() {
   else window.MockHost.onEvent = onHostMessage;
   const init = await rpc('init');
   S.settings = init.settings;
+  if (SCOPES.includes(S.settings.scope)) S.scope = S.settings.scope;
   applySavedTheme();
   if (S.settings.theme != null && !AppTheme.supported.includes(S.settings.theme))
     toast('The saved theme is not supported by this version. Showing Light Mode without changing your preference.', 'info');

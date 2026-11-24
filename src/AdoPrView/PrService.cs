@@ -44,6 +44,9 @@ public sealed partial class PrService
 
     void Publish(Snapshot s)
     {
+        MarkWatched(s.Prs);
+        var whitelist = _store.Current.Whitelist.ToList();
+        foreach (var c in s.Completed) c.IsWatched = WatchedAuthor(c.IsMine, c.Author, whitelist);
         foreach (var pr in s.Prs)
         {
             pr.IsIgnoredDraft = _store.Current.IgnoreDrafts && pr.IsDraft;
@@ -64,9 +67,9 @@ public sealed partial class PrService
     internal static IEnumerable<(PrView Pr, Lane? Previous)> GetLaneChanges(Snapshot previous, Snapshot current)
     {
         if (previous.LastRefresh is null || current.Error is not null) yield break;
-        var oldLanes = previous.Prs.Where(p => !p.IsHidden && !p.IsIgnoredDraft && p.Error is null)
+        var oldLanes = previous.Prs.Where(p => (p.IsMine || p.IsWatched) && !p.IsHidden && !p.IsIgnoredDraft && p.Error is null)
             .ToDictionary(p => p.Key, p => p.Lane, StringComparer.OrdinalIgnoreCase);
-        foreach (var pr in current.Prs.Where(p => !p.IsHidden && !p.IsIgnoredDraft && p.Error is null))
+        foreach (var pr in current.Prs.Where(p => (p.IsMine || p.IsWatched) && !p.IsHidden && !p.IsIgnoredDraft && p.Error is null))
         {
             Lane? old = oldLanes.TryGetValue(pr.Key, out var lane) ? lane : null;
             if (old != pr.Lane) yield return (pr, old);
@@ -106,9 +109,13 @@ public sealed partial class PrService
         return me;
     }
 
-    static bool MatchesWhitelist(JsonNode? createdBy, IReadOnlyList<string> whitelist)
+    static bool WatchedAuthor(bool isMine, Person author, IReadOnlyList<string> whitelist) =>
+        !isMine && MatchesWhitelist(author.Name, author.UniqueName ?? "", whitelist);
+
+    void MarkWatched(IEnumerable<PrView> prs)
     {
-        return createdBy is not null && MatchesWhitelist(S(createdBy["displayName"]), S(createdBy["uniqueName"]), whitelist);
+        var whitelist = _store.Current.Whitelist.ToList();
+        foreach (var pr in prs) pr.IsWatched = WatchedAuthor(pr.IsMine, pr.Author, whitelist);
     }
 
     static bool MatchesWhitelist(string name, string unique, IReadOnlyList<string> whitelist)
@@ -138,7 +145,6 @@ public sealed partial class PrService
                 Completed = prev.Completed, CompletedWarnings = prev.CompletedWarnings });
             var settings = _store.Current;
             var repos = settings.Repos.ToList();
-            var whitelist = settings.Whitelist.ToList();
             var hidden = new HashSet<string>(settings.Hidden, StringComparer.OrdinalIgnoreCase);
             var heads = new ConcurrentDictionary<string, Lazy<Task<string>>>(StringComparer.Ordinal);
             var results = new ConcurrentBag<PrView>();
@@ -160,14 +166,13 @@ public sealed partial class PrService
                 {
                     var me = await GetMeAsync(repo.Org);
                     meName = me.Name;
-                    history = CompletedHistoryAsync(repo, me.Id, whitelist, hidden, since, completed, completedWarnings);
+                    history = CompletedHistoryAsync(repo, me.Id, hidden, since, completed, completedWarnings);
                     var list = await _ado.GetAsync($"{Api(repo.Org, repo.Project)}git/repositories/{Esc(repo.Repo)}/pullrequests?searchCriteria.status=active&$top=1000&api-version=7.1");
+                    if (list["value"] is JsonArray { Count: >= 1000 })
+                        repoErrors.Add($"{repo.Repo}: Showing the first 1000 active PRs; some PRs may be missing.");
                     var work = new List<Task>();
                     foreach (var pr in Arr(list["value"]))
                     {
-                        var createdBy = pr["createdBy"];
-                        var mine = S(createdBy?["id"]).Equals(me.Id, StringComparison.OrdinalIgnoreCase);
-                        if (!mine && !MatchesWhitelist(createdBy, whitelist)) continue;
                         if (repo.RepoId is null)
                         {
                             var rid = S(pr["repository"]?["id"]);
@@ -207,9 +212,10 @@ public sealed partial class PrService
             }));
 
             var prs = Sort(results);
+            MarkWatched(prs);
             var mergeStatus = await RecheckMergesAsync(prs, heads, repoErrors, Interlocked.Exchange(ref _forceMergeRequested, 0) != 0);
-            // Settings may change while reads are in flight: every candidate must still be in the current watch scope.
-            var listed = completed.Where(c => Watched(c.Org, c.Project, c.Repo, c.IsMine, c.Author)).ToList();
+            // Settings may change while reads are in flight: every candidate must still be in a current repository.
+            var listed = completed.Where(c => InRepoScope(c.Org, c.Project, c.Repo)).ToList();
             var listedKeys = listed.Select(c => c.Key).ToHashSet(StringComparer.OrdinalIgnoreCase);
             // A dated completion outranks an active projection whose detail read failed, never an obtained active detail.
             var active = Sort(prs.Where(p => p.IsActive && !(detailFailed.ContainsKey(p.Key) && listedKeys.Contains(p.Key))));
@@ -231,7 +237,7 @@ public sealed partial class PrService
         finally { _refreshGate.Release(); }
     }
 
-    async Task CompletedHistoryAsync(RepoRef repo, string meId, IReadOnlyList<string> whitelist, HashSet<string> hidden,
+    async Task CompletedHistoryAsync(RepoRef repo, string meId, HashSet<string> hidden,
         DateTimeOffset since, ConcurrentBag<CompletedPr> completed, ConcurrentBag<string> warnings)
     {
         try
@@ -244,13 +250,13 @@ public sealed partial class PrService
                 throw new AdoException("ADO did not return a completed pull request list.");
             var now = _time.GetUtcNow();
             if (values.Count >= CompletedTop)
-                warnings.Add($"{repo.Repo}: Checked {CompletedTop} completions in this repository; watched PRs may be missing.");
+                warnings.Add($"{repo.Repo}: Checked {CompletedTop} completions in this repository; some PRs may be missing.");
             foreach (var pr in values.OfType<JsonNode>())
             {
                 if (CompletedAt(pr) is not { } closed || !InWindow(closed, since, now)) continue;
                 var createdBy = pr["createdBy"];
                 var mine = S(createdBy?["id"]).Equals(meId, StringComparison.OrdinalIgnoreCase);
-                if (!mine && !MatchesWhitelist(createdBy, whitelist) || I(pr["pullRequestId"]) is not int id) continue;
+                if (I(pr["pullRequestId"]) is not int id) continue;
                 var repoId = S(pr["repository"]?["id"]);
                 var key = $"{repoId}:{id}";
                 var closedBy = S(pr["closedBy"]?["displayName"]);
@@ -262,18 +268,16 @@ public sealed partial class PrService
         catch (Exception ex) { warnings.Add($"{repo.Repo}: Completed history unavailable: {ex.Message}"); }
     }
 
-    // Detail and re-check results apply the same current watched-repository and author scope as the history list.
+    // Detail and re-check results apply the same current repository scope as the history list.
     CompletedPr? ToCompleted(PrView pr, DateTimeOffset since, DateTimeOffset now) =>
-        pr.IsActive || pr.CompletedAt is not { } closed || !InWindow(closed, since, now) || !Watched(pr.Org, pr.Project, pr.Repo, pr.IsMine, pr.Author) ? null
+        pr.IsActive || pr.CompletedAt is not { } closed || !InWindow(closed, since, now) || !InRepoScope(pr.Org, pr.Project, pr.Repo) ? null
             : new(pr.Key, pr.Id, pr.Title, pr.Url, pr.Org, pr.Project, pr.Repo, pr.RepoId, pr.Author, pr.IsMine,
                 _store.Current.Hidden.Contains(pr.Key, StringComparer.OrdinalIgnoreCase), closed, null);
 
-    bool Watched(string org, string project, string repo, bool isMine, Person author)
+    bool InRepoScope(string org, string project, string repo)
     {
-        var settings = _store.Current;
         var repoKey = $"{org}/{project}/{repo}".ToLowerInvariant();
-        return settings.Repos.Any(r => r.Key == repoKey) &&
-               (isMine || MatchesWhitelist(author.Name, author.UniqueName ?? "", settings.Whitelist.ToList()));
+        return _store.Current.Repos.Any(r => r.Key == repoKey);
     }
 
     static List<CompletedPr> MergeCompleted(IEnumerable<CompletedPr> completed, IEnumerable<PrView> active)

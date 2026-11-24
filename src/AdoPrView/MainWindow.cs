@@ -470,7 +470,7 @@ public sealed class MainWindow : Window, IApprovalUi
     void OnSnapshot(Snapshot s)
     {
         _ = RunNativeActionAsync("snapshot-delivery", () => _bridge?.PushSnapshotAsync(s) ?? Task.CompletedTask);
-        var visible = s.Prs.Where(p => !p.IsHidden && !p.IsIgnoredDraft && !(_store.Current.IgnoreDrafts && p.IsDraft)).ToList();
+        var visible = s.Prs.Where(p => (p.IsMine || p.IsWatched) && !p.IsHidden && !p.IsIgnoredDraft && !(_store.Current.IgnoreDrafts && p.IsDraft)).ToList();
         var needs = visible.Count(p => p.Lane == Lane.NeedsHuman);
         var blocked = visible.Count(p => p.Lane == Lane.Blocked);
         Title = needs > 0 ? $"ADO PR View — {needs} need human action" : "ADO PR View";

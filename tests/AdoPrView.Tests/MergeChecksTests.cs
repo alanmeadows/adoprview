@@ -680,15 +680,41 @@ static class MergeChecksTests
             Check(f.View(p).Blockers.Count(x => x.Contains("Merge conflicts")) == 1, "Reclassification duplicated blockers");
         });
 
-        await test("completed history: a capped raw page with no watched match still warns and stays apart from active PRs", async () =>
+        await test("all PRs: a fresh install lists other authors' PRs, marks watched authors and auto-rechecks only mine and watched", async () =>
+        {
+            using var f = new Fixture();
+            var mine = f.Add(); var stranger = f.Add(id: 2); stranger.Author = "stranger";
+            await f.Service.RefreshAsync();
+            Check(f.Service.Current.Prs.Count == 2 && !f.View(stranger).IsMine && !f.View(stranger).IsWatched, "Fresh install hid another author's PR");
+            f.Store.Current.Whitelist.Add("Friend");
+            var friend = f.Add(id: 3); friend.Author = "Friend";
+            await f.Service.RefreshAsync();
+            Check(f.View(friend).IsWatched && !f.View(mine).IsWatched && !f.View(stranger).IsWatched, "Watched flag wrong");
+            f.Heads["repo-one"] = Fixture.New;
+            await f.Service.RefreshAsync();
+            Check(f.Patches.Order().SequenceEqual(new[] { mine.Key, friend.Key }.Order()), "Automatic re-check scope wrong: " + string.Join(",", f.Patches));
+            Check((await f.Service.RestartMergeAsync(stranger.Key)).Requested && f.Patches.Contains(stranger.Key), "Explicit re-check of another author's PR was refused");
+        });
+
+        await test("active list: a full 1000-PR page warns that some PRs may be missing", async () =>
+        {
+            using var f = new Fixture();
+            f.Store.Current.IgnoreDrafts = true;
+            for (var id = 1; id <= 1000; id++) f.Add(id: id).Draft = true;
+            await f.Service.RefreshAsync();
+            Check(f.Service.Current.RepoErrors.SequenceEqual(new[] { "repo-one: Showing the first 1000 active PRs; some PRs may be missing." }),
+                "Active cap did not warn: " + string.Join("|", f.Service.Current.RepoErrors));
+        });
+
+        await test("completed history: a capped raw page warns and stays apart from active PRs", async () =>
         {
             using var f = new Fixture();
             var active = f.Add();
             f.CompletedNoise = PrService.CompletedTop;
             await f.Service.RefreshAsync();
             var s = f.Service.Current;
-            Check(s.Completed.Count == 0 && s.CompletedWarnings.SequenceEqual(new[] { "repo-one: Checked 100 completions in this repository; watched PRs may be missing." }),
-                "Capped history without watched matches did not warn: " + string.Join("|", s.CompletedWarnings));
+            Check(s.Completed.Count == PrService.CompletedTop && s.CompletedWarnings.SequenceEqual(new[] { "repo-one: Checked 100 completions in this repository; some PRs may be missing." }),
+                "Capped history did not warn: " + string.Join("|", s.CompletedWarnings));
             var q = f.CompletedQueries.Single();
             Check(q.Contains("searchCriteria.queryTimeRangeType=closed") && q.Contains("searchCriteria.minTime=2026-10-25T00:00:00Z") && q.Contains("$top=100"),
                 "Wrong completed-history query: " + q);
@@ -698,7 +724,7 @@ static class MergeChecksTests
             Check(f.Service.Current.CompletedWarnings.Count == 0, "Uncapped page warned");
         });
 
-        await test("completed history: watched in-window completions sort by closed date; abandoned, old and unwatched never appear", async () =>
+        await test("completed history: in-window completions by any author sort by closed date; abandoned and old never appear", async () =>
         {
             using var f = new Fixture();
             f.Store.Current.Whitelist.Add("Friend");
@@ -715,8 +741,9 @@ static class MergeChecksTests
             f.Store.Current.Hidden.Add(hidden.Key);
             await f.Service.RefreshAsync();
             var c = f.Service.Current.Completed;
-            Check(c.Select(x => x.Key).SequenceEqual(new[] { newest.Key, friend.Key, hidden.Key }), "Wrong history rows/order: " + string.Join(",", c.Select(x => x.Key)));
-            Check(c[0].IsMine && !c[1].IsMine && c[2].IsHidden && !c[0].IsHidden && c.All(x => x.ClosedBy is null), "History lost mine/hidden or invented closedBy");
+            Check(c.Select(x => x.Key).SequenceEqual(new[] { newest.Key, stranger.Key, friend.Key, hidden.Key }), "Wrong history rows/order: " + string.Join(",", c.Select(x => x.Key)));
+            Check(c[0].IsMine && !c[1].IsMine && !c[1].IsWatched && c[2].IsWatched && !c[0].IsWatched && c[3].IsHidden && !c[0].IsHidden && c.All(x => x.ClosedBy is null),
+                "History lost mine/watched/hidden or invented closedBy");
             Check(f.Service.Current.Prs.Count == 0, "History entered active PRs");
             try { f.Service.Find(newest.Key); throw new Exception("Completed PR became actionable"); }
             catch (InvalidOperationException) { }
@@ -783,7 +810,7 @@ static class MergeChecksTests
                 "Single refresh enrichment failure or ignored draft blocked the move: " + string.Join(",", keys));
         });
 
-        await test("completed history: detail or retained PoP re-check outside the current watch scope never enters history", async () =>
+        await test("completed history: detail after unwatching stays as an unwatched row; a removed repository never enters history", async () =>
         {
             using var f = new Fixture();
             f.Store.Current.Whitelist.Add("Friend");
@@ -794,13 +821,14 @@ static class MergeChecksTests
             f.Store.Current.Whitelist.Clear();
             friend.Status = "completed"; friend.Closed = "2026-10-31T00:00:00Z";
             await f.Service.RefreshOneAsync(friend.Key);
+            Check(f.Service.Current.Completed.Single() is { IsWatched: false } row && row.Key == friend.Key, "Unwatched author's completion was dropped or still watched");
             f.Store.Current.Repos.Clear();
             p.Status = "completed"; p.Closed = "2026-10-31T00:00:00Z";
             var result = await f.Service.RefreshPopAsync(target);
-            Check(result is not null && f.Service.Current.Completed.Count == 0, "Unwatched author or repository was reinserted into history");
+            Check(result is not null && f.Service.Current.Completed.All(c => c.Key != p.Key), "Removed repository was reinserted into history");
         });
 
-        await test("completed history: list completions use the watch scope current at publication, not refresh start", async () =>
+        await test("completed history: list completions use the settings current at publication, not refresh start", async () =>
         {
             foreach (var removeRepo in new[] { false, true })
             {
@@ -809,7 +837,8 @@ static class MergeChecksTests
                 var listed = f.Add(); listed.Author = "Friend"; listed.Status = "completed"; listed.Closed = "2026-10-31T00:00:00Z";
                 f.BeforeCompletedList = () => { if (removeRepo) f.Store.Current.Repos.Clear(); else f.Store.Current.Whitelist.Clear(); };
                 await f.Service.RefreshAsync();
-                Check(f.Service.Current.Completed.Count == 0, (removeRepo ? "Removed repository" : "Removed whitelisted author") + " still published list-derived history");
+                var c = f.Service.Current.Completed;
+                Check(removeRepo ? c.Count == 0 : c.Single() is { IsWatched: false }, removeRepo ? "Removed repository still published list-derived history" : "Removed watched author was dropped or still watched");
             }
         });
 
@@ -989,7 +1018,7 @@ static class MergeChecksTests
                     CompletedQueries.Add(Uri.UnescapeDataString(uri.Query));
                     BeforeCompletedList?.Invoke();
                     if (CompletedResponse is { } r) return Response(r.Body, r.Status);
-                    // Unwatched completions fill the raw page so a cap can be reached with no watched match.
+                    // Other authors' completions fill the raw page so the cap can be reached.
                     var noise = Enumerable.Range(9000, CompletedNoise).Select(n => { var x = new PullRequest(repo, n) { Status = "completed", Author = "stranger", Closed = "2026-10-31T00:00:00Z" }; return x.Json(); });
                     result = new JsonObject { ["value"] = new JsonArray(_prs.Where(p => p.Repo == repo && p.Status != "active").Select(p => p.Json()).Concat(noise).ToArray()) };
                 }
