@@ -115,6 +115,8 @@ public sealed partial class UpdateService
         var installer = _installer;
         if (!Current.Available || !Current.CanInstall || installer is null)
             throw new InvalidOperationException("No installable update is available.");
+        if (!IsInstalledCopy())
+            throw new InvalidOperationException("This copy is no longer the installed app; upgrade it manually from the release page.");
         lock (_gate)
         {
             if (_lock is not null) throw new InvalidOperationException(BusyMessage);
@@ -123,9 +125,12 @@ public sealed partial class UpdateService
             catch (IOException) { throw new InvalidOperationException(BusyMessage); }
         }
         var attempt = Path.Combine(_root, Guid.NewGuid().ToString("N"));
+        using var deadline = CancellationTokenSource.CreateLinkedTokenSource(ct);
+        deadline.CancelAfter(TimeSpan.FromMinutes(10));
+        ct = deadline.Token;
         try
         {
-            foreach (var dir in Directory.GetDirectories(_root))
+            foreach (var dir in Directory.GetDirectories(_root).Where(d => Guid.TryParseExact(Path.GetFileName(d), "N", out _)))
                 try { Directory.Delete(dir, true); }
                 catch (Exception ex) when (ex is IOException or UnauthorizedAccessException) { }
             Directory.CreateDirectory(attempt);

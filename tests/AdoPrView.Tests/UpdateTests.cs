@@ -82,13 +82,15 @@ static class UpdateTests
         }));
         await test("update download verifies installer, sweeps stale attempts and holds the handoff lock", () => InDir(async dir =>
         {
-            var stale = Directory.CreateDirectory(Path.Combine(dir, "stale")).FullName;
+            var stale = Directory.CreateDirectory(Path.Combine(dir, Guid.NewGuid().ToString("N"))).FullName;
             File.WriteAllText(Path.Combine(stale, "old.exe"), "old");
+            var unrelated = Directory.CreateDirectory(Path.Combine(dir, "keep")).FullName;
             var service = Service(dir, Release("v0.2.0"));
             await service.CheckAsync(default);
             var path = await service.DownloadAsync(default);
             Check(File.ReadAllBytes(path).AsSpan().SequenceEqual(Payload) && Path.GetFileName(path) == "AdoPrView-v0.2.0-win-x64-setup.exe" &&
-                Path.GetDirectoryName(Path.GetDirectoryName(path)) == dir && !Directory.Exists(stale), "Installer was not staged in a fresh attempt dir");
+                Path.GetDirectoryName(Path.GetDirectoryName(path)) == dir && !Directory.Exists(stale) && Directory.Exists(unrelated),
+                "Installer was not staged in a fresh attempt dir, or the sweep touched a non-attempt dir");
             foreach (var other in new[] { service, Service(dir, Release("v0.2.0")) })
             {
                 await other.CheckAsync(default);
@@ -112,6 +114,16 @@ static class UpdateTests
             await retry.CheckAsync(default);
             Check(File.Exists(await retry.DownloadAsync(default)), "Retry after failed download was blocked");
             ReleaseLock(retry);
+        }));
+        await test("update download rechecks the registered install location", () => InDir(async dir =>
+        {
+            string? registered = @"C:\Apps\AdoPrView";
+            var service = new UpdateService(new FakeHandler(_ => Task.FromResult(new HttpResponseMessage(HttpStatusCode.OK) { Content = new StringContent(Release("v0.2.0")) })),
+                new Version(0, 1, 3), dir, @"C:\Apps\AdoPrView", () => registered);
+            Check((await service.CheckAsync(default)).CanInstall, "Registered copy was not installable");
+            registered = @"D:\Moved";
+            try { await service.DownloadAsync(default); Check(false, "Download ignored a changed install location"); }
+            catch (InvalidOperationException) { }
         }));
         await test("update installer start info requests silent in-place update", () =>
         {
