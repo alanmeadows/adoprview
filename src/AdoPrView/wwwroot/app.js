@@ -39,6 +39,8 @@ function onHostMessage(m) {
     try { updateInvestigation(m.data); } catch (e) { toast(e.message || String(e), 'error'); }
   } else if (m.event === 'prVideo') {
     try { updateVideo(m.data); } catch (e) { toast(e.message || String(e), 'error'); }
+  } else if (m.event === 'update') {
+    setUpdate(m.data);
   } else if (m.event === 'speechSetupProgress' && S.speechSetup?.busy && m.data?.epoch === S.speechEpoch) {
     S.speechSetup.progress = m.data.message; renderSpeechSetup();
   }
@@ -92,6 +94,10 @@ const S = {
   drawerEpoch: 0,
   themeBusy: false,
   discovered: null,
+  version: null,
+  update: null,
+  updateBusy: false,      // false | 'check' | 'install'
+  updateAnnounced: null,
 };
 
 const LANES = {
@@ -159,19 +165,70 @@ function initials(name) {
 function hue(s) { let h = 0; for (const c of String(s)) h = (h * 31 + c.charCodeAt(0)) % 360; return h; }
 const avatar = (name) => `<span class="avatar" style="background:hsl(${hue(name)} 70% 70%)" title="${esc(name)}">${esc(initials(name))}</span>`;
 
-function toast(text, kind = 'ok', action) {
+function toast(text, kind = 'ok', action, sticky = false) {
   const el = document.createElement('div');
   el.className = `toast ${kind}`;
   el.innerHTML = `<span class="ic"></span><span class="grow">${esc(text)}</span>`;
-  if (action) {
+  for (const a of [action, sticky && { label: 'Dismiss', run: () => {} }]) {
+    if (!a) continue;
     const b = document.createElement('button');
-    b.textContent = action.label;
-    b.onclick = () => { action.run(); el.remove(); };
+    b.textContent = a.label;
+    b.onclick = () => { a.run(); el.remove(); };
     if (S.drawer) { S.drawerInert.set(b, b.inert); b.inert = true; }
     el.appendChild(b);
   }
   $('#toasts').appendChild(el);
-  setTimeout(() => el.remove(), kind === 'error' ? 9000 : 5000);
+  if (!sticky) setTimeout(() => el.remove(), kind === 'error' ? 9000 : 5000);
+}
+
+function setUpdate(state) {
+  S.update = state;
+  if (state?.available && state.latest !== S.updateAnnounced) {
+    S.updateAnnounced = state.latest;
+    toast(`ADO PR View v${state.latest} is available (you have v${state.current}). Upgrade to get the latest version.`, 'info',
+      state.canInstall ? { label: 'Upgrade', run: () => void installUpdate() }
+        : state.releaseUrl ? { label: 'View release', run: () => void openRelease() } : null, true);
+  }
+  if (S.drawer) renderDrawer();
+}
+
+async function checkForUpdate() {
+  if (S.updateBusy) return;
+  S.updateBusy = 'check'; if (S.drawer) renderDrawer();
+  try { setUpdate(await rpc('checkForUpdate')); }
+  catch (e) { toast(e.message || String(e), 'error'); }
+  finally { S.updateBusy = false; if (S.drawer) renderDrawer(); }
+}
+
+async function installUpdate() {
+  const u = S.update;
+  if (!u?.canInstall || S.updateBusy) return;
+  if (!confirm(`ADO PR View will close, install v${u.latest} from GitHub, and reopen. Any running Copilot work is shut down first. Continue?`)) return;
+  S.updateBusy = 'install'; if (S.drawer) renderDrawer();
+  toast(`Downloading v${u.latest} from GitHub…`, 'info');
+  try { await rpc('installUpdate'); }
+  catch (e) { toast(e.message || String(e), 'error'); }
+  finally { S.updateBusy = false; if (S.drawer) renderDrawer(); }
+}
+
+function openRelease() {
+  if (S.update?.releaseUrl) rpc('openUrl', { url: S.update.releaseUrl }).catch(e => toast(e.message || String(e), 'error'));
+}
+
+function updateSection() {
+  const u = S.update, busy = S.updateBusy;
+  const status = busy === 'check' ? 'Checking for updates…' : busy === 'install' ? `Downloading v${u.latest} from GitHub…`
+    : u?.error ? u.error : u?.available ? `v${u.latest} is available.`
+    : u?.checkedAt ? `You're up to date (checked ${new Date(u.checkedAt).toLocaleString()}).` : 'Not checked yet.';
+  return `<div class="section">
+      <h4>Updates</h4>
+      <p class="help">Version ${esc(u?.current || S.version || 'unknown')}</p>
+      <p class="help${u?.error && !busy ? ' error' : ''}" id="updateStatus">${esc(status)}</p>
+      ${u?.available && !u.canInstall ? '<p class="help">This copy isn\'t the installed app, so upgrade it manually.</p>' : ''}
+      <div class="field"><button class="btn" data-dact="checkUpdate" ${busy ? 'disabled' : ''}>${svg('refresh')} Check for updates</button>
+        ${!u?.available ? '' : u.canInstall ? `<button class="btn primary" data-dact="installUpdate" ${busy ? 'disabled' : ''}>Upgrade to v${esc(u.latest)}</button>`
+          : u.releaseUrl ? `<button class="btn" data-dact="openRelease">${svg('ext')} Open release page</button>` : ''}</div>
+    </div>`;
 }
 
 const findPr = (key) => S.snap.prs.find((p) => p.key === key);
@@ -1937,6 +1994,7 @@ function renderDrawer() {
         ${[['light', 'Light Mode'], ['dark', 'Dark Mode']].map(([value, label]) => `<option value="${value}" ${AppTheme.effective(st.theme) === value ? 'selected' : ''}>${label}</option>`).join('')}
       </select></div>
     </div>
+    ${updateSection()}
     <div class="section"><h4>TikTok narration</h4>
       <p class="help">${st.videoSpeech ? `Azure Speech / ${esc(st.videoSpeech.region)} / ${esc(st.videoSpeech.voice)}` : 'Choose an Azure Speech resource on your first video. Azure CLI (az) and az login are required.'}</p>
       <button class="btn" data-dact="speechSetup">Choose Azure Speech resource / voice</button></div>
@@ -2079,6 +2137,9 @@ async function changeTheme(select) {
 
 async function onDrawerAction(act, el) {
   if (act === 'speechSetup') { closeDrawer(); await openSpeechSetup(); return; }
+  if (act === 'checkUpdate') { await checkForUpdate(); return; }
+  if (act === 'installUpdate') { await installUpdate(); return; }
+  if (act === 'openRelease') { openRelease(); return; }
   if (act === 'approvalSettingsAction') {
     if (S.approvalSettingsBusy) return;
     S.approvalSettingsBusy = true; renderDrawer();
@@ -2318,6 +2379,7 @@ async function boot() {
   else window.MockHost.onEvent = onHostMessage;
   const init = await rpc('init');
   S.settings = init.settings;
+  S.version = init.version;
   applySavedTheme();
   if (S.settings.theme != null && !AppTheme.supported.includes(S.settings.theme))
     toast('The saved theme is not supported by this version. Showing Light Mode without changing your preference.', 'info');
@@ -2327,6 +2389,7 @@ async function boot() {
   for (const video of init.videos || []) updateVideo(video);
   setSnapshot(init.snapshot);
   render();
+  if (init.update) setUpdate(init.update);
   window.chrome?.webview?.postMessage('ready');
   if (params.has('expand')) {
     const n = +params.get('expand') || 1;

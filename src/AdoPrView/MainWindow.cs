@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using System.IO;
 using System.Collections.Concurrent;
 using System.Text.Json.Nodes;
@@ -25,6 +26,11 @@ public sealed class MainWindow : Window, IApprovalUi
     readonly VideoArtifacts _videoArtifacts = new();
     readonly VideoRenderer _videoRenderer;
     readonly VideoService _video;
+    readonly UpdateService _updates = new();
+    CancellationTokenSource _updateLoop = new();
+    bool _updateLoopStarted;
+    string? _pendingInstaller;
+    string? _announcedUpdate;
     CancellationTokenSource? _speechSetup;
     Task<object>? _speechSetupWork;
     readonly ConcurrentDictionary<string, byte> _copilotStarting = new(StringComparer.OrdinalIgnoreCase);
@@ -139,6 +145,7 @@ public sealed class MainWindow : Window, IApprovalUi
             e.Cancel = true;
             if (_shutdownInProgress) return;
             _shutdownInProgress = true;
+            _updateLoop.Cancel();
             _diagnostics.Record("shutdown-started", _shutdownReason);
             try
             {
@@ -162,6 +169,21 @@ public sealed class MainWindow : Window, IApprovalUi
                 _tray.Visible = false;
                 _tray.Dispose();
                 _diagnostics.Record("shutdown-teardown-completed", _shutdownReason);
+                if (_pendingInstaller is { } installer)
+                {
+                    _pendingInstaller = null;
+                    try
+                    {
+                        Process.Start(UpdateService.InstallerStartInfo(installer))?.Dispose();
+                        _diagnostics.Record("update-installer-started");
+                    }
+                    catch (Exception ex)
+                    {
+                        _diagnostics.Record("update-installer-failed", exception: ex);
+                        MessageBox.Show(this, $"The update could not be started: {ex.Message}\n\nInstall it from {_updates.Current.ReleaseUrl ?? "https://github.com/alanmeadows/adoprview/releases"}.",
+                            "ADO PR View update", MessageBoxButton.OK, MessageBoxImage.Warning);
+                    }
+                }
                 _ = Dispatcher.BeginInvoke(new Action(Close));
             }
             catch (Exception ex)
@@ -174,6 +196,9 @@ public sealed class MainWindow : Window, IApprovalUi
                 }
                 _shutdownInProgress = false;
                 _quitting = false;
+                _pendingInstaller = null;
+                _updateLoop = new();
+                if (_updateLoopStarted) _ = UpdateLoopAsync(_updateLoop.Token);
                 _diagnostics.Record("shutdown-blocked", _shutdownReason, ex);
                 _shutdownReason = "window-close";
                 ResetCopilotDelivery(waitForReady: false);
@@ -241,7 +266,7 @@ public sealed class MainWindow : Window, IApprovalUi
 
         _bridge = new Bridge(_prs, _store, PostAsync, Kick, _approval, this, HandleCopilotAsync, HandlePopAsync,
             HandleExplainAsync, themeChanged: ApplyTheme, videoAction: HandleVideoAsync, investigationAction: HandleInvestigationAsync,
-            copilotAcknowledged: id => _copilotDelivery?.Acknowledge(id));
+            copilotAcknowledged: id => _copilotDelivery?.Acknowledge(id), updateAction: HandleUpdateAsync);
         ResetCopilotDelivery(waitForReady: true);
         _explain.Changed += state => _ = RunNativeActionAsync("explanation-state-delivery", () => _bridge.PushExplanationAsync(state));
         _investigation.Changed += state => _ = RunNativeActionAsync("investigation-state-delivery", () => _bridge.PushInvestigationAsync(state));
@@ -256,6 +281,11 @@ public sealed class MainWindow : Window, IApprovalUi
                 {
                     _uiReady = true;
                     (_copilotDelivery ?? throw new InvalidOperationException("Copilot delivery is not initialized.")).Ready();
+                    if (!_updateLoopStarted && !_opts.Mock && !_opts.HeadlessCapture)
+                    {
+                        _updateLoopStarted = true;
+                        _ = UpdateLoopAsync(_updateLoop.Token);
+                    }
                     return;
                 }
                 await _bridge.HandleAsync(msg);
@@ -366,6 +396,57 @@ public sealed class MainWindow : Window, IApprovalUi
         ct.ThrowIfCancellationRequested();
         _store.Update(s => s.VideoSpeech = selected);
         return _store.Current;
+    }
+
+    async Task<object> HandleUpdateAsync(string action, JsonObject parameters)
+    {
+        if (action == "updateState") return _updates.Current;
+        if (action == "checkForUpdate")
+        {
+            var state = await _updates.CheckAsync(_updateLoop.Token);
+            await PublishUpdateAsync(state);
+            return state;
+        }
+        if (action != "installUpdate") throw new ArgumentException("Unknown update action.");
+        if (!_updates.Current.CanInstall)
+            throw new InvalidOperationException("This copy of ADO PR View is not the installed app and cannot upgrade itself. Download the update from the release page.");
+        var path = await _updates.DownloadAsync(_updateLoop.Token);
+        await Dispatcher.InvokeAsync(() =>
+        {
+            _pendingInstaller = path;
+            _shutdownReason = "update";
+            _quitting = true;
+            Close();
+        });
+        return new { closing = true };
+    }
+
+    async Task UpdateLoopAsync(CancellationToken ct)
+    {
+        try
+        {
+            while (true)
+            {
+                var state = await _updates.CheckAsync(ct);
+                try { await PublishUpdateAsync(state); }
+                catch (Exception ex) { _diagnostics.Record("update-delivery-failed", exception: ex); }
+                await Task.Delay(TimeSpan.FromHours(12), ct);
+            }
+        }
+        catch (OperationCanceledException) { }
+    }
+
+    async Task PublishUpdateAsync(UpdateState state)
+    {
+        if (state.Error is not null) _diagnostics.Record("update-check-failed", state.Error);
+        if (_bridge is not null) await _bridge.PushUpdateAsync(state);
+        if (!state.Available || state.Latest == _announcedUpdate) return;
+        _announcedUpdate = state.Latest;
+        await Dispatcher.InvokeAsync(() =>
+        {
+            if (!_shutdownComplete && _tray.Visible && (!IsVisible || WindowState == WindowState.Minimized))
+                _tray.ShowBalloonTip(6000, $"ADO PR View v{state.Latest} is available", "Open ADO PR View to upgrade.", System.Windows.Forms.ToolTipIcon.Info);
+        });
     }
 
     async Task RecoverCopilotAsync()
