@@ -60,11 +60,16 @@ public sealed partial class PrService
         if (MergeConflicted(pr.MergeStatus)) _mergeSweepHandled[pr.Key] = _mergeSweep;
         pr.MergeRecheckRequestedAt = check.RequestedAt;
         pr.MergeRecheckPending = pr.MergeStatus == "queued";
-        pr.MergeRecheckError = check.Error is null ? null : check.Error + (MergeConflicted(pr.MergeStatus)
-            ? " Automatic re-checks are paused while ADO reports conflicts."
-            : pr.IsMine || pr.IsWatched ? $" Retrying on a later refresh (not before {check.NextAttempt:u})."
-            : " Use Re-check merge to retry.");
+        pr.MergeRecheckFailure = check.Error;
+        pr.MergeRecheckRetryAt = check.NextAttempt;
+        SetMergeRecheckError(pr);
     }
+
+    static void SetMergeRecheckError(PrView pr) =>
+        pr.MergeRecheckError = pr.MergeRecheckFailure is null ? null : pr.MergeRecheckFailure + (
+            !pr.IsMine && !pr.IsWatched ? " Use Re-check merge to retry."
+            : MergeConflicted(pr.MergeStatus) ? " Automatic re-checks are paused while ADO reports conflicts."
+            : $" Retrying on a later refresh (not before {pr.MergeRecheckRetryAt:u}).");
 
     async Task<string> RecheckMergesAsync(List<PrView> prs, ConcurrentDictionary<string, Lazy<Task<string>>> heads,
         ConcurrentBag<string> errors, bool force)

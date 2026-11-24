@@ -62,6 +62,9 @@ public sealed class PrView
     // Compatibility field: observed ADO queued status, not client request state.
     public bool MergeRecheckPending { get; set; }
     public string? MergeRecheckError { get; set; }
+    // Last failed re-check, kept so retry guidance can follow watch-list changes.
+    internal string? MergeRecheckFailure { get; set; }
+    internal DateTimeOffset MergeRecheckRetryAt { get; set; }
     public string? AutoCompleteBy { get; init; }
     public string? MergeStrategy { get; init; }
     public Lane Lane { get; set; }

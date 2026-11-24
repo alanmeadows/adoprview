@@ -706,6 +706,21 @@ static class MergeChecksTests
             await f.Service.RefreshAsync();
             Check(f.Patches.SequenceEqual([mine.Key]), "Unwatched author's PR was re-checked automatically: " + string.Join(",", f.Patches));
             Check(f.View(friend).Gates["merge"].Detail?.Contains("Re-check merge") == true, "Unwatched stale PR promised an automatic re-check: " + f.View(friend).Gates["merge"].Detail);
+            f.Store.Current.Whitelist.Add("Friend");
+            f.Service.ApplyMonitoringSettings();
+            Check(f.View(friend).IsWatched && f.View(friend).Gates["merge"].Detail?.Contains("scheduled re-check") == true, "Re-watching did not refresh merge guidance: " + f.View(friend).Gates["merge"].Detail);
+        });
+
+        await test("a failed manual re-check of an unwatched conflicted PR points to Re-check merge", async () =>
+        {
+            using var f = new Fixture();
+            var stranger = f.Add(); stranger.Author = "stranger"; stranger.MergeStatus = "conflicts";
+            await f.Service.RefreshAsync();
+            f.PatchFailure = HttpStatusCode.ServiceUnavailable;
+            var error = "";
+            try { await f.Service.RestartMergeAsync(stranger.Key); } catch (InvalidOperationException ex) { error = ex.Message; }
+            Check(error.EndsWith(" Use Re-check merge to retry.") && f.View(stranger).MergeRecheckError?.EndsWith(" Use Re-check merge to retry.") == true,
+                "Wrong retry guidance: " + error + " | " + f.View(stranger).MergeRecheckError);
         });
 
         await test("active list: a full 1000-PR page warns that some PRs may be missing", async () =>

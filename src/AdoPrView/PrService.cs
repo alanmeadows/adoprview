@@ -44,13 +44,15 @@ public sealed partial class PrService
 
     void Publish(Snapshot s)
     {
+        var wasWatched = s.Prs.Where(p => p.IsWatched).ToHashSet();
         MarkWatched(s.Prs);
         var whitelist = _store.Current.Whitelist.ToList();
         foreach (var c in s.Completed) c.IsWatched = WatchedAuthor(c.IsMine, c.Author, whitelist);
         foreach (var pr in s.Prs)
         {
             pr.IsIgnoredDraft = _store.Current.IgnoreDrafts && pr.IsDraft;
-            if (pr.IsIgnoredDraft) Classify(pr);
+            if (pr.IsIgnoredDraft || pr.IsWatched != wasWatched.Contains(pr)) Classify(pr);
+            if (pr.IsWatched != wasWatched.Contains(pr)) SetMergeRecheckError(pr);
         }
         if (_approval is not null)
         {
