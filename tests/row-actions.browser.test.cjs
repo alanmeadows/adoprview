@@ -3420,6 +3420,10 @@ test('real row hit testing and action identity across refreshes', { timeout: 900
           await evaluate(`window.holdDraftMethod=${JSON.stringify(method)};
             document.querySelector('#${id}').value=${JSON.stringify(submitted)};`);
           await click(await elementPoint(`[data-dact="${action}"]`)); await frame();
+          if (action === 'addRepo') {
+            assert.deepEqual(await evaluate(`(b=>({disabled:b.disabled,text:b.textContent.trim()}))(document.querySelector('[data-dact="addRepo"]'))`),
+              { disabled: true, text: 'Checking…' }, 'addRepo shows a busy state while the repository is validated');
+          }
           await evaluate(`document.querySelector('#${id}').value='Next unsubmitted value';renderDrawer();`);
           await finishWrite();
           assert.equal(await evaluate(`document.querySelector('#${id}').value`), 'Next unsubmitted value', `${action} must preserve newer text after rerender`);
