@@ -13,6 +13,9 @@ public sealed class AdoException(string message, HttpStatusCode? status = null) 
     public HttpStatusCode? Status { get; } = status;
 }
 
+// Thrown when a caller's beforeSend check declines a request after throttle/token waits; nothing was sent.
+sealed class AdoRequestSkippedException() : Exception("The request was skipped before it was sent.");
+
 sealed class TokenProvider
 {
     const string AdoResource = "499b84ac-1321-427f-aa17-267ca6975798";
@@ -94,7 +97,8 @@ public sealed class AdoClient
         return JsonNode.Parse(output.ToArray()) ?? throw new InvalidDataException("ADO returned empty JSON.");
     }
     public Task<JsonNode> PatchAsync(string url, JsonNode body, CancellationToken ct = default) => SendJsonAsync(HttpMethod.Patch, url, body, ct);
-    internal Task<JsonNode> PatchOnceAsync(string url, JsonNode body) => SendJsonAsync(HttpMethod.Patch, url, body, default, retry: false);
+    internal Task<JsonNode> PatchOnceAsync(string url, JsonNode body, Func<bool>? beforeSend = null) =>
+        SendJsonAsync(HttpMethod.Patch, url, body, default, retry: false, beforeSend);
     internal Task<JsonNode> PutOnceAsync(string url, JsonNode body) => SendJsonAsync(HttpMethod.Put, url, body, default, retry: false);
     internal Task<JsonNode> PostOnceAsync(string url, JsonNode body, CancellationToken ct) => SendJsonAsync(HttpMethod.Post, url, body, ct, retry: false);
     public async Task DeleteAsync(string url, CancellationToken ct = default)
@@ -108,7 +112,7 @@ public sealed class AdoClient
         return await resp.Content.ReadAsStringAsync(ct);
     }
 
-    async Task<JsonNode> SendJsonAsync(HttpMethod method, string url, JsonNode? body, CancellationToken ct, bool retry = true)
+    async Task<JsonNode> SendJsonAsync(HttpMethod method, string url, JsonNode? body, CancellationToken ct, bool retry = true, Func<bool>? beforeSend = null)
     {
         using var resp = await SendAsync(() =>
         {
@@ -116,12 +120,12 @@ public sealed class AdoClient
             req.Headers.Accept.Add(new("application/json"));
             if (body != null) req.Content = new StringContent(body.ToJsonString(), Encoding.UTF8, "application/json");
             return req;
-        }, ct, retry);
+        }, ct, retry, beforeSend: beforeSend);
         var text = await resp.Content.ReadAsStringAsync(ct);
         return string.IsNullOrWhiteSpace(text) ? new JsonObject() : JsonNode.Parse(text)!;
     }
 
-    async Task<HttpResponseMessage> SendAsync(Func<HttpRequestMessage> build, CancellationToken ct, bool retry = true, bool buffer = true)
+    async Task<HttpResponseMessage> SendAsync(Func<HttpRequestMessage> build, CancellationToken ct, bool retry = true, bool buffer = true, Func<bool>? beforeSend = null)
     {
         await _throttle.WaitAsync(ct);
         try
@@ -130,6 +134,11 @@ public sealed class AdoClient
             {
                 var req = build();
                 req.Headers.Authorization = await _getToken(attempt > 0);
+                if (beforeSend is not null && !beforeSend())
+                {
+                    req.Dispose();
+                    throw new AdoRequestSkippedException();
+                }
                 var resp = await _http.SendAsync(req, buffer ? HttpCompletionOption.ResponseContentRead : HttpCompletionOption.ResponseHeadersRead, ct);
                 if (resp.IsSuccessStatusCode && resp.StatusCode != HttpStatusCode.NonAuthoritativeInformation) return resp;
                 var status = resp.StatusCode;

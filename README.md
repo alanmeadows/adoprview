@@ -3,9 +3,11 @@
 In the Azure DevOps portal, especially with a lot of pull requests, it is hard
 to tell at a glance which PRs have finished all their machine validation and now
 only need a person to review, approve or finish them. ADO PR View is a small
-Windows app that shows your PRs, and those of people you choose to watch, in one
-table sorted by what they are waiting on: **Needs Human**, **Blocked**,
-or **Waiting**. A **Completed** view lists watched PRs merged in the last 7 days.
+Windows app that shows the PRs in your repositories in one table sorted by what
+they are waiting on: **Needs Human**, **Blocked**, or **Waiting**. **Mine +
+watched** narrows it to your PRs and those of people you choose to watch, which
+are also the PRs that notify you. A **Completed** view lists PRs merged in the
+last 7 days.
 
 ![The default Light Mode dashboard: lane counters in the header, and one row per PR with its lane, gates and actions](docs/images/overview.png)
 

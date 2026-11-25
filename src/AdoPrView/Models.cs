@@ -42,6 +42,7 @@ public sealed class PrView
     public string TargetBranch { get; init; } = "";
     public required Person Author { get; init; }
     public bool IsMine { get; init; }
+    public bool IsWatched { get; set; }
     public bool IsHidden { get; init; }
     public bool IsActive { get; set; } = true;
     public ApprovalOffer? Approval { get; set; }
@@ -61,6 +62,9 @@ public sealed class PrView
     // Compatibility field: observed ADO queued status, not client request state.
     public bool MergeRecheckPending { get; set; }
     public string? MergeRecheckError { get; set; }
+    // Last failed re-check, kept so retry guidance can follow watch-list changes.
+    internal string? MergeRecheckFailure { get; set; }
+    internal DateTimeOffset MergeRecheckRetryAt { get; set; }
     public string? AutoCompleteBy { get; init; }
     public string? MergeStrategy { get; init; }
     public Lane Lane { get; set; }
@@ -80,7 +84,10 @@ public sealed class PrView
 
 // Read-only history row: deliberately not a PrView, so actions and Find never see it.
 public sealed record CompletedPr(string Key, int Id, string Title, string Url, string Org, string Project, string Repo,
-    string RepoId, Person Author, bool IsMine, bool IsHidden, DateTimeOffset Closed, string? ClosedBy);
+    string RepoId, Person Author, bool IsMine, bool IsHidden, DateTimeOffset Closed, string? ClosedBy)
+{
+    public bool IsWatched { get; set; }
+}
 
 public sealed class Snapshot
 {

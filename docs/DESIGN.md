@@ -1,7 +1,7 @@
 # ADO PR View — design
 
-A Windows-native dashboard that shows **your** Azure DevOps pull requests (plus
-PRs from a whitelist of other authors) across any number of repositories, with
+A Windows-native dashboard that shows the Azure DevOps pull requests in any
+number of repositories (notifying for **your** PRs plus a whitelist of authors), with
 enough detail inline that you rarely need to click into ADO.
 
 ## Architecture
@@ -47,7 +47,7 @@ enough detail inline that you rarely need to click into ADO.
   `ReviewVoteTarget` captures the signed-in reviewer, source and target commits,
   branch refs, latest iteration and previous vote. One click submits only the
   authenticated user's ordinary vote (`10`). Native checks reject inactive,
-  hidden, unwatched or unmonitored PRs, identity changes and stale revisions.
+  hidden or unmonitored PRs, identity changes and stale revisions.
   A per-PR duplicate guard and the shared refresh gate serialize requests.
   `PutOnceAsync` never retries; authoritative reviewer, PR, iteration and ref
   reads must confirm the vote and revision before publishing success.
@@ -146,7 +146,7 @@ real launch.
 | Purpose | Call |
 |---|---|
 | Identity | `GET {org}/_apis/connectionData` |
-| Active PRs per repo | `GET git/repositories/{repo}/pullrequests?searchCriteria.status=active&$top=500` (filter: creator = me or whitelist) |
+| Active PRs per repo | `GET git/repositories/{repo}/pullrequests?searchCriteria.status=active&$top=1000` (all authors; marks mine/whitelisted for alerts) |
 | Full PR (description > 400 chars) | `GET git/repositories/{repo}/pullrequests/{id}` |
 | Policy gates | `GET policy/evaluations?artifactId=vstfs:///CodeReview/CodeReviewId/{projectId}/{id}` |
 | Pending review-enforcement details | `GET …/pullrequests/{id}/statuses` (latest matching context and configured author) |
@@ -187,13 +187,13 @@ real launch.
 **Completed** is a separate, read-only `completed` snapshot collection, not a
 lane of active PRs. Each full refresh makes one extra list call per repository
 (`status=completed`, `queryTimeRangeType=closed`, `minTime` 7 days ago,
-`$top=100`) and keeps watched (mine/whitelisted) matches by actual closed date.
+`$top=100`) and keeps matches by actual closed date.
 100 raw results add a "may be missing" warning; a denied, timed-out or
 malformed response (no `value` array) adds a repo-labeled "Completed history
 unavailable" warning instead of an error. A PR detail/re-check that reports
 completed with a closed date between the 7-day cutoff and now (invariant-culture
 wire format) moves it into history in the same snapshot, only while its repository
-and author are still watched; a terminal detail is recorded before any
+is still configured; a terminal detail is recorded before any
 active-only enrichment, so a policy/thread failure cannot keep it active. Find, actions, notifications and the Fix shelf use active PRs only.
 
 The optional review bot is identified only by the configured `reviewBot`
@@ -298,7 +298,7 @@ older snapshot's hidden flag, determine row visibility after a restore.
 ## UI
 
 * Header: lane counters (click to filter), search, repo filter, scope
-  (all / mine / whitelist), last refresh, refresh, settings.
+  (all / mine / mine + whitelist, persisted), last refresh, refresh, settings.
 * Table row: lane stripe, title + `!id` + repo + branch, author, gate chips
   (Merge · Build · Checks · Comments · Review bot),
   updated age, one-click actions (+1, Publish, PoP, Auto-complete, Fix PR, Open).
@@ -319,7 +319,8 @@ older snapshot's hidden flag, determine row visibility after a restore.
   provider link and the last outcome/error as text (kept in UI memory across
   refreshes).
 * Settings drawer: repositories (paste any ADO repo URL, or discover repos
-  with your PRs), whitelist authors (alias, UPN or display name), hidden PRs
+  with your PRs), whitelist authors (alias, UPN or display name; scope
+  notifications), hidden PRs
   (restore), refresh/merge-check intervals, auto-complete options, Copilot/WSL
   mappings, and provider settings only when a provider is loaded.
 * Fix PR: builds the existing context-rich prompt (PR URL, branch, blockers,

@@ -516,7 +516,7 @@ test('real row hit testing and action identity across refreshes', { timeout: 900
           for (const [scene, mutation] of [
             ['search', "const e=document.querySelector('#search');e.value='Different repository';e.dispatchEvent(new Event('input',{bubbles:true}));"],
             ['repository', "const e=document.querySelector('#repoFilter');e.value='sample-api';e.dispatchEvent(new Event('change',{bubbles:true}));"],
-            ['scope', "document.querySelector('[data-scope=\"watched\"]').click();"],
+            ['scope', `S.snap.prs.find(p=>p.key==='${key}').isMine=false;document.querySelector('[data-scope="watched"]').click();`],
             ['lane', "document.querySelector('[data-lane=\"completed\"]').click();"],
             ['hidden', `S.settings.hidden.push('${key}');S.expanded.delete('${key}');render();`],
             ['collapsed', `onAction('toggle',{dataset:{}},'${key}');`],
@@ -1879,7 +1879,7 @@ test('real row hit testing and action identity across refreshes', { timeout: 900
       const rows = await evaluate(`[...document.querySelectorAll('#rows > .pr')].map(r=>[r.dataset.key,r.hasAttribute('data-completed'),[...r.querySelectorAll('[data-act]')].map(e=>e.dataset.act).join()])`);
       assert.deepEqual(rows.map(r => r[0]), [key, 'sample-api-id:96', 'sample-operator-id:94']);
       assert.ok(rows.every(r => r[1] && r[2] === 'open'), JSON.stringify(rows));
-      assert.match(await evaluate(`document.querySelector('#rows').textContent`), /sample-service: Checked 100 completions in this repository; watched PRs may be missing\./);
+      assert.match(await evaluate(`document.querySelector('#rows').textContent`), /sample-service: Checked 100 completions in this repository; some PRs may be missing\./);
       assert.equal(await evaluate(`document.querySelector('#runShelf').hidden || !document.querySelector('#runShelf').textContent.trim()`), true);
       await evaluate(`document.querySelector('[data-key="sample-api-id:96"] [data-act="open"]').focus()`);
       await send('Input.dispatchKeyEvent', { type: 'keyDown', key: 'Enter', code: 'Enter', windowsVirtualKeyCode: 13, text: '\r' });

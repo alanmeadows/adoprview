@@ -60,10 +60,16 @@ public sealed partial class PrService
         if (MergeConflicted(pr.MergeStatus)) _mergeSweepHandled[pr.Key] = _mergeSweep;
         pr.MergeRecheckRequestedAt = check.RequestedAt;
         pr.MergeRecheckPending = pr.MergeStatus == "queued";
-        pr.MergeRecheckError = check.Error is null ? null : check.Error + (MergeConflicted(pr.MergeStatus)
-            ? " Automatic re-checks are paused while ADO reports conflicts."
-            : $" Retrying on a later refresh (not before {check.NextAttempt:u}).");
+        pr.MergeRecheckFailure = check.Error;
+        pr.MergeRecheckRetryAt = check.NextAttempt;
+        SetMergeRecheckError(pr);
     }
+
+    static void SetMergeRecheckError(PrView pr) =>
+        pr.MergeRecheckError = pr.MergeRecheckFailure is null ? null : pr.MergeRecheckFailure + (
+            !pr.IsMine && !pr.IsWatched ? " Use Re-check merge to retry."
+            : MergeConflicted(pr.MergeStatus) ? " Automatic re-checks are paused while ADO reports conflicts."
+            : $" Retrying on a later refresh (not before {pr.MergeRecheckRetryAt:u}).");
 
     async Task<string> RecheckMergesAsync(List<PrView> prs, ConcurrentDictionary<string, Lazy<Task<string>>> heads,
         ConcurrentBag<string> errors, bool force)
@@ -111,7 +117,8 @@ public sealed partial class PrService
             var retry = retryNeeded && now >= check.NextAttempt;
             var recovered = check.DetectionFailed && pr.MergeCheckError is null;
             var due = check.RequestedAt is null || now >= check.NextAttempt;
-            if (AutomaticMergeCheckEligible(pr) &&
+            // Automatic re-checks write to ADO, so they stay limited to your and watched authors' PRs.
+            if ((pr.IsMine || pr.IsWatched) && AutomaticMergeCheckEligible(pr) &&
                 (!retryNeeded || now >= check.NextAttempt) &&
                 (sweep || retry || pr.MergeStale && due && (periodic || recovered || check.RequestedAt is not null)))
             {
@@ -168,6 +175,10 @@ public sealed partial class PrService
         if (!Monitored(pr)) return new(false, $"!{pr.Id} is an ignored draft or no longer monitored; no merge re-check requested.");
         if (!pr.IsActive) return new(false, $"!{pr.Id} is no longer active; no merge re-check requested.");
         if (MergeRestartDeferred(pr.MergeStatus)) return new(false, $"!{pr.Id} reports merge status {pr.MergeStatus}; it was not restarted.");
+        // The watch list may have changed during the sweep or the read above.
+        MarkWatched([pr]);
+        var notWatched = new MergeRecheckResult(false, $"!{pr.Id} is not by you or a watched author; no automatic merge re-check requested.");
+        if (automatic && !pr.IsMine && !pr.IsWatched) return notWatched;
         if (automatic && !AutomaticMergeCheckEligible(pr))
         {
             ApplyMergeCheckState(pr);
@@ -176,7 +187,14 @@ public sealed partial class PrService
         // Do not retry a write inside HttpClient: the next refresh revalidates
         // active/in-flight state before an explicit, observable retry.
         var mergeOptions = cur["mergeOptions"]?.DeepClone() ?? new JsonObject();
-        var result = await _ado.PatchOnceAsync(PrApi(pr), new JsonObject { ["mergeOptions"] = mergeOptions });
+        JsonNode result;
+        try
+        {
+            // The send can wait for a throttle slot and token; recheck the watch list just before it goes out.
+            result = await _ado.PatchOnceAsync(PrApi(pr), new JsonObject { ["mergeOptions"] = mergeOptions },
+                automatic ? () => { MarkWatched([pr]); return pr.IsMine || pr.IsWatched; } : null);
+        }
+        catch (AdoRequestSkippedException) { return notWatched; }
         ReadMergeFields(pr, result);
         var check = CheckFor(pr);
         check.RequestedAt = _time.GetUtcNow();

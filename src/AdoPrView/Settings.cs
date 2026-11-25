@@ -72,6 +72,7 @@ public sealed class AppSettings
     public string Theme { get => _theme; set => _theme = value == "github" ? "light" : value; }
     public List<RepoRef> Repos { get; set; } = new();
     public List<string> Whitelist { get; set; } = new();
+    public string? Scope { get; set; }   // all|mine|watched; null = all
     public List<string> Hidden { get; set; } = new();   // "{repoId}:{prId}"
     public int RefreshSeconds { get; set; } = 120;
     public int MergeCheckMinutes { get; set; } = 10;
@@ -135,6 +136,10 @@ public sealed class SettingsStore
             // Older versions used Notifications for both tray behavior and the chime.
             if (!document.RootElement.EnumerateObject().Any(p => p.Name.Equals("sound", StringComparison.OrdinalIgnoreCase)))
                 settings.Sound = settings.Notifications;
+            // Older versions' "All" showed only mine plus watched authors; keep that view for existing watch lists.
+            if (settings.Whitelist.Count > 0 &&
+                !document.RootElement.EnumerateObject().Any(p => p.Name.Equals("scope", StringComparison.OrdinalIgnoreCase)))
+                settings.Scope = "watched";
             return settings;
         }
         catch (JsonException ex)
