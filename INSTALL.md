@@ -49,7 +49,8 @@ unconditional unattended authentication.
   code-signed, so SmartScreen may warn. Do not invent a release URL or app
   command-line flags; the app's only flags are developer `--mock`,
   `--screenshot`, `--size`, `--eval` and `--eval-wait`, none of which are for
-  installation.
+  installation. The installer's `/UPDATE` switch is used internally by the
+  in-app updater; do not pass it yourself.
 - Do not read, copy, import or decrypt any credential or token file as part of
   setup.
 

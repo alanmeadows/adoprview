@@ -12,7 +12,7 @@ public sealed class Bridge(PrService prs, SettingsStore store, Func<string, Task
     Func<string, Task<object>>? popAction = null, Func<string, JsonObject, Task<object>>? explainAction = null,
     Action<string>? themeChanged = null, Func<string, JsonObject, Task<object>>? videoAction = null,
     Func<string, JsonObject, Task<object>>? investigationAction = null, Action<string>? openBrowser = null,
-    Action<long>? copilotAcknowledged = null)
+    Action<long>? copilotAcknowledged = null, Func<string, JsonObject, Task<object>>? updateAction = null)
 {
     public static readonly JsonSerializerOptions Json = new(JsonSerializerDefaults.Web)
     {
@@ -27,6 +27,7 @@ public sealed class Bridge(PrService prs, SettingsStore store, Func<string, Task
     public Task PushExplanationAsync(object state) => post(JsonSerializer.Serialize(new { @event = "explanation", data = state }, Json));
     public Task PushInvestigationAsync(object state) => post(JsonSerializer.Serialize(new { @event = "investigation", data = state }, Json));
     public Task PushVideoAsync(object state) => post(JsonSerializer.Serialize(new { @event = "prVideo", data = state }, Json));
+    public Task PushUpdateAsync(object state) => post(JsonSerializer.Serialize(new { @event = "update", data = state }, Json));
     public Task PushSpeechSetupAsync(int epoch, string message) => post(JsonSerializer.Serialize(new
         { @event = "speechSetupProgress", data = new { epoch, message } }, Json));
 
@@ -68,6 +69,7 @@ public sealed class Bridge(PrService prs, SettingsStore store, Func<string, Task
                     explanations = explainAction is null ? Array.Empty<object>() : await explainAction("listExplanations", p),
                     investigations = investigationAction is null ? Array.Empty<object>() : await investigationAction("listInvestigations", p),
                     videos = videoAction is null ? Array.Empty<object>() : await videoAction("listVideos", p),
+                    update = updateAction is null ? null : await updateAction("updateState", p),
                     settings = store.Current, snapshot = prs.Current,
                     version = typeof(Bridge).Assembly.GetName().Version?.ToString(3) };
             case "refresh":
@@ -152,6 +154,10 @@ public sealed class Bridge(PrService prs, SettingsStore store, Func<string, Task
             case "cancelSpeechSetup":
                 if (videoAction is null) throw new InvalidOperationException("The native PR video service is unavailable.");
                 return await videoAction(method, p);
+            case "checkForUpdate":
+            case "installUpdate":
+                if (updateAction is null) throw new InvalidOperationException("Updates are unavailable.");
+                return await updateAction(method, p);
             case "hide":
             case "unhide":
                 var key = Str(p, "key");
@@ -165,7 +171,12 @@ public sealed class Bridge(PrService prs, SettingsStore store, Func<string, Task
             case "addRepo":
                 var repo = RepoRef.Parse(Str(p, "url")) ?? throw new ArgumentException("Not an Azure DevOps repository URL (expected …/{project}/_git/{repo})");
                 if (store.Current.Repos.Any(r => r.Key == repo.Key)) throw new ArgumentException($"{repo.Repo} is already added");
-                store.Update(s => s.Repos.Add(repo));
+                repo = await prs.ValidateRepoAsync(repo);
+                store.Update(s =>
+                {
+                    if (s.Repos.Any(r => r.Key == repo.Key)) throw new ArgumentException($"{repo.Repo} is already added");
+                    s.Repos.Add(repo);
+                });
                 kickRefresh(false);
                 return store.Current;
             case "addRepos":

@@ -178,7 +178,7 @@ Fixes AB#1234`;
     async rpc(method, p) {
       await new Promise((r) => setTimeout(r, 150));
       switch (method) {
-        case 'init': return { settings, snapshot, runs: [...runs.values()], explanations: [...explanations.values()], investigations: [...investigations.values()], videos: [...videos.values()], version: 'mock' };
+        case 'init': return { settings, snapshot, runs: [...runs.values()], explanations: [...explanations.values()], investigations: [...investigations.values()], videos: [...videos.values()], version: 'mock', update: null };
         case 'askPr': {
           if (!prs.some(x => x.key === p.key)) throw new Error('Mock PR not found.');
           const previous = investigations.get(p.key);
@@ -330,6 +330,8 @@ Fixes AB#1234`;
           if (!['all', 'mine', 'watched'].includes(p.scope)) throw new Error('Choose All, Mine or Mine + watched.');
           settings.scope = p.scope;
           return settings;
+        case 'checkForUpdate': return { current: '0.0.0-mock', latest: '0.0.0-mock', available: false, canInstall: false, releaseUrl: null, checkedAt: new Date().toISOString(), error: null };
+        case 'installUpdate': throw new Error('Mock mode never downloads or installs updates.');
         case 'discoverRepos': return [{ org, project, repo: 'sample-tools' }];
         case 'addRepo': case 'addRepos': case 'removeRepo': return settings;
         case 'autoComplete': {

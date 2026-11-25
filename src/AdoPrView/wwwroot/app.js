@@ -39,6 +39,8 @@ function onHostMessage(m) {
     try { updateInvestigation(m.data); } catch (e) { toast(e.message || String(e), 'error'); }
   } else if (m.event === 'prVideo') {
     try { updateVideo(m.data); } catch (e) { toast(e.message || String(e), 'error'); }
+  } else if (m.event === 'update') {
+    setUpdate(m.data);
   } else if (m.event === 'speechSetupProgress' && S.speechSetup?.busy && m.data?.epoch === S.speechEpoch) {
     S.speechSetup.progress = m.data.message; renderSpeechSetup();
   }
@@ -75,6 +77,7 @@ const S = {
   hideUndoBusy: false,
   approvalSettings: null,
   approvalSettingsBusy: false,
+  repoAddBusy: false,
   runs: new Map(),
   runOutputs: new Map(),
   explanations: new Map(),
@@ -92,6 +95,11 @@ const S = {
   drawerEpoch: 0,
   themeBusy: false,
   discovered: null,
+  version: null,
+  update: null,
+  updateBusy: false,      // false | 'check' | 'install'
+  updateAnnounced: null,
+  updateToast: null,
 };
 
 const LANES = {
@@ -165,19 +173,74 @@ function initials(name) {
 function hue(s) { let h = 0; for (const c of String(s)) h = (h * 31 + c.charCodeAt(0)) % 360; return h; }
 const avatar = (name) => `<span class="avatar" style="background:hsl(${hue(name)} 70% 70%)" title="${esc(name)}">${esc(initials(name))}</span>`;
 
-function toast(text, kind = 'ok', action) {
+function toast(text, kind = 'ok', action, sticky = false) {
   const el = document.createElement('div');
   el.className = `toast ${kind}`;
   el.innerHTML = `<span class="ic"></span><span class="grow">${esc(text)}</span>`;
-  if (action) {
+  for (const a of [action, sticky && { label: 'Dismiss', run: () => {} }]) {
+    if (!a) continue;
     const b = document.createElement('button');
-    b.textContent = action.label;
-    b.onclick = () => { action.run(); el.remove(); };
+    b.textContent = a.label;
+    b.onclick = () => { a.run(); el.remove(); };
     if (S.drawer) { S.drawerInert.set(b, b.inert); b.inert = true; }
     el.appendChild(b);
   }
   $('#toasts').appendChild(el);
-  setTimeout(() => el.remove(), kind === 'error' ? 9000 : 5000);
+  if (!sticky) setTimeout(() => el.remove(), kind === 'error' ? 9000 : 5000);
+  return el;
+}
+
+function setUpdate(state) {
+  S.update = state;
+  // A notice is tied to the version and install path it offered; replace it if a later check changes either.
+  const key = state?.available ? `${state.latest}|${state.canInstall}` : null;
+  if (key !== S.updateAnnounced) {
+    S.updateToast?.remove(); S.updateToast = null;
+    S.updateAnnounced = key;
+    if (key) S.updateToast = toast(`ADO PR View v${state.latest} is available (you have v${state.current}). Upgrade to get the latest version.`, 'info',
+      state.canInstall ? { label: 'Upgrade', run: () => void installUpdate() }
+        : state.releaseUrl ? { label: 'View release', run: () => void openRelease() } : null, true);
+  }
+  if (S.drawer) renderDrawer();
+}
+
+async function checkForUpdate() {
+  if (S.updateBusy) return;
+  S.updateBusy = 'check'; if (S.drawer) renderDrawer();
+  try { setUpdate(await rpc('checkForUpdate')); }
+  catch (e) { toast(e.message || String(e), 'error'); }
+  finally { S.updateBusy = false; if (S.drawer) renderDrawer(); }
+}
+
+async function installUpdate() {
+  const u = S.update;
+  if (!u?.canInstall || S.updateBusy) return;
+  if (!confirm(`ADO PR View will close, install v${u.latest} from GitHub, and reopen. Running Copilot tasks keep going and reconnect when it reopens. Continue?`)) return;
+  S.updateBusy = 'install'; if (S.drawer) renderDrawer();
+  toast(`Downloading v${u.latest} from GitHub…`, 'info');
+  try { await rpc('installUpdate'); }
+  catch (e) { toast(e.message || String(e), 'error'); }
+  finally { S.updateBusy = false; if (S.drawer) renderDrawer(); }
+}
+
+function openRelease() {
+  if (S.update?.releaseUrl) rpc('openUrl', { url: S.update.releaseUrl }).catch(e => toast(e.message || String(e), 'error'));
+}
+
+function updateSection() {
+  const u = S.update, busy = S.updateBusy;
+  const status = busy === 'check' ? 'Checking for updates…' : busy === 'install' ? `Downloading v${u.latest} from GitHub…`
+    : u?.error ? u.error : u?.available ? `v${u.latest} is available.`
+    : u?.checkedAt ? `You're up to date (checked ${new Date(u.checkedAt).toLocaleString()}).` : 'Not checked yet.';
+  return `<div class="section">
+      <h4>Updates</h4>
+      <p class="help">Version ${esc(u?.current || S.version || 'unknown')}</p>
+      <p class="help${u?.error && !busy ? ' error' : ''}" id="updateStatus">${esc(status)}</p>
+      ${u?.available && !u.canInstall ? '<p class="help">This copy isn\'t the installed app, so upgrade it manually.</p>' : ''}
+      <div class="field"><button class="btn" data-dact="checkUpdate" ${busy ? 'disabled' : ''}>${svg('refresh')} Check for updates</button>
+        ${!u?.available ? '' : u.canInstall ? `<button class="btn primary" data-dact="installUpdate" ${busy ? 'disabled' : ''}>Upgrade to v${esc(u.latest)}</button>`
+          : u.releaseUrl ? `<button class="btn" data-dact="openRelease">${svg('ext')} Open release page</button>` : ''}</div>
+    </div>`;
 }
 
 const findPr = (key) => S.snap.prs.find((p) => p.key === key);
@@ -1943,6 +2006,7 @@ function renderDrawer() {
         ${[['light', 'Light Mode'], ['dark', 'Dark Mode']].map(([value, label]) => `<option value="${value}" ${AppTheme.effective(st.theme) === value ? 'selected' : ''}>${label}</option>`).join('')}
       </select></div>
     </div>
+    ${updateSection()}
     <div class="section"><h4>TikTok narration</h4>
       <p class="help">${st.videoSpeech ? `Azure Speech / ${esc(st.videoSpeech.region)} / ${esc(st.videoSpeech.voice)}` : 'Choose an Azure Speech resource on your first video. Azure CLI (az) and az login are required.'}</p>
       <button class="btn" data-dact="speechSetup">Choose Azure Speech resource / voice</button></div>
@@ -1958,7 +2022,7 @@ function renderDrawer() {
       <p class="help">Paste any Azure DevOps repository URL (dev.azure.com or *.visualstudio.com).</p>
       <div class="items">${st.repos.map((r) => `<div class="item"><div class="grow"><div><b>${esc(r.repo)}</b></div><div class="small">${esc(r.org)} / ${esc(r.project)}</div></div>
         <button class="x" data-dact="removeRepo" data-key="${esc(repoKey(r))}" title="Remove">${svg('x')}</button></div>`).join('') || '<div class="small">None yet.</div>'}</div>
-      <div class="field"><input type="text" id="repoUrl" placeholder="https://dev.azure.com/org/project/_git/repo" /><button class="btn primary" data-dact="addRepo">${svg('plus')} Add</button></div>
+      <div class="field"><input type="text" id="repoUrl" placeholder="https://dev.azure.com/org/project/_git/repo" /><button class="btn primary" data-dact="addRepo" ${S.repoAddBusy ? 'disabled' : ''}>${svg('plus')} ${S.repoAddBusy ? 'Checking…' : 'Add'}</button></div>
       <div class="field"><button class="btn" data-dact="discover">${svg('search')} Discover repos where I have PRs</button></div>
       ${disc === 'loading' ? '<div class="small" style="margin-top:8px">Searching…</div>' : ''}
       ${Array.isArray(disc) ? (disc.length ? `<div class="items">${disc.map((r, i) => `<div class="item"><div class="grow"><div><b>${esc(r.repo)}</b></div><div class="small">${esc(r.org)} / ${esc(r.project)}</div></div>
@@ -2085,6 +2149,9 @@ async function changeTheme(select) {
 
 async function onDrawerAction(act, el) {
   if (act === 'speechSetup') { closeDrawer(); await openSpeechSetup(); return; }
+  if (act === 'checkUpdate') { await checkForUpdate(); return; }
+  if (act === 'installUpdate') { await installUpdate(); return; }
+  if (act === 'openRelease') { openRelease(); return; }
   if (act === 'approvalSettingsAction') {
     if (S.approvalSettingsBusy) return;
     S.approvalSettingsBusy = true; renderDrawer();
@@ -2100,12 +2167,16 @@ async function onDrawerAction(act, el) {
   try {
     switch (act) {
       case 'addRepo': {
+        if (S.repoAddBusy) return;
         const value = $('#repoUrl').value, epoch = S.drawerEpoch;
         const url = value.trim();
         if (!url) return;
-        S.settings = await rpc('addRepo', { url });
-        clearSubmittedDrawerInput('repoUrl', value, epoch);
-        toast('Repository added — refreshing');
+        S.repoAddBusy = true; renderDrawer();
+        try {
+          S.settings = await rpc('addRepo', { url });
+          clearSubmittedDrawerInput('repoUrl', value, epoch);
+          toast('Repository added — refreshing');
+        } finally { S.repoAddBusy = false; }
         break;
       }
       case 'removeRepo':
@@ -2162,7 +2233,7 @@ async function onDrawerAction(act, el) {
       }
     }
   } catch (e) {
-    if (S.discovered === 'loading') S.discovered = null;
+    if (act === 'discover' && S.discovered === 'loading') S.discovered = null;
     toast(e.message || String(e), 'error');
   }
   render();
@@ -2328,6 +2399,7 @@ async function boot() {
   const init = await rpc('init');
   S.settings = init.settings;
   if (SCOPES.includes(S.settings.scope)) S.scope = S.settings.scope;
+  S.version = init.version;
   applySavedTheme();
   if (S.settings.theme != null && !AppTheme.supported.includes(S.settings.theme))
     toast('The saved theme is not supported by this version. Showing Light Mode without changing your preference.', 'info');
@@ -2337,6 +2409,7 @@ async function boot() {
   for (const video of init.videos || []) updateVideo(video);
   setSnapshot(init.snapshot);
   render();
+  if (init.update) setUpdate(init.update);
   window.chrome?.webview?.postMessage('ready');
   if (params.has('expand')) {
     const n = +params.get('expand') || 1;

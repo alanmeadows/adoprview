@@ -65,6 +65,30 @@ static class NativeActionTests
             }
             finally { Directory.Delete(directory, recursive: true); }
         });
+        await test("Native update bridge routes init state, manual check and install to the update action", async () =>
+        {
+            var directory = Path.Combine(Path.GetTempPath(), "ado-action-" + Guid.NewGuid().ToString("N"));
+            Directory.CreateDirectory(directory);
+            try
+            {
+                var store = new SettingsStore(Path.Combine(directory, "settings.json"));
+                var prs = new PrService(new AdoClient(), store);
+                var replies = new List<string>();
+                var actions = new List<string>();
+                var bridge = new Bridge(prs, store, text => { replies.Add(text); return Task.CompletedTask; }, _ => { },
+                    updateAction: (action, _) => { actions.Add(action); return Task.FromResult<object>(new { action }); });
+                foreach (var method in new[] { "init", "checkForUpdate", "installUpdate" })
+                    await bridge.HandleAsync($$"""{"id":1,"method":"{{method}}"}""");
+                Check(actions.SequenceEqual(["updateState", "checkForUpdate", "installUpdate"]) &&
+                    JsonNode.Parse(replies[0])!["result"]!["update"]!["action"]!.GetValue<string>() == "updateState" &&
+                    JsonNode.Parse(replies[2])!["result"]!["action"]!.GetValue<string>() == "installUpdate", "Update RPCs were not routed");
+                replies.Clear();
+                await new Bridge(prs, store, text => { replies.Add(text); return Task.CompletedTask; }, _ => { })
+                    .HandleAsync("""{"id":2,"method":"installUpdate"}""");
+                Check(JsonNode.Parse(replies.Single())!["error"]!.GetValue<string>() == "Updates are unavailable.", "Missing update action was not an RPC error");
+            }
+            finally { Directory.Delete(directory, recursive: true); }
+        });
         await test("Native init reads the latest whole snapshot after asynchronous run lists and serializes publication revisions", async () =>
         {
             var directory = Path.Combine(Path.GetTempPath(), "ado-action-" + Guid.NewGuid().ToString("N"));
