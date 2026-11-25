@@ -75,6 +75,7 @@ const S = {
   hideUndoBusy: false,
   approvalSettings: null,
   approvalSettingsBusy: false,
+  repoAddBusy: false,
   runs: new Map(),
   runOutputs: new Map(),
   explanations: new Map(),
@@ -1952,7 +1953,7 @@ function renderDrawer() {
       <p class="help">Paste any Azure DevOps repository URL (dev.azure.com or *.visualstudio.com).</p>
       <div class="items">${st.repos.map((r) => `<div class="item"><div class="grow"><div><b>${esc(r.repo)}</b></div><div class="small">${esc(r.org)} / ${esc(r.project)}</div></div>
         <button class="x" data-dact="removeRepo" data-key="${esc(repoKey(r))}" title="Remove">${svg('x')}</button></div>`).join('') || '<div class="small">None yet.</div>'}</div>
-      <div class="field"><input type="text" id="repoUrl" placeholder="https://dev.azure.com/org/project/_git/repo" /><button class="btn primary" data-dact="addRepo">${svg('plus')} Add</button></div>
+      <div class="field"><input type="text" id="repoUrl" placeholder="https://dev.azure.com/org/project/_git/repo" /><button class="btn primary" data-dact="addRepo" ${S.repoAddBusy ? 'disabled' : ''}>${svg('plus')} ${S.repoAddBusy ? 'Checking…' : 'Add'}</button></div>
       <div class="field"><button class="btn" data-dact="discover">${svg('search')} Discover repos where I have PRs</button></div>
       ${disc === 'loading' ? '<div class="small" style="margin-top:8px">Searching…</div>' : ''}
       ${Array.isArray(disc) ? (disc.length ? `<div class="items">${disc.map((r, i) => `<div class="item"><div class="grow"><div><b>${esc(r.repo)}</b></div><div class="small">${esc(r.org)} / ${esc(r.project)}</div></div>
@@ -2094,12 +2095,16 @@ async function onDrawerAction(act, el) {
   try {
     switch (act) {
       case 'addRepo': {
+        if (S.repoAddBusy) return;
         const value = $('#repoUrl').value, epoch = S.drawerEpoch;
         const url = value.trim();
         if (!url) return;
-        S.settings = await rpc('addRepo', { url });
-        clearSubmittedDrawerInput('repoUrl', value, epoch);
-        toast('Repository added — refreshing');
+        S.repoAddBusy = true; renderDrawer();
+        try {
+          S.settings = await rpc('addRepo', { url });
+          clearSubmittedDrawerInput('repoUrl', value, epoch);
+          toast('Repository added — refreshing');
+        } finally { S.repoAddBusy = false; }
         break;
       }
       case 'removeRepo':
@@ -2156,7 +2161,7 @@ async function onDrawerAction(act, el) {
       }
     }
   } catch (e) {
-    if (S.discovered === 'loading') S.discovered = null;
+    if (act === 'discover' && S.discovered === 'loading') S.discovered = null;
     toast(e.message || String(e), 'error');
   }
   render();

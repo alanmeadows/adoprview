@@ -946,6 +946,50 @@ public sealed partial class PrService
         return found.Values.OrderBy(r => r.Repo).ToList();
     }
 
+    public async Task<RepoRef> ValidateRepoAsync(RepoRef r, CancellationToken ct = default)
+    {
+        JsonNode j;
+        try
+        {
+            j = await _ado.GetAsync($"{Api(r.Org, r.Project)}git/repositories/{Esc(r.Repo)}?api-version=7.1", ct);
+        }
+        catch (AdoException ex)
+        {
+            throw new InvalidOperationException(ex.Status switch
+            {
+                System.Net.HttpStatusCode.NotFound => $"Repository '{r.Repo}' was not found in {r.Org}/{r.Project}, or you don't have access to it.",
+                System.Net.HttpStatusCode.Unauthorized or System.Net.HttpStatusCode.NonAuthoritativeInformation or
+                System.Net.HttpStatusCode.Found or System.Net.HttpStatusCode.Redirect or System.Net.HttpStatusCode.MovedPermanently or
+                System.Net.HttpStatusCode.TemporaryRedirect or System.Net.HttpStatusCode.PermanentRedirect =>
+                    $"Azure DevOps rejected the credentials for {r.Org}. Check your configured PAT, or run 'az login' with an account that can access it, then try again.",
+                System.Net.HttpStatusCode.Forbidden => $"You don't have permission to read repository '{r.Repo}' in {r.Org}/{r.Project}.",
+                _ => $"Could not validate repository '{r.Repo}': {ex.Message}",
+            }, ex);
+        }
+        catch (System.Net.Http.HttpRequestException ex)
+        {
+            throw new InvalidOperationException($"Could not reach Azure DevOps to validate repository '{r.Repo}'. Check your connection and try again.", ex);
+        }
+        catch (OperationCanceledException ex) when (!ct.IsCancellationRequested)
+        {
+            throw new InvalidOperationException($"Timed out contacting Azure DevOps to validate repository '{r.Repo}'. Check your connection and try again.", ex);
+        }
+        var id = S(j["id"]);
+        if (string.IsNullOrWhiteSpace(id))
+            throw new InvalidOperationException($"Azure DevOps did not return repository '{r.Repo}' in {r.Org}/{r.Project}. Check the URL and try again.");
+        var name = S(j["name"]);
+        var project = S(j["project"]?["name"]);
+        var projectId = S(j["project"]?["id"]);
+        return new RepoRef
+        {
+            Org = r.Org,
+            Project = string.IsNullOrWhiteSpace(project) ? r.Project : project,
+            Repo = string.IsNullOrWhiteSpace(name) ? r.Repo : name,
+            RepoId = id,
+            ProjectId = string.IsNullOrWhiteSpace(projectId) ? null : projectId,
+        };
+    }
+
     // ---------------------------------------------------------------- triage
 
     internal async Task<ExplainContext> GetExplainContextAsync(string key, CancellationToken ct)

@@ -160,7 +160,12 @@ public sealed class Bridge(PrService prs, SettingsStore store, Func<string, Task
             case "addRepo":
                 var repo = RepoRef.Parse(Str(p, "url")) ?? throw new ArgumentException("Not an Azure DevOps repository URL (expected …/{project}/_git/{repo})");
                 if (store.Current.Repos.Any(r => r.Key == repo.Key)) throw new ArgumentException($"{repo.Repo} is already added");
-                store.Update(s => s.Repos.Add(repo));
+                repo = await prs.ValidateRepoAsync(repo);
+                store.Update(s =>
+                {
+                    if (s.Repos.Any(r => r.Key == repo.Key)) throw new ArgumentException($"{repo.Repo} is already added");
+                    s.Repos.Add(repo);
+                });
                 kickRefresh(false);
                 return store.Current;
             case "addRepos":

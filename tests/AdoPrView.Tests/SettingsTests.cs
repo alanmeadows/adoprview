@@ -285,6 +285,49 @@ static class SettingsTests
                 catch (SettingsLoadException ex) { Check(ex.Message.Contains("not changed"), "Failure does not say the file was preserved"); }
                 Check(File.ReadAllBytes(path).AsSpan().SequenceEqual(before) && Directory.GetFiles(dir).Length == 1, "Malformed settings were modified");
             }));
+        await test("addRepo validates the repository with Azure DevOps and stores canonical names and ids", () => InDir(dir =>
+        {
+            var store = new SettingsStore(Path.Combine(dir, "settings.json"));
+            string? url = null;
+            using var http = new HttpClient(new FakeHandler(req =>
+            {
+                url = req.RequestUri!.AbsoluteUri;
+                return Task.FromResult(new HttpResponseMessage(System.Net.HttpStatusCode.OK) { Content = new StringContent(
+                    """{"id":"repo-1","name":"Widgets","project":{"id":"proj-1","name":"Fabrikam"}}""") });
+            }));
+            var service = new PrService(new AdoClient(http, _ => Task.FromResult(new AuthenticationHeaderValue("Bearer", "offline"))), store);
+            string? reply = null;
+            var kicks = 0;
+            var bridge = new Bridge(service, store, text => { reply = text; return Task.CompletedTask; }, _ => kicks++);
+            bridge.HandleAsync("""{"id":1,"method":"addRepo","params":{"url":"https://dev.azure.com/contoso/fabrikam/_git/widgets"}}""").GetAwaiter().GetResult();
+            Check(reply is not null && !reply.Contains("\"error\""), "Valid repository add failed: " + reply);
+            Check(url == "https://dev.azure.com/contoso/fabrikam/_apis/git/repositories/widgets?api-version=7.1", "Unexpected validation URL " + url);
+            var added = new SettingsStore(Path.Combine(dir, "settings.json")).Current.Repos.Single();
+            Check(added is { Org: "contoso", Project: "Fabrikam", Repo: "Widgets", RepoId: "repo-1", ProjectId: "proj-1" } && kicks == 1,
+                "Validated repository was not stored with canonical names and ids");
+        }));
+        foreach (var (name, respond, expected) in new (string, Func<HttpResponseMessage>, string)[]
+        {
+            ("404", () => new(System.Net.HttpStatusCode.NotFound) { Content = new StringContent("""{"message":"TF401019"}""") }, "or you don't have access to it"),
+            ("401", () => new(System.Net.HttpStatusCode.Unauthorized), "Check your configured PAT, or run 'az login'"),
+            ("empty success", () => new(System.Net.HttpStatusCode.OK) { Content = new StringContent("{}") }, "Azure DevOps did not return repository 'widgets'"),
+            ("network", () => throw new HttpRequestException("offline"), "Could not reach Azure DevOps to validate repository 'widgets'"),
+            ("timeout", () => throw new TaskCanceledException("timeout"), "Timed out contacting Azure DevOps to validate repository 'widgets'"),
+        })
+            await test($"addRepo rejects a repository that cannot be validated: {name}", () => InDir(dir =>
+            {
+                var path = Path.Combine(dir, "settings.json");
+                var store = new SettingsStore(path);
+                using var http = new HttpClient(new FakeHandler(_ => Task.FromResult(respond())));
+                var service = new PrService(new AdoClient(http, _ => Task.FromResult(new AuthenticationHeaderValue("Bearer", "offline"))), store);
+                string? reply = null;
+                var kicks = 0;
+                var bridge = new Bridge(service, store, text => { reply = text; return Task.CompletedTask; }, _ => kicks++);
+                bridge.HandleAsync("""{"id":1,"method":"addRepo","params":{"url":"https://dev.azure.com/contoso/Fabrikam/_git/widgets"}}""").GetAwaiter().GetResult();
+                var error = reply is null ? null : JsonNode.Parse(reply)?["error"]?.GetValue<string>();
+                Check(error is not null && error.Contains(expected), $"Unexpected validation failure: {reply}");
+                Check(store.Current.Repos.Count == 0 && !File.Exists(path) && kicks == 0, "A repository that failed validation was persisted");
+            }));
     }
 
     static Task InDir(Action<string> body)
