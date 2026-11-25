@@ -1479,8 +1479,82 @@ test('real row hit testing and action identity across refreshes', { timeout: 900
     const assertOneStatusScope = layout => {
       assert.equal(layout.scopes.length, 1, 'One Fix PR execution notice per expanded PR');
       assert.deepEqual([layout.scopes[0].inStatus, layout.scopes[0].inRun, layout.scopes[0].visible], [true, false, true]);
-      assert.match(layout.scopes[0].text, /^Fix PR starts in a separate PR worktree with --yolo:.*not a filesystem sandbox.*Exit 0 does not verify the PR fix\.$/s);
+      assert.match(layout.scopes[0].text, /By default, Fix PR asks Copilot in WSL to try to fix merge conflicts, failing checks and review feedback/);
     };
+
+    await t.test('Fix PR plain-language summary and accessible permission details survive panel updates', async () => {
+      await reset();
+      const key = 'sample-service-id:105', root = `#rows [data-key="${key}"]`;
+      await evaluate(`S.expanded.add('${key}');renderRows();`);
+      await move(0, 0); await frame();
+      const state = () => evaluate(`(()=>{
+        const scope=document.querySelector('${root} .run-scope'),button=scope.querySelector('button');
+        const detail=document.getElementById(button.getAttribute('aria-controls'));
+        return {summary:scope.querySelector('.run-summary').textContent,hidden:detail.hidden,
+          expanded:button.getAttribute('aria-expanded'),name:button.getAttribute('aria-label'),
+          associated:button.getAttribute('aria-describedby')===detail.id,details:detail.textContent,
+          visible:detail.getClientRects().length>0};
+      })()`);
+      const info = await state();
+      assert.match(info.summary, /try to fix merge conflicts, failing checks and review feedback/);
+      assert.match(info.summary, /New runs are asked to validate, commit and push fixes back to this PR/);
+      assert.doesNotMatch(info.summary, /--yolo|sandbox|confirmation/);
+      assert.deepEqual([info.hidden, info.expanded, info.visible, info.associated], [true, 'false', false, true]);
+      assert.equal(info.name, 'Fix PR permissions and limitations');
+      for (const text of ['--yolo', 'not globally', 'not a filesystem sandbox', 'prompt instruction, not enforced',
+        'no-approval/policy-bypass', 'earlier runs keep their original no-push scope', 'Sign-in is required',
+        'noninteractive', 'Exit 0 does not verify', 'verify the results'])
+        assert.ok(info.details.includes(text), `Missing boundary: ${text}`);
+
+      const control = await point(key, '.run-info-button');
+      await move(control.x, control.y); await frame();
+      assert.equal((await state()).visible, true, 'Mouse hover reveals details');
+      await keyboard('Escape', 27);
+      assert.equal((await state()).hidden, true, 'Escape dismisses hover content without focusing the icon');
+      await move(0, 0); await move(control.x, control.y); await frame();
+      const detailPoint = await point(key, '.run-info-details');
+      await move(detailPoint.x, detailPoint.y); await frame();
+      assert.equal((await state()).visible, true, 'Pointer can move onto the details to read them');
+      await move(0, 0); await frame();
+      assert.equal((await state()).hidden, true, 'Leaving a transient preview closes it');
+      await evaluate(`document.querySelector('${root} [data-act="copyPrompt"]').focus();`);
+      await keyboard('Tab', 9);
+      assert.equal(await evaluate(`document.activeElement.matches('${root} .run-info-button')`), true);
+      assert.equal((await state()).expanded, 'true', 'Keyboard focus reveals associated details');
+      await keyboard('Escape', 27);
+      assert.equal((await state()).hidden, true);
+      assert.equal(await evaluate(`document.querySelector('${root}').classList.contains('open')`), true,
+        'Dismissing details must not collapse the PR');
+      await keyboard('Enter', 13);
+      await keyboard('Tab', 9);
+      assert.equal((await state()).visible, true, 'Keyboard activation pins details after focus leaves');
+      await click(await point(key, '.run-info-button'));
+      assert.equal((await state()).hidden, true, 'Second activation closes pinned details');
+      await move(0, 0);
+      await evaluate('document.activeElement.blur();');
+      const touch = await point(key, '.run-info-button');
+      await send('Input.dispatchTouchEvent', { type: 'touchStart', touchPoints: [{ x: touch.x, y: touch.y }] });
+      await send('Input.dispatchTouchEvent', { type: 'touchEnd', touchPoints: [] });
+      await frame();
+      assert.equal((await state()).visible, true, 'Touch opens details without hover');
+
+      // Re-rendered PRs get fresh disclosure state; recovered output keeps its captured notice.
+      await evaluate(`{
+        const pr=S.snap.prs.find(p=>p.key==='${key}');
+        S.runs.set('legacy-copy-run',{...pr,runId:'legacy-copy-run',status:'running',
+          message:'Earlier run: no push permitted',output:'Original no-push scope',revision:1});
+        renderRows();
+      }`);
+      await move(0, 0); await evaluate('document.activeElement.blur();'); await frame();
+      assert.equal((await state()).hidden, true, 'Panel replacement resets pinned state');
+      assert.match(await evaluate(`document.querySelector('${root} .run-status').textContent`), /Earlier run: no push permitted/);
+      await evaluate(`updateCopilotRun({...S.runs.get('legacy-copy-run'),status:'completed',revision:2,
+        message:'Earlier run: no push permitted; inspect results',exitCode:0});`);
+      assert.match(await evaluate(`document.querySelector('${root} .run-status').textContent`),
+        /exit 0: Earlier run: no push permitted; inspect results/);
+      assert.equal((await state()).hidden, true);
+      assert.deepEqual((await calls()).filter(c=>c.method==='startCopilot'), [], 'Info never starts a run');
+    });
 
     await t.test('layout hierarchy leads with load errors and failed gates; idle tools and finished runs follow PR context', async () => {
       const key = 'sample-service-id:105';

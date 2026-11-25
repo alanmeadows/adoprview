@@ -560,6 +560,12 @@ starts Copilot in WSL and displays stdout/stderr, status and the actual exit cod
 Copilot or open a separate terminal. **Copy prompt** remains available as an
 alternative. Fix is optional: viewing PRs needs neither WSL nor Copilot.
 
+The Status card briefly explains the default repair scope: merge conflicts,
+failing checks and review feedback. Hover over, focus, or click/tap the small
+**i** control for permissions and limitations; click again or press Escape to
+close it. New runs can be asked to validate, commit and push fixes; earlier runs
+keep their captured scope. Always inspect the output and verify the results.
+
 The generated Fix/Copy prompt is configurable in settings:
 
 - `additionalTriageInstructions` adds optional text at the **end** without

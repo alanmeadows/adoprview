@@ -934,7 +934,19 @@ function syncRunOutput(card) {
 
 const runCardTitle = earlier => earlier ? 'Earlier run · Copilot in WSL' : 'Fix PR · Copilot in WSL';
 // One per PR (beside Fix PR, or atop shelf/ignored-draft runs) so card promotion never hides or duplicates it.
-const runScopeNotice = () => `<p class="small run-scope">Fix PR starts in a separate PR worktree with --yolo: tools, paths and URLs are allowed without confirmation for this run, not globally. This is not a filesystem sandbox. New runs are told to commit validated fixes and ordinary-push them only to this PR's captured source branch; that limit is a prompt instruction, not enforced. Merge/PR-update command denies and the prompt's approval/policy boundaries remain; earlier runs keep their original no-push scope. Sign-in is required beforehand; this panel is noninteractive. Exit 0 does not verify the PR fix.</p>`;
+let runInfoId = 0;
+const runScopeNotice = () => {
+  const id = `run-info-${++runInfoId}`;
+  return `<div class="small run-scope">
+    <p class="run-summary">By default, Fix PR asks Copilot in WSL to try to fix merge conflicts, failing checks and review feedback in a separate working copy. New runs are asked to validate, commit and push fixes back to this PR. Follow progress here, then review the changes and results.
+      <button type="button" class="mini run-info-button" aria-label="Fix PR permissions and limitations" aria-expanded="false" aria-controls="${id}" aria-describedby="${id}">i</button></p>
+    <p id="${id}" class="run-info-details" hidden>Fix PR starts in a separate PR worktree with --yolo: tools, paths and URLs are allowed without confirmation for this run, not globally. This is not a filesystem sandbox. New runs are told to commit validated fixes and ordinary-push them only to this PR's captured source branch; that limit is a prompt instruction, not enforced. Merge/PR-update command denies and the prompt's no-approval/policy-bypass boundaries remain; earlier runs keep their original no-push scope. Sign-in is required beforehand; this panel is noninteractive. Exit 0 does not verify the PR fix or publication. Inspect the run's output and verify the results.</p>
+  </div>`;
+};
+function setRunInfo(scope, open) {
+  $('.run-info-button', scope).setAttribute('aria-expanded', String(open));
+  $('.run-info-details', scope).hidden = !open;
+}
 function renderRunCard(key, r = runForPr(key), earlier = false) {
   return `<div class="card copilot-run${earlier ? ' run-earlier' : ''}" data-run-key="${esc(key)}" data-run-id="${esc(r?.runId || '')}">
     <h3><span class="grow">${runCardTitle(earlier)}</span>
@@ -2277,6 +2289,18 @@ function wire() {
     message.hidden = false;
   }, true);
   document.addEventListener('contextmenu', openRowMenu);
+  for (const type of ['pointerover', 'focusin', 'pointerout', 'focusout']) {
+    document.addEventListener(type, e => {
+      const scope = e.target.closest('.run-scope');
+      if (!scope) return;
+      if (type === 'pointerover' && e.pointerType === 'touch') return;
+      if (type === 'pointerover' || type === 'focusin') {
+        if (e.target.closest('.run-info-button, .run-info-details')) setRunInfo(scope, true);
+      } else if (!scope.contains(e.relatedTarget) && !scope.dataset.pinned &&
+        !scope.matches(':hover') && !scope.contains(document.activeElement))
+        setRunInfo(scope, false);
+    });
+  }
   $('main').addEventListener('scroll', queueIdCues, { capture: true, passive: true });
   window.addEventListener('resize', queueIdCues);
   const rowRegions = [rows, $('#runShelf'), $('#explanationShelf')];
@@ -2306,6 +2330,19 @@ function wire() {
     requestAnimationFrame(flushRowUpdates);
   });
   document.addEventListener('click', (e) => {
+    const info = e.target.closest('.run-info-button');
+    for (const scope of document.querySelectorAll('.run-scope')) {
+      if (scope.contains(e.target)) continue;
+      delete scope.dataset.pinned;
+      setRunInfo(scope, false);
+    }
+    if (info) {
+      const scope = info.closest('.run-scope'), pinned = !scope.dataset.pinned;
+      if (pinned) scope.dataset.pinned = 'true';
+      else delete scope.dataset.pinned;
+      setRunInfo(scope, pinned);
+      return;
+    }
     if (e.target.closest('[data-menu-hide]')) {
       e.preventDefault();
       const selected = S.rowMenu;
@@ -2347,6 +2384,17 @@ function wire() {
     if (e.target.id === 'theme') changeTheme(e.target);
   });
   document.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape') {
+      const open = [...document.querySelectorAll('.run-scope')].filter(scope => !$('.run-info-details', scope).hidden);
+      if (open.length) {
+        e.preventDefault();
+        for (const scope of open) {
+          delete scope.dataset.pinned;
+          setRunInfo(scope, false);
+        }
+        return;
+      }
+    }
     if (S.drawer) {
       if (e.key === 'Escape') { e.preventDefault(); closeDrawer(); }
       else if (e.key === 'Tab') {
