@@ -67,6 +67,7 @@ public sealed class Bridge(PrService prs, SettingsStore store, Func<string, Task
                 return new {
                     runs = copilotAction is null ? Array.Empty<object>() : await copilotAction("listCopilot", p),
                     explanations = explainAction is null ? Array.Empty<object>() : await explainAction("listExplanations", p),
+                    explanationArtifacts = explainAction is null ? Array.Empty<object>() : await explainAction("listExplanationArtifacts", p),
                     investigations = investigationAction is null ? Array.Empty<object>() : await investigationAction("listInvestigations", p),
                     videos = videoAction is null ? Array.Empty<object>() : await videoAction("listVideos", p),
                     update = updateAction is null ? null : await updateAction("updateState", p),

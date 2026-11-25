@@ -20,23 +20,15 @@ a { color: var(--accent2); text-decoration: none; }
 a:hover { text-decoration: underline; }
 ::selection { background: var(--selection); }
 :focus-visible { outline: 2px solid var(--focus-ring); outline-offset: 2px; }
-.investigation-dialog {
-  width: min(1000px, 94vw); max-height: 92vh; overflow: auto; padding: 20px;
-  color: var(--text); background: var(--surface); border: 1px solid var(--border2); border-radius: var(--card-radius);
-}
-.investigation-dialog::backdrop { background: var(--overlay); }
-.investigation-dialog header, .investigation-actions { display: flex; align-items: center; gap: 10px; }
-.investigation-dialog header h2 { flex: 1; margin: 0; font-size: 18px; }
-.investigation-dialog label { display: block; margin-top: 8px; }
-.investigation-dialog textarea {
+.investigation-actions { display: flex; align-items: center; gap: 10px; }
+.assistance-content label { display: block; margin-top: 8px; }
+.assistance-content textarea {
   width: 100%; padding: 10px; resize: vertical; font: inherit; border-radius: var(--radius);
   color: var(--text); background: var(--bg); border: 1px solid var(--control-border);
 }
-.investigation-dialog select { max-width: 100%; }
-.investigation-dialog .small, .investigation-privacy { font-size: 12px; line-height: 1.5; }
-.investigation-dialog pre { white-space: pre-wrap; overflow-wrap: anywhere; font-family: var(--mono); }
-#investigationSource, .investigation-question { white-space: pre-wrap; overflow-wrap: anywhere; }
-#investigationTranscript { max-height: 42vh; overflow: auto; }
+.assistance-content select { max-width: 100%; }
+.assistance-content .small, .investigation-privacy { font-size: 12px; line-height: 1.5; }
+.investigation-question { white-space: pre-wrap; overflow-wrap: anywhere; }
 .investigation-turn { border-top: 1px solid var(--border); padding: 10px 0; }
 .lens-finding { border: 1px solid var(--border); border-radius: var(--radius); padding: 12px; margin: 12px 0; }
 .investigation-actions { flex-wrap: wrap; margin-top: 10px; }
@@ -306,6 +298,24 @@ main { flex: 1; overflow: auto; padding: 0 20px 28px; container-type: inline-siz
 .explain-output > pre { max-width: 100%; }
 .ai-actions, .fix-toolbar { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
 .ai-actions { margin: 8px 0; }
+.assistance-tabs { display: flex; flex-wrap: wrap; gap: 8px; }
+.assistance-tabs [aria-pressed="true"] { border-color: var(--accent2); background: var(--selection); }
+.assistance-context { border-left: 3px solid var(--accent2); padding: 8px 12px; margin: 12px 0; }
+.assistance-notice { border-left: 3px solid var(--border2); padding: 8px 12px; }
+.assistance-video { margin-top: 16px; border-top: 1px solid var(--border); padding-top: 12px; }
+.assistance-video > summary { cursor: pointer; }
+.assistance-content, .assistance-explanation, .investigation-turn { min-width: 0; }
+.assistance-content .investigation-turn { padding-top: 0; border-top: 0; }
+.assistance-content form { margin-top: 12px; }
+.assistance-context > details > .explain-output { max-height: 260px; }
+.reference-context { margin: 8px 0; }
+.reference-output { max-height: 260px; overflow: auto; }
+.reference-output pre { white-space: pre; overflow-wrap: normal; }
+.assistance-post-dialog { width: min(800px, 94vw); max-height: 92vh; overflow: auto; padding: 20px; color: var(--text); background: var(--surface, var(--bg2)); border: 1px solid var(--border2); border-radius: var(--card-radius); }
+.assistance-post-dialog::backdrop { background: var(--overlay); }
+.assistance-post-dialog h2 { font-size: 18px; margin-top: 0; }
+.assistance-post-dialog p, .assistance-post-dialog pre { white-space: pre-wrap; overflow-wrap: anywhere; }
+.assistance-content > label > select { margin-left: 8px; }
 .fix-home { border: 1px solid var(--border2); border-radius: var(--card-radius); padding: 12px; background: var(--surface); gap: 10px; }
 .fix-toolbar strong { flex: 1; }
 .pr-status .blockers { display: flex; flex-wrap: wrap; gap: 4px 20px; }

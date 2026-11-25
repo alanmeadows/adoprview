@@ -404,6 +404,12 @@ function laneVisible(prs) {
 }
 
 function renderRows(whenIdle = false) {
+  const assistanceFocus = document.activeElement?.closest('.explanation') ? {
+    key: document.activeElement.closest('.explanation').dataset.explainKey,
+    role: document.activeElement.dataset.inv,
+    start: document.activeElement.selectionStart, end: document.activeElement.selectionEnd,
+  } : null;
+  for (const card of document.querySelectorAll('.explanation')) rememberAssistancePosition(card.dataset.explainKey);
   const focused = expansionControl(document.activeElement);
   const explainFocus = document.activeElement?.closest('.explanation') ? {
     key: document.activeElement.closest('.explanation').dataset.explainKey,
@@ -421,6 +427,17 @@ function renderRows(whenIdle = false) {
     if (existing && existing !== placeholder) placeholder.replaceWith(existing);
   }
   restoreExpansionFocus(focused);
+  for (const card of document.querySelectorAll('.explanation')) {
+    const key = card.dataset.explainKey, d = assistanceDraft(key);
+    const position = d.positions.get(assistanceSelection(key)?.id || d.selected);
+    const output = card.querySelector('.assistance-content > .assistance-explanation > .explain-output, .assistance-content > .investigation-transcript');
+    if (output && position) { output.scrollTop = position.top; output.scrollLeft = position.left; }
+  }
+  if (assistanceFocus?.role) {
+    const next = assistanceCard(assistanceFocus.key)?.querySelector(`[data-inv="${assistanceFocus.role}"]`);
+    next?.focus({ preventScroll: true });
+    if (typeof assistanceFocus.start === 'number' && next?.setSelectionRange) next.setSelectionRange(assistanceFocus.start, assistanceFocus.end);
+  }
   if (explainFocus?.action === 'cancelExplanation' && !explainFocus.element.isConnected) {
     const card = [...document.querySelectorAll('.explanation')].find(c => c.dataset.explainKey === explainFocus.key);
     const cancel = card && $('[data-act="cancelExplanation"]', card);
@@ -576,23 +593,13 @@ function explanationBody(r) {
 }
 
 function renderExplanation(key) {
-  const r = S.explanations.get(key), active = explanationActive(r);
+  const d = assistanceDraft(key), video = S.videos.get(key);
   return `<div class="card explanation" data-explain-key="${esc(key)}">
-    <h3><span class="grow">AI assistance</span>
-      <button class="mini" data-act="explainPr" ${active || isBusy(key, 'explainPr') || !canExplain(key) ? 'disabled' : ''}>${svg('spark')} ${explanationLabel(r)}</button>
-      <button class="mini" data-act="cancelExplanation" data-request-id="${esc(r?.requestId || '')}" ${active ? '' : 'hidden'} ${r?.status === 'cancelling' ? 'disabled' : ''}>${svg('x')} Cancel</button></h3>
-    <div class="body">
-      <p class="explain-status small${r?.status === 'failed' ? ' error' : ''}" role="status" aria-live="polite">${esc(r?.message || 'A plain-spoken, code-grounded investigation of what improves, architecture, API changes and meaningful risks.')}</p>
-      <p class="ai-actions"><button class="mini" data-act="askPr" ${canExplain(key) ? '' : 'disabled'}>Ask about this PR...</button>
-        <button class="mini" data-act="lensPr" ${canExplain(key) ? '' : 'disabled'}>Focused AI review...</button></p>
-      <div class="explain-output md" tabindex="0" aria-label="PR explanation" ${r?.output ? '' : 'hidden'}>${explanationBody(r)}</div>
-      <details class="explain-details">
-        <summary>Evidence and coverage<span class="explain-notices">${r?.coverage?.length ? ` · ${r.coverage.length} notices` : ''}</span></summary>
-        <p class="small">AI-generated; verify important details against the code. Read-only Copilot context; this does not start Fix PR or change ADO.</p>
-        <p class="explain-revision small">${esc(explanationRevision(r))}</p>
-        <div class="explain-evidence small">${(r?.evidence || []).map(x => `<p>${esc(x)}</p>`).join('')}</div>
-        <div class="explain-coverage small">${(r?.coverage || []).map(x => `<p>${esc(x)}</p>`).join('')}</div>
-      </details>
+    <h3><span class="grow">PR assistance</span><button class="mini" data-assistance-close aria-expanded="${!d.closed}">${d.closed ? 'Reopen assistance' : 'Close assistance'}</button></h3>
+    <div class="body assistance-body" ${d.closed ? 'hidden' : ''}>
+      <div class="assistance-content">${renderAssistanceContent(key)}</div>
+      <details class="assistance-video" ${video ? 'open' : ''}><summary>Alternate output: short video explainer, with cats${videoActive(video) ? ' · generating' : ''}</summary>
+        <p class="small">Separate video generation and voice pipeline; this does not automatically narrate the selected explanation. Its own source revision is shown below.</p>${renderVideo(key)}</details>
     </div></div>`;
 }
 
@@ -604,9 +611,19 @@ function updateExplanation(r) {
   const old = S.explanations.get(r.key);
   if (old && r.sequence <= old.sequence) return;
   S.explanations.set(r.key, r);
+  retainExplanation(r);
+  const d = assistanceDraft(r.key);
+  if (!old || old.requestId !== r.requestId) {
+    if (d.kind === 'explain') d.selected = `explain:${r.requestId}`;
+    renderInvestigation(r.key);
+  } else if (r.status !== old.status) {
+    renderInvestigation(r.key);
+  }
   // Streaming only mutates this panel, preserving neighboring action targets and focus.
   for (const card of document.querySelectorAll('.explanation')) {
     if (card.dataset.explainKey !== r.key) continue;
+    const result = $('.assistance-explanation', card);
+    if (!result || result.dataset.resultRequest !== r.requestId) continue;
     const active = explanationActive(r);
     const status = $('.explain-status', card);
     status.textContent = r.message;
@@ -618,16 +635,17 @@ function updateExplanation(r) {
     output.innerHTML = explanationBody(r);
     if (r.status === 'completed' && old?.status !== 'completed') output.scrollTop = 0;
     else if (bottom) output.scrollTop = output.scrollHeight;
-    $('.explain-coverage', card).innerHTML = r.coverage.map(x => `<p>${esc(x)}</p>`).join('');
-    $('.explain-evidence', card).innerHTML = (r.evidence || []).map(x => `<p>${esc(x)}</p>`).join('');
-    $('.explain-notices', card).textContent = r.coverage.length ? ` · ${r.coverage.length} notices` : '';
     const start = $('[data-act="explainPr"]', card);
-    start.disabled = active || isBusy(r.key, 'explainPr') || !canExplain(r.key);
-    start.innerHTML = `${svg('spark')} ${explanationLabel(r)}`;
+    if (start) {
+      start.disabled = active || isBusy(r.key, 'explainPr') || !canExplain(r.key);
+      start.innerHTML = `${svg('spark')} ${explanationLabel(r)}`;
+    }
     const cancel = $('[data-act="cancelExplanation"]', card);
-    cancel.hidden = !active;
-    cancel.disabled = r.status === 'cancelling';
-    cancel.dataset.requestId = r.requestId;
+    if (cancel) {
+      cancel.hidden = !active;
+      cancel.disabled = r.status === 'cancelling';
+      cancel.dataset.requestId = r.requestId;
+    }
   }
   renderExplanationShelf();
 }
@@ -638,14 +656,17 @@ function explanationIdentity(r) {
     if (p) S.explanationPrs.set(r.key, { id: p.id, repo: p.repo, title: p.title });
   }
   const p = S.explanationPrs.get(r.key) || r.revision;
-  return `Explain for ${p?.repo || r.key}${p?.id ? ` !${p.id}` : ''}${p?.title ? `: ${p.title}` : ''} outside the expanded view`;
+  return `Assistance for ${p?.repo || r.key}${p?.id ? ` !${p.id}` : ''}${p?.title ? `: ${p.title}` : ''} outside the expanded view`;
 }
 
 function renderExplanationShelf() {
   const shelf = $('#explanationShelf');
   if (!shelf) return;
   const inline = new Set([...document.querySelectorAll('#rows .explanation')].map(c => c.dataset.explainKey));
-  const outside = [...S.explanations.values()].filter(r => explanationActive(r) && !inline.has(r.key));
+  const outside = [...new Map([
+    ...[...S.explanations.values()].filter(explanationActive),
+    ...[...S.investigations.values()].filter(r => investigationActive(r) || investigationKey === r.key && !assistanceDraft(r.key).closed),
+  ].map(r => [r.key, r])).values()].filter(r => !inline.has(r.key));
   const missing = new Set(outside.map(r => r.key));
   for (const entry of shelf.querySelectorAll('.explanation-only')) {
     if (missing.has(entry.dataset.key)) missing.delete(entry.dataset.key);
@@ -656,11 +677,9 @@ function renderExplanationShelf() {
     ${renderExplanation(r.key)}</div></div></div>`).join(''));
   for (const card of shelf.querySelectorAll('.explanation')) {
     const key = card.dataset.explainKey;
-    $('.explanation-identity', card.closest('.explanation-only')).textContent = explanationIdentity(S.explanations.get(key));
-    for (const action of ['explainPr', 'askPr', 'lensPr']) {
-      $('[data-act="' + action + '"]', card).disabled = !canExplain(key) ||
-        action === 'explainPr' && (explanationActive(S.explanations.get(key)) || isBusy(key, action));
-    }
+    $('.explanation-identity', card.closest('.explanation-only')).textContent = explanationIdentity(S.explanations.get(key) || S.investigations.get(key));
+    const start = $('[data-act="explainPr"]', card);
+    if (start) start.disabled = !canExplain(key) || explanationActive(S.explanations.get(key)) || isBusy(key, 'explainPr');
   }
 }
 
@@ -1502,7 +1521,7 @@ function renderDetail(p) {
   }
 
   return `<div class="detail" data-run-lead="1"><div class="full stack">${loadError}${status}
-    <section class="stack ai-assistance" aria-label="AI assistance">${renderExplanation(p.key)}${renderVideo(p.key)}</section></div>
+    <section class="stack ai-assistance" aria-label="PR assistance">${renderExplanation(p.key)}</section></div>
     ${fixHome}${full.length ? `<div class="full stack">${full.join('')}</div>` : ''}<div class="stack">${left.join('')}</div><div class="stack">${right.join('')}</div></div>`;
 }
 
@@ -1767,7 +1786,7 @@ async function onAction(act, el, key) {
       S.explanationPrs.set(key, { id: p.id, repo: p.repo, title: p.title });
       S.busy.add(`${key}:${act}`);
       for (const card of document.querySelectorAll('.explanation')) {
-        if (card.dataset.explainKey === key) $('[data-act="explainPr"]', card).disabled = true;
+        if (card.dataset.explainKey === key && $('[data-act="explainPr"]', card)) $('[data-act="explainPr"]', card).disabled = true;
       }
       try { updateExplanation(await rpc('explainPr', { key })); }
       catch (e) { toast(e.message || String(e), 'error'); }
@@ -1775,7 +1794,7 @@ async function onAction(act, el, key) {
         S.busy.delete(`${key}:${act}`);
         const state = S.explanations.get(key);
         for (const card of document.querySelectorAll('.explanation')) {
-          if (card.dataset.explainKey === key) $('[data-act="explainPr"]', card).disabled = explanationActive(state) || !canExplain(key);
+          if (card.dataset.explainKey === key && $('[data-act="explainPr"]', card)) $('[data-act="explainPr"]', card).disabled = explanationActive(state) || !canExplain(key);
         }
       }
       break;
@@ -2457,6 +2476,7 @@ async function boot() {
   if (S.settings.theme != null && !AppTheme.supported.includes(S.settings.theme))
     toast('The saved theme is not supported by this version. Showing Light Mode without changing your preference.', 'info');
   for (const run of init.runs || []) updateCopilotRun(run);
+  for (const artifact of init.explanationArtifacts || []) retainExplanation(artifact);
   for (const explanation of init.explanations || []) updateExplanation(explanation);
   for (const investigation of init.investigations || []) updateInvestigation(investigation);
   for (const video of init.videos || []) updateVideo(video);

@@ -6,6 +6,7 @@ const vm = require('node:vm');
 
 const source = fs.readFileSync(path.join(__dirname, '..', 'src', 'AdoPrView', 'wwwroot', 'app.js'), 'utf8');
 const themeSource = fs.readFileSync(path.join(__dirname, '..', 'src', 'AdoPrView', 'wwwroot', 'theme.js'), 'utf8');
+const investigationSource = fs.readFileSync(path.join(__dirname, '..', 'src', 'AdoPrView', 'wwwroot', 'investigation.js'), 'utf8');
 
 function setup(search = '?mock=1', native = false) {
   const elements = new Map();
@@ -38,7 +39,8 @@ function setup(search = '?mock=1', native = false) {
   });
   vm.runInContext(themeSource, context);
   context.AppTheme = window.AppTheme;
-  vm.runInContext(source + '\nglobalThis.hooks = { S, onHostMessage, onAction, actionButtons, renderDetail, setSnapshot, flushRowUpdates, renderHeader, renderRows, undoHide, baseVisible, updateCopilotRun, renderRunShelf, runForPr, runActive, onDrawerAction, loadApprovalSettings, renderDrawer, renderExplanation, updateExplanation, explanationBody, renderVideo, updateVideo, videoContent, openSpeechSetup, onSpeechAction, closeSpeechSetup, changeTheme, applySavedTheme, loadLog, logKey };', context);
+  vm.runInContext(investigationSource, context);
+  vm.runInContext(source.replace(/^boot\(\)\.catch.*$/m, '') + '\nglobalThis.hooks = { S, onHostMessage, onAction, actionButtons, renderDetail, setSnapshot, flushRowUpdates, renderHeader, renderRows, undoHide, baseVisible, updateCopilotRun, renderRunShelf, runForPr, runActive, onDrawerAction, loadApprovalSettings, renderDrawer, renderExplanation, updateExplanation, explanationBody, renderVideo, updateVideo, videoContent, openSpeechSetup, onSpeechAction, closeSpeechSetup, changeTheme, applySavedTheme, loadLog, logKey };', context);
   const { hooks } = context;
   const pr = {
     key: 'repo:123', id: 123, repo: 'sample-service', title: 'Offline PR',
@@ -67,7 +69,7 @@ test('expanded AI tools precede full diagnostics, Fix has one stable home, and a
     hooks.S.runs.clear();
     if (status) hooks.S.runs.set('one-run', { ...pr, runId: 'one-run', status, output: 'Synthetic output', mayBeRunning: status === 'running' });
     const html = hooks.renderDetail(pr);
-    const order = ['Status</h3>', 'AI assistance</span>', 'Short PR video explainer', 'class="full stack fix-home"', 'Failed synthetic build', '>Description</h3>'];
+    const order = ['Status</h3>', 'PR assistance</span>', 'Alternate output: short video', 'class="full stack fix-home"', 'Failed synthetic build', '>Description</h3>'];
     assert.ok(order.every((text, i) => html.includes(text) && (!i || html.indexOf(text) > html.indexOf(order[i - 1]))), status);
     assert.equal((html.match(/data-act="triage"/g) || []).length, 1);
     assert.equal((html.match(/class="small run-scope"/g) || []).length, 1);
@@ -442,6 +444,7 @@ test('Explain streams only into the captured panel and ignores stale request/seq
   const { hooks, pr, document, element, elements } = setup();
   const nodes = Object.fromEntries(['.explain-status', '.explain-revision', '.explain-output', '.explain-coverage', '.explain-evidence', '.explain-notices',
     '[data-act="explainPr"]', '[data-act="cancelExplanation"]'].map(s => [s, element()]));
+  nodes['.assistance-explanation'] = { dataset: { resultRequest: 'one' } };
   const card = { dataset: { explainKey: pr.key }, querySelector: s => nodes[s] };
   document.querySelectorAll = s => s === '.explanation' ? [card] : [];
   const sentinel = { innerHTML: 'neighbor stays put' };
@@ -453,6 +456,7 @@ test('Explain streams only into the captured panel and ignores stale request/seq
   assert.equal(nodes['[data-act="cancelExplanation"]'].dataset.requestId, 'one');
   assert.equal(nodes['[data-act="explainPr"]'].disabled, true);
   assert.equal(sentinel.innerHTML, 'neighbor stays put');
+  nodes['.assistance-explanation'].dataset.resultRequest = 'new';
   hooks.updateExplanation({ ...state, requestId: 'new', sequence: 8, status: 'completed', output: 'finished' });
   hooks.updateExplanation({ ...state, sequence: 6, output: 'late old response' });
   assert.equal(hooks.S.explanations.get(pr.key).output, 'finished');

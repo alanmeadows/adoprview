@@ -339,7 +339,7 @@ test('real row hit testing and action identity across refreshes', { timeout: 900
         S.rowOrder=[];S.orderRevision=null;S.laneRetained.clear();S.runs.clear();S.runHistoryOpen.clear();S.busy.clear();closeRowMenu();
         window.holdLog=false;S.settings.hidden=['sample-deploy-id:1001'];S.settings.ignoreDrafts=false;S.hideUndo=[];
         window.confirmations=[];window.confirmResult=true;window.autoFailure=false;S.autoCompleteErrors.clear();
-        window.explainSequence=0;S.explanations.clear();S.explanationPrs?.clear();window.videoSequence=0;S.videos.clear();
+        window.explainSequence=0;S.explanations.clear();S.explanationPrs?.clear();explanationArtifacts.clear();investigationDrafts.clear();window.videoSequence=0;S.videos.clear();
         S.settings.videoSpeech={voice:'offline-configured-voice'};
         window.speechMissingAz=false;window.speechDenied=false;window.speechListDenied=false;window.holdSpeechSelection=false;
         window.holdApproval=false;window.approvalFailure=false;S.reviewVotes.clear();
@@ -1530,7 +1530,7 @@ test('real row hit testing and action identity across refreshes', { timeout: 900
         await evaluate(`S.expanded.add('${key}');renderRows();`);
         const fitting = await evaluate(`(()=>{const row=document.querySelector('#rows [data-key="${key}"]'),main=document.querySelector('main');
           main.scrollLeft=0;
-          return [...row.querySelectorAll('.detail [data-act="explainPr"],.detail [data-act="askPr"],.detail [data-act="lensPr"],.detail [data-act="tiktokPr"],.detail [data-act="triage"],.detail [data-act="copyPrompt"]')]
+          return [...row.querySelectorAll('.detail [data-act="explainPr"],.detail [data-assistance-intent],.detail [data-act="triage"],.detail [data-act="copyPrompt"]')]
             .every(el=>{const r=el.getBoundingClientRect();return r.width>0&&r.left>=0&&r.right<=main.clientWidth+main.getBoundingClientRect().left;});})()`);
         assert.equal(fitting, true, 'Primary controls fit width '+width);
         assert.equal(await evaluate(`document.querySelector('#rows [data-key="${key}"] .run-output').hidden`), true, 'No idle log well');
@@ -1650,13 +1650,13 @@ test('real row hit testing and action identity across refreshes', { timeout: 900
         await frame();
         const layout = await layoutCards(key);
         const gate = cardIndex(layout, '✕ Failed gate'), description = cardIndex(layout, 'Description'), status = cardIndex(layout, 'Status');
-        const explain = cardIndex(layout, 'AI assistance'), video = cardIndex(layout, 'Short PR video explainer');
+        const explain = cardIndex(layout, 'PR assistance'), video = cardIndex(layout, 'Short PR video explainer');
         const run = layout.cards.findIndex(c => c.run);
         if (loadError) assert.ok(cardIndex(layout, 'Load error') < status, 'Load error leads the tools');
         assert.ok(status < explain && explain < video && video < run && run < gate && gate < description,
           `Unexpected detail order: ${layout.cards.map(c => c.head).join(' | ')}`);
         assert.ok(layout.cards[run].bottom <= layout.cards[gate].top, 'Completed Fix remains before full logs');
-        assert.ok(layout.cards[explain].bottom <= layout.cards[video].top, 'Video remains adjacent to Explain');
+        assert.equal(await evaluate(`!!document.querySelector('#rows [data-key="${key}"] .explanation > .assistance-body > .assistance-video .pr-video')`), true, 'Video is an alternate output inside assistance, not a peer card');
         assertOneStatusScope(layout);
         if (loadError) {
           assert.equal(await evaluate(`document.querySelector('#rows [data-key="${key}"] .explanation [data-act="explainPr"]').disabled`), true);
@@ -1706,7 +1706,7 @@ test('real row hit testing and action identity across refreshes', { timeout: 900
         const runs = layout.cards.map((c, i) => c.run ? i : -1).filter(i => i >= 0);
         assert.deepEqual(runs.map(i => layout.cards[i].earlier), [false, true]);
         assert.ok(cardIndex(layout, 'Status') < runs[0] && runs[1] < gate && gate < description, 'The live run group follows compact blockers and AI, before full diagnostics');
-        assert.ok(cardIndex(layout, 'AI assistance') < runs[0]);
+        assert.ok(cardIndex(layout, 'PR assistance') < runs[0]);
         assertOneStatusScope(layout);
         assert.equal(await evaluate(`(()=>{const c=document.querySelector('#rows [data-key="${key}"] .copilot-run:not(.run-earlier)');
           return c.dataset.runId==='layout-live-run' && !c.querySelector('[data-act="cancelRun"]').hidden &&

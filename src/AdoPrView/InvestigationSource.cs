@@ -10,6 +10,7 @@ internal interface IInvestigationSource : IAsyncDisposable
     ExplainContext Context { get; }
     string Location { get; }
     string[] Evidence { get; }
+    ReferencePrContext[] References => [];
     Task<string> ReadFileAsync(string path, string side, int startLine, CancellationToken ct);
     Task<string> ListDirectoryAsync(string path, string side, CancellationToken ct);
     void ValidateFinding(LensFinding finding);

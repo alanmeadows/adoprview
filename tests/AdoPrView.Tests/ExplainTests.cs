@@ -444,7 +444,8 @@ static class ExplainTests
             await Throws<InvalidOperationException>(() => Task.FromResult(service.Start("other")));
             await Throws<InvalidOperationException>(() => service.CancelAsync(f.Pr.Key, "stale"));
             var cancelled = await service.CancelAsync(f.Pr.Key, first.RequestId);
-            Check(cancelled.Status == "cancelled" && fake.Cancelled && cancelled.Output == "partial", "Cancellation not acknowledged/partial text lost");
+            Check(cancelled.Status == "cancelled" && fake.Cancelled && cancelled.Output == "partial" && service.Artifacts.Length == 0,
+                "Cancellation not acknowledged/partial text lost, or incomplete Explain became an attachable artifact");
             var again = service.Start(f.Pr.Key);
             Check(again.Sequence > cancelled.Sequence && again.RequestId != first.RequestId, "Restart did not fence old events");
             await service.CancelAsync(f.Pr.Key, again.RequestId);
@@ -456,7 +457,8 @@ static class ExplainTests
             {
                 service.Start("offline");
                 var failed = await Finish(service);
-                Check(failed.Status == "failed" && failed.Message.Contains("ADO denied"), "Capture failure hidden");
+                Check(failed.Status == "failed" && failed.Message.Contains("ADO denied") && service.Artifacts.Length == 0,
+                    "Capture failure hidden or failed Explain became an attachable artifact");
             }
             using var f = new Fixture();
             await using (var service = new ExplainService((_, ct) => f.Capture(ct), new Model((_, _, _) => throw new InvalidOperationException("offline model unavailable"))))
@@ -495,7 +497,7 @@ static class ExplainTests
         });
     }
 
-    static void ArmFixture(Fixture fixture, string path, string? before, string? after, string kind = "edit")
+    internal static void ArmFixture(Fixture fixture, string path, string? before, string? after, string kind = "edit")
     {
         fixture.AdditionalResponse = request =>
         {

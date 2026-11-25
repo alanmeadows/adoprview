@@ -58,7 +58,8 @@ public sealed class MainWindow : Window, IApprovalUi
         (_approval, var approvalError) = ApprovalProviderLoader.Load(_store.Current.ApprovalProvider);
         _prs = new PrService(new AdoClient(), _store, _approval, approvalError);
         _explain = new ExplainService(_prs.GetExplainContextAsync);
-        _investigation = new InvestigationService(_prs.GetInvestigationSourceAsync, _prs.PostLensFindingsAsync);
+        _investigation = new InvestigationService(_prs.GetInvestigationSourceAsync, _prs.PostLensFindingsAsync,
+            resolveExplanation: _explain.Resolve, captureReference: _prs.GetReferencePrContextAsync, resolveExplanationSection: _explain.Resolve);
         _videoRenderer = new VideoRenderer(new AzureSpeechVoice(_speech, () => _store.Current.VideoSpeech), warning: message =>
         {
             _diagnostics.Record("video-cleanup-warning", message);
@@ -342,6 +343,7 @@ public sealed class MainWindow : Window, IApprovalUi
     async Task<object> HandleExplainAsync(string action, JsonObject parameters)
     {
         if (action == "listExplanations") return _explain.States;
+        if (action == "listExplanationArtifacts") return _explain.Artifacts;
         var key = parameters["key"]?.GetValue<string>() ?? throw new ArgumentException("Missing PR key.");
         if (action == "cancelExplanation")
             return await _explain.CancelAsync(key, parameters["requestId"]?.GetValue<string>() ?? throw new ArgumentException("Missing explanation ID."));
@@ -359,7 +361,8 @@ public sealed class MainWindow : Window, IApprovalUi
         return action switch
         {
             "askPr" => _investigation.Ask(key, conversation, p["kind"]?.GetValue<string>() ?? "question",
-                p["question"]?.GetValue<string>() ?? ""),
+                p["question"]?.GetValue<string>() ?? "", p["explanationRequestId"]?.GetValue<string>(),
+                p["explanationSectionIndex"]?.GetValue<int>()),
             "cancelInvestigation" => await _investigation.CancelAsync(key, conversation, request),
             "resetInvestigation" => await _investigation.ResetAsync(key, conversation),
             "postLensFindings" => await _investigation.PostAsync(key, conversation, request,

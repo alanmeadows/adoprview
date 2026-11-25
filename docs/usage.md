@@ -235,8 +235,8 @@ auto-complete, review bot, author, created), the policies and the reviewers with
 their votes. Build policies have **Re-queue** and a link to the build.
 
 Expanded details lead with load errors and a compact Status summary, followed by
-**AI assistance** for Explain, questions, focused private reviews and the short
-video explainer. A stable **Fix with Copilot** area follows: **Fix PR** and
+**PR assistance** for Explain, questions and focused private reviews, with video
+as an alternate output. A stable **Fix with Copilot** area follows: **Fix PR** and
 **Copy prompt** stay beside the run's status, **Cancel run** and output.
 Completion or recovery does not move this area behind other cards.
 Full approval-provider and failed-gate logs follow these primary tools, then the
@@ -360,10 +360,11 @@ PR selection do not reset the authoritative state or move neighboring rows.
 
 ## Explain this PR
 
-Expand a PR and choose **Explain this PR** in **AI assistance**, near the top
-after the compact Status summary and before full diagnostic logs. **Ask about
-this PR...**, **Focused AI review...**, and **Generate video** share this area;
-generation is always deliberate, not automatic. The author-written Description
+Expand a PR and choose **Explain this PR** in **PR assistance**, near the top
+after the compact Status summary and before full diagnostic logs. **Explain**,
+**Ask**, and **Focused review** are explicit intents in this one workspace;
+video is under **Alternate output**. Generation is deliberate, not automatic.
+The author-written Description
 remains separate from the AI explanation. Copilot
 reads the actual changes and surrounding code, then streams a plain-spoken,
 technically deep explanation: what genuinely improves, concrete before/after
@@ -402,7 +403,10 @@ Sign in with the native Windows Copilot CLI beforehand; the app reuses supported
 Copilot authentication, not your ADO token. Missing sign-in, model/access failures
 and ADO errors appear inline. One explanation runs at a time; **Cancel** stops it.
 Partial or failed responses are labeled and must not be treated as completed.
-Results stay in memory until the app exits; **Explain again** starts a fresh session.
+Results stay in memory until the app exits; **Explain again** starts a fresh session
+and a distinct result. **Working result** returns to a retained explanation or
+answer without generating it again. Completed explanations retain their exact
+request and source identity, rather than replacing the meaning of earlier answers.
 After a failure or cancellation, choose **Retry Explain** to start over.
 
 If the PR leaves the snapshot, is filtered or hidden, or its row is collapsed,
@@ -433,12 +437,19 @@ forks and repository paths containing traversal, backslashes, control characters
 
 ## PR questions and lens reviews
 
-The AI assistance area also offers **Ask about this PR...** and
-**Focused AI review...**. Both open the existing conversation popup. Its Request
-selector switches between **Ask a question** and **Focused review · private
-preview**; the action is **Ask** or **Generate private findings**, respectively.
-Explain remains an inline result, not a turn in this conversation. Ask follow-ups in
-ordinary English, or choose a concrete review goal such as "Do these ARM changes
+Choose **Ask about this explanation** on a completed Explain result to discuss
+that exact answer. The composer remains in the same PR assistance workspace and
+shows the attached explanation's identity and revision. The server resolves this
+reference to its completed output, evidence and coverage, verifies compatible
+pinned source, and includes it as untrusted context in subsequent model turns.
+It does not infer shared context from a PR key or silently substitute the latest
+explanation. Missing, cancelled, incomplete or incompatible source attachments
+fail explicitly. **View attached context** shows what the follow-up refers to.
+
+**Ask** can also start directly, without an explanation. **Focused review** changes
+the composer to **Review focus** and a separate reference input; **Generate private
+findings** never posts comments. Keep both inputs within the combined 4,000-character
+limit. Ask follow-ups in ordinary English, or choose a concrete review goal such as "Do these ARM changes
 work with ACI?" A lens review is read-only and scoped to meaningful bugs or
 compatibility failures supported by inspected code. It does not request stylistic
 polish, unrelated best practices, speculative problems or a general security audit.
@@ -453,7 +464,7 @@ The same validated user environment is loaded for each source operation, without
 Fix's WSL Copilot/NVM initialization; questions do not require a WSL Copilot CLI.
 The app fetches the source and target refs into unique private refs and creates
 a detached **no-checkout Git worktree under the Git common metadata directory**.
-It never switches or edits your primary working files. The popup identifies this
+It never switches or edits your primary working files. The workspace identifies this
 worktree honestly: source tools read its pinned Git objects, not a populated
 filesystem checkout. This avoids executing checkout filters, hooks, submodules,
 skills, build steps or other PR-supplied commands. Symlinks are not followed.
@@ -464,7 +475,10 @@ isolated mode without site initialization, so working-directory modules,
 Missing directories (including directories absent before a change) are reported
 as explicit omissions, not verified name listings or errors that block follow-ups.
 Copilot gets only bounded host-controlled source readers, not a shell or arbitrary
-filesystem access. Inference still uses the native Windows Copilot SDK/default
+filesystem access. Explain retains its pinned diff, file-window and directory
+tools; Ask/review retain their pinned Git-object source tools. Providing a reference
+does not enable unrestricted commands or make repository text authoritative instructions.
+Inference still uses the native Windows Copilot SDK/default
 model and native Copilot sign-in, separately from WSL Git authentication; it does
 not reuse Fix's broad-permission WSL model session.
 
@@ -475,15 +489,58 @@ Changes block further answers or posting until **New conversation** captures fre
 revisions. Setup, cancellation and source failures are explicit, with no silent
 remote-only fallback. **PR investigation activity...** reopens an active job even
 after its row is filtered or removed, so its exact cancellation control stays
-reachable. Closing the popup does not cancel the job. The popup survives dashboard
-refreshes and keeps drafts/conversations separate for each PR.
+reachable. Closing **PR assistance** does not cancel the job; **Reopen assistance**
+restores its in-process draft and selected result. Results remain per PR across
+dashboard refreshes. Exact-request cancellation is available during preparation
+and generation, not after a posting request has been dispatched.
+
+Selecting an older review shows a historical result. Only the latest completed
+review is postable; a later completed question makes the old preview read-only
+for posting. Generate updated private findings rather than posting an old answer.
+**Ask/review without this explanation** explicitly clears the attachment; when
+the conversation already exists, it requires a new conversation so retained model
+history does not secretly carry the old explanation.
+
+### Comparing a reference PR
+
+Ask, for example, "Is retry ownership aligned with PR
+https://dev.azure.com/org/project/_git/repo/pullrequest/77?" or put that canonical
+URL in **Reference** for a focused review. The existing authenticated ADO client
+resolves the reference repository and PR even if it is not monitored here, captures
+its separate source/common-base/target revision, and reads its changed text.
+Reference PRs are not posting targets. The result's **Reference PR** disclosure
+names its URL, identity, pinned revisions, inspected diffs, evidence and omissions
+separately from the reviewed target. Additional bounded reference file/directory
+tools let Copilot investigate beyond the captured changes.
+
+Supported URLs are HTTPS canonical
+`dev.azure.com/{org}/{project}/_git/{repo}/pullrequest/{id}` and the corresponding
+`{org}.visualstudio.com` form, including legacy `/DefaultCollection/` paths.
+Legacy URLs are normalized. Supply the canonical PR URL without query strings,
+fragments or userinfo; arbitrary websites, redirects and other URL types are not
+a reference-reading capability. Access denied, missing PRs, unsupported URLs and
+oversized or unreadable reference changes fail explicitly before a comparison
+is accepted. No credentials are sent to a supplied arbitrary host.
+
+At most two reference PRs are retained per conversation. Each is limited to 20
+changed items and a 32,000-character serialized diff package (36,000 characters
+for its initial snapshot). Binary/LFS, folder, missing, truncated or oversized
+reference diffs are rejected rather than treated as inspected evidence. Reference
+file/directory reads retain Explain's bounds below. Reference source and target
+revisions are verified before/after generation and before posting; changes require
+a new conversation. A text quote is user-provided context, not proof that an
+external policy was independently retrieved. All reference/source text remains
+untrusted evidence rather than permission to execute commands or post comments.
 
 Lens findings show the affected path, line and exact inspected source quote.
 Finding bodies and the supplied lens are shown as literal text; comment publication
 escapes Markdown/HTML so image URLs, hidden link targets or markup cannot be posted
 without being visible in the confirmed preview.
 **Nothing is selected or posted automatically.** Select the findings you want,
-choose **Post selected findings to ADO...**, and confirm the exact count and PR.
+choose **Post selected findings to ADO...**, and inspect the exact selected
+comment bodies, count, target PR and revision in the confirmation dialog.
+**Keep private** or Escape cancels without writing and returns focus to the
+posting action; **Confirm selected comments** publishes that selection.
 The host rechecks PR identity and revisions, posts only that selection through
 ADO's thread API, and shows individual confirmed links and posted/failed/uncertain
 counts. Comments include the lens and captured commit IDs. A stable marker
@@ -492,12 +549,26 @@ An uncertain result stays uncertain until checked on ADO, not a fabricated succe
 ADO offers no atomic revision precondition on thread creation, so a change racing
 the final revision check can still make a posted comment refer to older pinned code.
 
-Conversations/results stay in memory until exit. A conversation allows 12 completed
-turns, up to 100,000 serialized prior conversation characters (including findings
-and posting outcomes), 4,000 characters per question,
+Conversations/results stay in memory until exit. Completed Explain registry entries
+are bounded to 12 per PR; already imported contexts remain in that conversation,
+while older unattached results can expire. A conversation allows 12 completed
+turns, up to 100,000 serialized replay characters (including attached explanations,
+reference PR packages, the incoming question, findings and posting outcomes),
+4,000 characters per question and a 32,000-character accepted answer,
 120 local source reads and eight preview findings per lens turn. Local text reads
 are limited to regular tracked files of 80,000 bytes and 120-line/16,000-character
 windows; binary/LFS content is omitted. Shared PR diff limits above still apply.
+If an entire explanation exceeds the serialized budget, **Context package**
+offers server-derived heading sections where available. Choosing one explicitly
+retains its full heading subtree plus the entire host-generated ARM block,
+including Before/After, differences, risks, attribution and original coverage.
+The full explanation remains readable; the accepted answer discloses its actual
+imported package and omitted sections. Estimates exclude JSON/history overhead:
+a selected package may still be too large. Fenced headings, incomplete fences
+and unsectioned text do not become arbitrary substring choices. Changing an
+already imported package requires **New conversation**; a fresh conversation
+cannot fix an explanation or required ARM block that exceeds the budget alone.
+Nothing is silently truncated or answered without the selected context.
 Oversized text windows are reported as omitted without invalidating later source
 reads; select another starting line or file for context.
 Inspected source and unread areas are shown separately. No tests are run by source
@@ -512,8 +583,9 @@ An interrupted app or refused cleanup can leave its worktree registered for insp
 
 ## TikTok This PR
 
-Expand an active, monitored PR and choose **Generate video** in **Short PR video
-explainer, with cats**, beside Explain in the AI assistance area.
+Expand an active, monitored PR and open **Alternate output: short video explainer,
+with cats** inside PR assistance, then choose **Generate video**. It is a separate
+source/media/voice job, not an automatic narration of the selected explanation.
 Opus 5.5 inspects pinned diffs and full-file repository context, then creates a
 short landscape explainer with natural Azure Speech narration, captions,
 animated before/after or journey visuals, and real cats cast into the explanation.
