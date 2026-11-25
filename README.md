@@ -110,6 +110,8 @@ The agent does the configuration. You may still need to:
 - answer a question about which repositories, watched authors or WSL checkout
   to use, only if it cannot work that out;
 - sign in to Copilot CLI in WSL, only if you want inline Copilot Fix;
+- sign in to the Windows GitHub CLI (`gh auth login`) with a Copilot-enabled
+  account, only if you want Explain, PR questions or TikTok This PR;
 - do the actual reviewing, approving, Proof of Presence and other PR decisions.
   The app shows you what is left; it does not do these for you.
 
@@ -120,6 +122,8 @@ Viewing PRs needs neither WSL nor Copilot.
 - [INSTALL.md](INSTALL.md): agent-first installation and update guide.
 - [docs/usage.md](docs/usage.md): lanes, row actions, keys, diagnostics,
   merge re-checks, Proof of Presence, auto-complete, Copilot Fix and recovery.
+- [TROUBLESHOOTING.md](TROUBLESHOOTING.md): per-feature requirements, safe
+  checks, log locations and how to file a useful bug report.
 - [docs/DESIGN.md](docs/DESIGN.md): architecture, classification rules and the
   ADO calls used.
 - [docs/development.md](docs/development.md): building, offline tests and
