@@ -177,8 +177,8 @@ public sealed partial class PrService
         if (MergeRestartDeferred(pr.MergeStatus)) return new(false, $"!{pr.Id} reports merge status {pr.MergeStatus}; it was not restarted.");
         // The watch list may have changed during the sweep or the read above.
         MarkWatched([pr]);
-        if (automatic && !pr.IsMine && !pr.IsWatched)
-            return new(false, $"!{pr.Id} is not by you or a watched author; no automatic merge re-check requested.");
+        var notWatched = new MergeRecheckResult(false, $"!{pr.Id} is not by you or a watched author; no automatic merge re-check requested.");
+        if (automatic && !pr.IsMine && !pr.IsWatched) return notWatched;
         if (automatic && !AutomaticMergeCheckEligible(pr))
         {
             ApplyMergeCheckState(pr);
@@ -187,7 +187,14 @@ public sealed partial class PrService
         // Do not retry a write inside HttpClient: the next refresh revalidates
         // active/in-flight state before an explicit, observable retry.
         var mergeOptions = cur["mergeOptions"]?.DeepClone() ?? new JsonObject();
-        var result = await _ado.PatchOnceAsync(PrApi(pr), new JsonObject { ["mergeOptions"] = mergeOptions });
+        JsonNode result;
+        try
+        {
+            // The send can wait for a throttle slot and token; recheck the watch list just before it goes out.
+            result = await _ado.PatchOnceAsync(PrApi(pr), new JsonObject { ["mergeOptions"] = mergeOptions },
+                automatic ? () => { MarkWatched([pr]); return pr.IsMine || pr.IsWatched; } : null);
+        }
+        catch (AdoRequestSkippedException) { return notWatched; }
         ReadMergeFields(pr, result);
         var check = CheckFor(pr);
         check.RequestedAt = _time.GetUtcNow();

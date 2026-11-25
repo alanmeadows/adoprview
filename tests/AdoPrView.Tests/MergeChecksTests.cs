@@ -711,6 +711,26 @@ static class MergeChecksTests
             Check(f.View(friend).IsWatched && f.View(friend).Gates["merge"].Detail?.Contains("scheduled re-check") == true, "Re-watching did not refresh merge guidance: " + f.View(friend).Gates["merge"].Detail);
         });
 
+        await test("unwatching an author while the automatic re-check send is blocked stops its PATCH", async () =>
+        {
+            using var f = new Fixture();
+            f.Store.Current.Whitelist.Add("Friend");
+            var friend = f.Add(); friend.Author = "Friend"; friend.Preview = Fixture.New;
+            var blocked = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            var release = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            // Arm after the preflight read so the PATCH's token acquisition is the one held.
+            f.BeforePrRead = (pr, n) => { if (n == 2) f.BeforeToken = () => { blocked.TrySetResult(); return release.Task; }; };
+            var refresh = f.Service.RefreshAsync();
+            await blocked.Task.WaitAsync(TimeSpan.FromSeconds(10));
+            f.Store.Current.Whitelist.Clear();
+            release.SetResult();
+            await refresh;
+            var view = f.View(friend);
+            Check(f.Patches.Count == 0, "Blocked automatic re-check was sent after the author was unwatched");
+            Check(view.MergeRecheckError is null && view.MergeCheckError is null && view.MergeRecheckRequestedAt is null && !view.MergeRecheckPending,
+                "Skipped send was recorded as an error or request: " + view.MergeRecheckError);
+        });
+
         await test("a failed manual re-check of an unwatched conflicted PR points to Re-check merge", async () =>
         {
             using var f = new Fixture();
@@ -991,6 +1011,7 @@ static class MergeChecksTests
         public Action<PullRequest, int>? BeforePrRead;
         public Action? BeforeCompletedList;
         public TaskCompletionSource? HoldPatch;
+        public Func<Task>? BeforeToken;
         public TaskCompletionSource PatchEntered = new(TaskCreationOptions.RunContinuationsAsynchronously);
         readonly List<PullRequest> _prs = [];
         readonly ConcurrentDictionary<string, int> _prReads = new();
@@ -1001,7 +1022,11 @@ static class MergeChecksTests
         public Fixture()
         {
             _http = new(this, disposeHandler: false);
-            var ado = new AdoClient(_http, _ => Task.FromResult(new AuthenticationHeaderValue("Bearer", "offline")));
+            var ado = new AdoClient(_http, async _ =>
+            {
+                if (Interlocked.Exchange(ref BeforeToken, null) is { } hold) await hold();
+                return new AuthenticationHeaderValue("Bearer", "offline");
+            });
             Service = new(ado, Store, Clock);
         }
 
