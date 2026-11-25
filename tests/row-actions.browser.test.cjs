@@ -2240,6 +2240,38 @@ test('real row hit testing and action identity across refreshes', { timeout: 900
       } finally { await evaluate('MockHost.rpc=window.actionRpc;'); }
     });
 
+    await t.test('update notice is a sticky Upgrade toast and Settings can upgrade or check for updates', async () => {
+      await reset();
+      try {
+        const notice = await evaluate(`(()=>{
+          document.querySelector('#toasts').replaceChildren();
+          const set=window.setTimeout;let timers=0;window.setTimeout=(...a)=>{timers++;return set(...a);};
+          try {
+            for(let i=0;i<2;i++)onHostMessage({event:'update',data:{current:'0.1.3',latest:'0.2.0',available:true,canInstall:true,
+              releaseUrl:'https://github.com/alanmeadows/adoprview/releases/tag/v0.2.0',checkedAt:new Date().toISOString(),error:null}});
+          } finally { window.setTimeout=set; }
+          const toasts=[...document.querySelectorAll('#toasts .toast')];
+          return {timers,count:toasts.length,text:toasts[0].textContent,buttons:[...toasts[0].querySelectorAll('button')].map(b=>b.textContent)};
+        })()`);
+        assert.equal(notice.count, 1, 'The same version is announced once');
+        assert.equal(notice.timers, 0, 'Update notice must not auto-dismiss');
+        assert.match(notice.text, /ADO PR View v0\.2\.0 is available \(you have v0\.1\.3\)/);
+        assert.deepEqual(notice.buttons, ['Upgrade', 'Dismiss']);
+        await evaluate(`openDrawer()`); await frame();
+        assert.equal(await evaluate(`document.querySelector('[data-dact="installUpdate"]').textContent`), 'Upgrade to v0.2.0');
+        await evaluate(`window.confirmResult=false;document.querySelector('[data-dact="installUpdate"]').click()`); await frame();
+        assert.match((await evaluate('window.confirmations')).at(-1), /close, install v0\.2\.0 from GitHub, and reopen/);
+        await evaluate(`document.querySelector('[data-dact="checkUpdate"]').click()`); await frame();
+        assert.deepEqual((await calls()).map(c => c.method).filter(m => /Update/.test(m)), ['checkForUpdate'], 'Declined upgrade must not install');
+        await evaluate(`new Promise(r=>{const t=setInterval(()=>{if(!S.updateBusy){clearInterval(t);r();}},20);})`);
+        assert.equal(await evaluate(`document.querySelectorAll('#toasts .toast').length`), 0, 'A check without an available update must retire the notice');
+        await evaluate(`onHostMessage({event:'update',data:{current:'0.1.3',latest:'0.2.0',available:true,canInstall:true,releaseUrl:null,checkedAt:null,error:null}})`);
+        assert.equal(await evaluate(`document.querySelectorAll('#toasts .toast').length`), 1, 'The same version is re-announced after the notice was retired');
+      } finally {
+        await evaluate(`if(S.drawer)closeDrawer();S.update=null;S.updateAnnounced=null;S.updateToast=null;S.updateBusy=false;document.querySelector('#toasts').replaceChildren();`);
+      }
+    });
+
     await t.test('running Copilot panel stays inside its owning row across lane/search/repo views and collapse/reopen', async () => {
       await send('Emulation.setDeviceMetricsOverride', { width: 1600, height: 1000, deviceScaleFactor: 1, mobile: false });
       await reset();
