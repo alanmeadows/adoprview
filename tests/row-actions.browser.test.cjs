@@ -336,7 +336,7 @@ test('real row hit testing and action identity across refreshes', { timeout: 900
       await frame();
       await evaluate(`S.expanded.clear();S.lane=null;S.repo='';S.q='';S.scope='all';
         document.querySelector('#search').value='';
-        S.rowOrder=[];S.orderRevision=null;S.laneRetained.clear();S.runs.clear();S.busy.clear();closeRowMenu();
+        S.rowOrder=[];S.orderRevision=null;S.laneRetained.clear();S.runs.clear();S.runHistoryOpen.clear();S.busy.clear();closeRowMenu();
         window.holdLog=false;S.settings.hidden=['sample-deploy-id:1001'];S.settings.ignoreDrafts=false;S.hideUndo=[];
         window.confirmations=[];window.confirmResult=true;window.autoFailure=false;S.autoCompleteErrors.clear();
         window.explainSequence=0;S.explanations.clear();S.explanationPrs?.clear();window.videoSequence=0;S.videos.clear();
@@ -1522,12 +1522,34 @@ test('real row hit testing and action identity across refreshes', { timeout: 900
       await evaluate(`window.MockHost.rpc=window.originalRpc;delete window.originalRpc;`);
     });
 
+    await t.test('layout primary AI and Fix controls fit desktop and narrow detail independently of the panning table', async () => {
+      for (const width of [1600, 1000, 760]) {
+        await send('Emulation.setDeviceMetricsOverride', { width, height: 1000, deviceScaleFactor: 1, mobile: false });
+        await reset();
+        const key = 'sample-service-id:105';
+        await evaluate(`S.expanded.add('${key}');renderRows();`);
+        const fitting = await evaluate(`(()=>{const row=document.querySelector('#rows [data-key="${key}"]'),main=document.querySelector('main');
+          main.scrollLeft=0;
+          return [...row.querySelectorAll('.detail [data-act="explainPr"],.detail [data-act="askPr"],.detail [data-act="lensPr"],.detail [data-act="tiktokPr"],.detail [data-act="triage"],.detail [data-act="copyPrompt"]')]
+            .every(el=>{const r=el.getBoundingClientRect();return r.width>0&&r.left>=0&&r.right<=main.clientWidth+main.getBoundingClientRect().left;});})()`);
+        assert.equal(fitting, true, 'Primary controls fit width '+width);
+        assert.equal(await evaluate(`document.querySelector('#rows [data-key="${key}"] .run-output').hidden`), true, 'No idle log well');
+        await evaluate(`{const pr=S.snap.prs.find(p=>p.key==='${key}');
+          S.runs.set('fit-earlier',{...pr,runId:'fit-earlier',status:'completed',output:'Earlier\\n',startedAt:'2026-01-01T00:00:00Z'});
+          S.runs.set('fit-main',{...pr,runId:'fit-main',status:'completed',output:'Short output\\n',startedAt:'2026-01-02T00:00:00Z'});renderRows();}`);
+        assert.equal(await evaluate(`document.querySelector('#rows [data-key="${key}"] .run-earlier .run-history').open`), false);
+        await click(await point(key, '.run-earlier .run-history > summary')); await move(0, 0); await frame();
+        assert.equal(await evaluate(`document.querySelector('#rows [data-key="${key}"] .run-earlier .run-history').open`), true, 'History opens by real input');
+        assert.ok(await evaluate(`document.querySelector('#rows [data-key="${key}"] .copilot-run:not(.run-earlier) .run-output').clientHeight`) < 100, 'Short output has content-driven height');
+      }
+    });
+
     const layoutCards = key => evaluate(`(()=>{const row=document.querySelector('#rows [data-key="${key}"]'),detail=row.querySelector('.detail');
       const box=e=>{const r=e.getBoundingClientRect();return {top:r.top,bottom:r.bottom};};
       return {cards:[...detail.querySelectorAll('.card')].map(c=>({head:c.querySelector('h3').textContent.trim().replace(/\\s+/g,' '),
           run:c.classList.contains('copilot-run'),earlier:c.classList.contains('run-earlier'),...box(c)})),
         columns:[...detail.querySelectorAll(':scope > .stack:not(.full)')].map(box),trailing:box(detail.lastElementChild),
-        scopes:[...row.querySelectorAll('.run-scope')].map(p=>({inStatus:!!p.closest('.card')?.querySelector('[data-act="triage"]'),
+        scopes:[...row.querySelectorAll('.run-scope')].map(p=>({inStatus:!!p.closest('.fix-home')?.querySelector('[data-act="triage"]'),
           inRun:!!p.closest('.copilot-run'),visible:p.getClientRects().length>0,text:p.textContent}))};})()`);
     const cardIndex = (layout, head) => {
       const i = layout.cards.findIndex(c => c.head.startsWith(head));
@@ -1614,7 +1636,7 @@ test('real row hit testing and action identity across refreshes', { timeout: 900
       assert.deepEqual((await calls()).filter(c=>c.method==='startCopilot'), [], 'Info never starts a run');
     });
 
-    await t.test('layout hierarchy leads with load errors and failed gates; idle tools and finished runs follow PR context', async () => {
+    await t.test('layout hierarchy leads with status and AI; stable Fix home precedes full diagnostic logs and context', async () => {
       const key = 'sample-service-id:105';
       for (const loadError of [false, true]) {
         await send('Emulation.setDeviceMetricsOverride', { width: 1600, height: 1000, deviceScaleFactor: 1, mobile: false });
@@ -1628,15 +1650,13 @@ test('real row hit testing and action identity across refreshes', { timeout: 900
         await frame();
         const layout = await layoutCards(key);
         const gate = cardIndex(layout, '✕ Failed gate'), description = cardIndex(layout, 'Description'), status = cardIndex(layout, 'Status');
-        const explain = cardIndex(layout, 'What does this PR do?'), video = cardIndex(layout, 'A short PR explainer');
+        const explain = cardIndex(layout, 'AI assistance'), video = cardIndex(layout, 'Short PR video explainer');
         const run = layout.cards.findIndex(c => c.run);
-        if (loadError) assert.ok(cardIndex(layout, 'Load error') < gate, 'Load error leads the failed gate');
-        assert.ok(gate < description && description < status && status < explain && explain < video && video < run,
+        if (loadError) assert.ok(cardIndex(layout, 'Load error') < status, 'Load error leads the tools');
+        assert.ok(status < explain && explain < video && video < run && run < gate && gate < description,
           `Unexpected detail order: ${layout.cards.map(c => c.head).join(' | ')}`);
-        const g = layout.cards[gate], contextBottom = Math.max(...layout.columns.map(c => c.bottom));
-        assert.ok(g.bottom <= layout.cards[description].top && g.bottom <= layout.cards[status].top, 'Failed gate renders above PR context');
-        assert.ok(layout.trailing.top >= contextBottom - .5, 'Idle tools and finished runs render below Description and Status');
-        assert.ok(layout.cards[run].top >= layout.cards[status].bottom, 'A finished run renders after Status');
+        assert.ok(layout.cards[run].bottom <= layout.cards[gate].top, 'Completed Fix remains before full logs');
+        assert.ok(layout.cards[explain].bottom <= layout.cards[video].top, 'Video remains adjacent to Explain');
         assertOneStatusScope(layout);
         if (loadError) {
           assert.equal(await evaluate(`document.querySelector('#rows [data-key="${key}"] .explanation [data-act="explainPr"]').disabled`), true);
@@ -1685,9 +1705,8 @@ test('real row hit testing and action identity across refreshes', { timeout: 900
         const gate = cardIndex(layout, '✕ Failed gate'), description = cardIndex(layout, 'Description');
         const runs = layout.cards.map((c, i) => c.run ? i : -1).filter(i => i >= 0);
         assert.deepEqual(runs.map(i => layout.cards[i].earlier), [false, true]);
-        assert.ok(gate < runs[0] && runs[1] < description, 'The live run group follows blockers and precedes PR context');
-        assert.ok(layout.cards[runs[0]].top >= layout.cards[gate].bottom && layout.cards[runs[1]].bottom <= layout.cards[description].top);
-        assert.ok(cardIndex(layout, 'What does this PR do?') > cardIndex(layout, 'Status'));
+        assert.ok(cardIndex(layout, 'Status') < runs[0] && runs[1] < gate && gate < description, 'The live run group follows compact blockers and AI, before full diagnostics');
+        assert.ok(cardIndex(layout, 'AI assistance') < runs[0]);
         assertOneStatusScope(layout);
         assert.equal(await evaluate(`(()=>{const c=document.querySelector('#rows [data-key="${key}"] .copilot-run:not(.run-earlier)');
           return c.dataset.runId==='layout-live-run' && !c.querySelector('[data-act="cancelRun"]').hidden &&
@@ -1714,7 +1733,7 @@ test('real row hit testing and action identity across refreshes', { timeout: 900
       }
     });
 
-    await t.test('layout run lifecycle relocates the run group without a manual render and defers while rows are in use', async () => {
+    await t.test('layout run lifecycle keeps its home stable and defers exact-run promotion while rows are in use', async () => {
       await send('Emulation.setDeviceMetricsOverride', { width: 1600, height: 1000, deviceScaleFactor: 1, mobile: false });
       await reset();
       const key = 'sample-service-id:105';
@@ -1731,7 +1750,8 @@ test('real row hit testing and action identity across refreshes', { timeout: 900
           beforeContext: runs.every(i => i < cardIndex(layout, 'Description')), adjacent: runs[1] === runs[0] + 1,
           label: await evaluate(`document.querySelector('#rows [data-key="${key}"] .detail [data-act="triage"]').textContent.trim()`) };
       };
-      assert.deepEqual(await place(), { lead: '0', ids: ['lc-new', 'lc-old:earlier'], beforeContext: false, adjacent: true, label: 'Fix PR' });
+      assert.deepEqual(await place(), { lead: '1', ids: ['lc-new', 'lc-old:earlier'], beforeContext: true, adjacent: true, label: 'Fix PR' });
+      await evaluate(`window.fixHome=document.querySelector('#rows [data-key="${key}"] .fix-home');`);
       await evaluate(`updateCopilotRun({...S.runs.get('lc-old'),status:'running',mayBeRunning:true})`);
       await frame();
       assert.deepEqual(await place(), { lead: '1', ids: ['lc-old', 'lc-new:earlier'], beforeContext: true, adjacent: true, label: 'Show run' },
@@ -1745,8 +1765,9 @@ test('real row hit testing and action identity across refreshes', { timeout: 900
       assert.equal((await place()).label, 'Fix PR', 'Label still updates in place while deferred');
       await move(10, 10);
       await frame();
-      assert.deepEqual(await place(), { lead: '0', ids: ['lc-new', 'lc-old:earlier'], beforeContext: false, adjacent: true, label: 'Fix PR' },
-        'Finished run group moves behind PR context once rows are idle');
+      assert.deepEqual(await place(), { lead: '1', ids: ['lc-new', 'lc-old:earlier'], beforeContext: true, adjacent: true, label: 'Fix PR' },
+        'Completed group keeps its early home while preferred run updates');
+      assert.equal(await evaluate(`document.querySelector('#rows [data-key="${key}"] .fix-home').previousElementSibling.querySelector('.ai-assistance')!==null`), true);
       for (let i = 0; i < 3; i++) await evaluate(`updateCopilotRun({...S.runs.get('lc-new'),output:S.runs.get('lc-new').output+'tick\\n',outputOffset:S.runs.get('lc-new').outputOffset+5,revision:${i + 1}})`);
       assert.equal(await evaluate(`document.querySelector('#rows [data-key="${key}"] .copilot-run').isConnected && !S.rowsPending && !S.runRelocations.size`), true);
       // Latest run uncertain but not maybe-running is still cancelable: it leads and the label is Show run.
@@ -1755,7 +1776,7 @@ test('real row hit testing and action identity across refreshes', { timeout: 900
       assert.deepEqual(await place(), { lead: '1', ids: ['lc-new', 'lc-old:earlier'], beforeContext: true, adjacent: true, label: 'Show run' });
     });
 
-    await t.test('layout a leading run never buries conflicts or required reviews that no leading card conveys', async () => {
+    await t.test('layout compact Status keeps all conflicts and required-review work visible above AI and Fix', async () => {
       await send('Emulation.setDeviceMetricsOverride', { width: 1600, height: 1000, deviceScaleFactor: 1, mobile: false });
       for (const c of [{ blockers: ['Merge conflicts'], humanActions: [], expect: ['Merge conflicts'] },
         { blockers: [], humanActions: ['reviews'], cached: true, expect: ['Human reviewer approval needed (+1)'] },
@@ -1772,29 +1793,29 @@ test('real row hit testing and action identity across refreshes', { timeout: 900
           S.expanded.add(key);renderRows();}`);
         await frame();
         const layout = await layoutCards(key);
-        const blocking = cardIndex(layout, 'Blocking'), run = layout.cards.findIndex(x => x.run);
+        const blocking = cardIndex(layout, 'Status'), run = layout.cards.findIndex(x => x.run);
         assert.ok(blocking < run && run < cardIndex(layout, 'Description'), layout.cards.map(x => x.head).join(' | '));
-        const blockingText = await evaluate(`document.querySelector('#rows [data-key="${key}"] .lead-blockers').textContent`);
+        const blockingText = await evaluate(`document.querySelector('#rows [data-key="${key}"] .pr-status').textContent`);
         for (const reason of c.expect) assert.ok(blockingText.includes(reason), `Blocking card misses ${reason}: ${blockingText}`);
         if (c.mixed) {
-          assert.ok(cardIndex(layout, '✕ Failed gate') < run, 'The failed gate still leads the live run');
-          assert.ok(!blockingText.includes('Build failed'), 'The failed-gate card already conveys its own build blocker');
+          assert.ok(cardIndex(layout, '✕ Failed gate') > run, 'Full diagnostics follow primary tools');
+          assert.ok(blockingText.includes('Build failed'), 'The compact summary retains the failed build before full logs');
         }
         assertOneStatusScope(layout);
       }
-      // A selection in the Blocking card defers the run group's relocation (which removes that card) until it clears.
+      // Status never moves or disappears when a run completes.
       const key = 'sample-service-id:105';
       await move(10, 10);
-      await evaluate(`{const el=document.querySelector('#rows [data-key="${key}"] .lead-blockers li .k'),r=document.createRange();r.selectNodeContents(el);
+      await evaluate(`{const el=document.querySelector('#rows [data-key="${key}"] .pr-status li .k'),r=document.createRange();r.selectNodeContents(el);
         window.getSelection().removeAllRanges();window.getSelection().addRange(r);window.blockNode=el.firstChild;window.blockText=window.getSelection().toString();}`);
       await evaluate(`updateCopilotRun({...S.runs.get('lead-live'),status:'completed',mayBeRunning:false,revision:5})`);
       await frame();
-      assert.deepEqual(await evaluate(`[window.blockNode.isConnected,window.getSelection().toString()===window.blockText,S.runRelocations.has('${key}')]`), [true, true, true],
-        'A selected Blocking reason stays attached while the relocation waits');
+      assert.deepEqual(await evaluate(`[window.blockNode.isConnected,window.getSelection().toString()===window.blockText,S.runRelocations.has('${key}')]`), [true, true, false],
+        'A selected status reason stays attached without needing relocation');
       await evaluate('window.getSelection().removeAllRanges()');
       await frame(); await frame();
-      assert.deepEqual(await evaluate(`[!!document.querySelector('#rows [data-key="${key}"] .lead-blockers'),S.runRelocations.size]`), [false, 0],
-        'The finished run moves behind the context once the selection clears');
+      assert.deepEqual(await evaluate(`[!!document.querySelector('#rows [data-key="${key}"] .pr-status'),S.runRelocations.size]`), [true, 0],
+        'Status remains present after completion');
     });
 
     await t.test('layout run relocation leaves native text selections in failed logs and Explain prose attached', async () => {
@@ -1824,7 +1845,7 @@ test('real row hit testing and action identity across refreshes', { timeout: 900
         await evaluate(`updateCopilotRun({...S.runs.get('sel-old'),status:'${status}',mayBeRunning:${status === 'running'},revision:${status === 'running' ? 1 : 2}})`);
         await frame();
         assert.equal(await intact(), true, `${name} selection stays attached across run relocation`);
-        assert.deepEqual([await lead(), await runs()], status === 'running' ? ['1', ['sel-old', 'sel-new']] : ['0', ['sel-new', 'sel-old']],
+        assert.deepEqual([await lead(), await runs()], status === 'running' ? ['1', ['sel-old', 'sel-new']] : ['1', ['sel-new', 'sel-old']],
           `${name} selection outside the run cards does not delay relocation`);
       }
       // A selection spanning into a moving card defers the move until the selection clears.
@@ -1837,8 +1858,8 @@ test('real row hit testing and action identity across refreshes', { timeout: 900
         !!r && r.startContainer===window.selNodes[0] && r.endContainer===window.selNodes[1] && window.selNodes.every(n=>n.isConnected) &&
         window.selRow===document.querySelector('#rows [data-key="${key}"]') &&
         s.toString().startsWith('Synthetic selectable prose for ${key}') && s.toString().trimEnd().endsWith('New')}`);
-      assert.deepEqual([await attached(), await lead(), await evaluate(`S.runRelocations.has('${key}')`)], [true, '0', true],
-        'A selection crossing a run card keeps the group in place');
+      assert.deepEqual([await attached(), await lead(), await evaluate(`S.runRelocations.has('${key}')`)], [true, '1', false],
+        'Same preferred run requires no placement change and keeps crossing selections attached');
       await evaluate('window.getSelection().removeAllRanges()');
       await frame(); await frame();
       assert.deepEqual([await lead(), await runs(), await evaluate('S.runRelocations.size')], ['1', ['sel-new', 'sel-old'], 0],
@@ -1867,7 +1888,8 @@ test('real row hit testing and action identity across refreshes', { timeout: 900
         S.runs.set('sel-rec',{...pr,runId:'sel-rec',id:0,status:'needs-attention',mayBeRunning:false,startedAt:'2025-12-31T00:00:00Z',output:'Recovered\\n',outputOffset:10});
         S.runs.set('sel-new',{...S.runs.get('sel-new'),status:'completed',mayBeRunning:false,revision:5});render();}`);
       await frame();
-      assert.deepEqual([await lead(), await runs()], ['0', ['sel-new', 'sel-old', 'sel-rec']]);
+      assert.deepEqual([await lead(), await runs()], ['1', ['sel-new', 'sel-old', 'sel-rec']]);
+      await evaluate(`document.querySelector('#rows [data-key="${key}"] .copilot-run[data-run-id="sel-rec"] .run-history').open=true;`);
       await select(`#rows [data-key="${key}"] .explain-output`, `#rows [data-key="${key}"] .copilot-run[data-run-id="sel-rec"] .run-output`);
       assert.equal(await intact(), true, 'The recovery-crossing selection baseline is intact before promotion');
       await evaluate(`window.recCard=document.querySelector('#rows [data-key="${key}"] .copilot-run[data-run-id="sel-rec"]');
@@ -1876,7 +1898,7 @@ test('real row hit testing and action identity across refreshes', { timeout: 900
       assert.deepEqual([await evaluate(`{const s=window.getSelection(),r=s.rangeCount&&s.getRangeAt(0);
         !!r && r.startContainer===window.selNodes[0] && r.endContainer===window.selNodes[1] && window.selNodes.every(n=>n.isConnected) &&
         window.selRow===document.querySelector('#rows [data-key="${key}"]') && s.toString().startsWith('Synthetic selectable prose for ${key}') && s.toString().trimEnd().endsWith('Recovered')}`),
-        await lead(), await runs(), await evaluate(`S.runRelocations.has('${key}')`)], [true, '0', ['sel-new', 'sel-old', 'sel-rec'], true],
+        await lead(), await runs(), await evaluate(`S.runRelocations.has('${key}')`)], [true, '1', ['sel-new', 'sel-old', 'sel-rec'], true],
         'Promotion of a recovered run waits while a selection endpoint sits in its card');
       // A queued full-row render (idle render, then flush) must not rebuild under the held relocation.
       assert.deepEqual(await evaluate(`renderRows(true); flushRowUpdates();
@@ -1901,6 +1923,7 @@ test('real row hit testing and action identity across refreshes', { timeout: 900
       assert.deepEqual(await shelfMain(), [['shelf-new', false], ['shelf-old', true]]);
       await evaluate(`{const row=document.querySelector('#runShelf [data-key="${key}"]'),a=row.querySelector('.run-scope'),
           b=row.querySelector('.copilot-run[data-run-id="shelf-old"] .run-output'),r=document.createRange();
+        b.closest('.run-history').open=true;
         const w=e=>document.createTreeWalker(e,NodeFilter.SHOW_TEXT),s=w(a).nextNode(),bw=w(b);let t=null,n;while((n=bw.nextNode()))t=n;
         r.setStart(s,0);r.setEnd(t,t.length);window.getSelection().removeAllRanges();window.getSelection().addRange(r);
         window.selNodes=[r.startContainer,r.endContainer];window.shelfOld=b.closest('.copilot-run');}`);
@@ -2849,6 +2872,7 @@ test('real row hit testing and action identity across refreshes', { timeout: 900
           window.olderOutput=window.promotionRow.querySelector('[data-run-id="older-recovered-run"] .run-output');
           window.newerOutput=window.promotionRow.querySelector('[data-run-id="newer-completed-run"] .run-output');
           window.middleOutput=window.promotionRow.querySelector('[data-run-id="middle-completed-run"] .run-output');
+          window.olderOutput.closest('.run-history').open=true;window.middleOutput.closest('.run-history').open=true;
           window.olderOutput.scrollTop=400;window.newerOutput.scrollTop=700;
           window.middleOutput.scrollTop=500;
           window.olderNode=window.olderOutput.firstChild;

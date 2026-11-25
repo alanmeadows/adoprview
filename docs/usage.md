@@ -229,26 +229,29 @@ their normal undo behavior.
 Click a row to expand it, or Tab to its title and press Enter or Space. Gate-detail
 controls and retained-run headings support the same keyboard activation without
 requiring a Fix or approval action. The details show the PR description and unresolved
-threads, a **Status** card listing what remains (with **Fix PR** and **Copy
-prompt**), a **Merge** card (merge status, merge re-check, branches,
+threads, a compact **Status** summary listing what remains, a **Merge** card
+(merge status, merge re-check, branches,
 auto-complete, review bot, author, created), the policies and the reviewers with
 their votes. Build policies have **Re-queue** and a link to the build.
 
-Expanded details lead with what needs action: approval, load errors and failed
-gates come first. A Fix run that is live, recovering, possibly still running or
-needs attention comes next, with its status, **Cancel run** and output; any
-merge conflict or required review not already shown above it is listed first in
-a short **Blocking** card. The run group moves behind the PR context when the
-run finishes (after you stop interacting with the rows). The
-description and Status/Merge cards follow. Explain, the video card and finished
-or not-started Fix runs come after that context; their launchers and readable
-output stay visible. The Status card shows the Fix PR execution scope (`--yolo`,
+Expanded details lead with load errors and a compact Status summary, followed by
+**AI assistance** for Explain, questions, focused private reviews and the short
+video explainer. A stable **Fix with Copilot** area follows: **Fix PR** and
+**Copy prompt** stay beside the run's status, **Cancel run** and output.
+Completion or recovery does not move this area behind other cards.
+Full approval-provider and failed-gate logs follow these primary tools, then the
+Description, threads, Merge, Policies, Your ADO review and Reviewers cards.
+Reviewers show Approved, Approved with suggestions, Rejected, Waiting for author,
+then No vote, with required reviewers first within each vote. A text summary
+keeps outstanding votes visible; it is not a replacement for policy or merge status.
+The Fix area shows the execution scope (`--yolo`,
 worktree, push limits) once per PR beside **Fix PR**. Retained runs below the
 table and ignored drafts with runs show it once above their run cards. While a
 run is live, **Show run** scrolls to that run, below the column header, and
 focuses its output.
 
-In a narrow window the table scrolls sideways. Once a row's PR title column is
+In a narrow window expanded details and their action buttons fit the available
+width independently of the table, which still scrolls sideways. Once a row's PR title column is
 out of view, a small `!id · repo` cue (long repository names are shortened with …) appears at the top-left of each row so you
 can still tell rows apart. It is display-only and does not take clicks or
 keyboard focus.
@@ -357,7 +360,11 @@ PR selection do not reset the authoritative state or move neighboring rows.
 
 ## Explain this PR
 
-Expand a PR and choose **Explain this PR** in **What does this PR do?** Copilot
+Expand a PR and choose **Explain this PR** in **AI assistance**, near the top
+after the compact Status summary and before full diagnostic logs. **Ask about
+this PR...**, **Focused AI review...**, and **Generate video** share this area;
+generation is always deliberate, not automatic. The author-written Description
+remains separate from the AI explanation. Copilot
 reads the actual changes and surrounding code, then streams a plain-spoken,
 technically deep explanation: what genuinely improves, concrete before/after
 behavior, architectural/data-flow changes, externally meaningful API or schema
@@ -426,8 +433,11 @@ forks and repository paths containing traversal, backslashes, control characters
 
 ## PR questions and lens reviews
 
-The expanded Explain card also offers **Ask Copilot about this PR...** and
-**Review with a lens...**. Both open a conversation popup. Ask follow-ups in
+The AI assistance area also offers **Ask about this PR...** and
+**Focused AI review...**. Both open the existing conversation popup. Its Request
+selector switches between **Ask a question** and **Focused review · private
+preview**; the action is **Ask** or **Generate private findings**, respectively.
+Explain remains an inline result, not a turn in this conversation. Ask follow-ups in
 ordinary English, or choose a concrete review goal such as "Do these ARM changes
 work with ACI?" A lens review is read-only and scoped to meaningful bugs or
 compatibility failures supported by inspected code. It does not request stylistic
@@ -473,7 +483,7 @@ Finding bodies and the supplied lens are shown as literal text; comment publicat
 escapes Markdown/HTML so image URLs, hidden link targets or markup cannot be posted
 without being visible in the confirmed preview.
 **Nothing is selected or posted automatically.** Select the findings you want,
-choose **Post selected findings...**, and confirm the exact count and PR.
+choose **Post selected findings to ADO...**, and confirm the exact count and PR.
 The host rechecks PR identity and revisions, posts only that selection through
 ADO's thread API, and shows individual confirmed links and posted/failed/uncertain
 counts. Comments include the lens and captured commit IDs. A stable marker
@@ -502,7 +512,8 @@ An interrupted app or refused cleanup can leave its worktree registered for insp
 
 ## TikTok This PR
 
-Expand an active, monitored PR and choose **TikTok This PR** beside Explain.
+Expand an active, monitored PR and choose **Generate video** in **Short PR video
+explainer, with cats**, beside Explain in the AI assistance area.
 Opus 5.5 inspects pinned diffs and full-file repository context, then creates a
 short landscape explainer with natural Azure Speech narration, captions,
 animated before/after or journey visuals, and real cats cast into the explanation.
@@ -573,13 +584,13 @@ The player can read only host-registered completed MP4s, not arbitrary local fil
 
 ## Inline Copilot Fix
 
-**Fix PR** (the sparkle button in each row, also in the expanded Status card)
+**Fix PR** (the sparkle button in each row, also in the expanded **Fix with Copilot** area)
 starts Copilot in WSL and displays stdout/stderr, status and the actual exit code
 **inline in that PR's expanded details**. It does not copy/paste, focus desktop
 Copilot or open a separate terminal. **Copy prompt** remains available as an
 alternative. Fix is optional: viewing PRs needs neither WSL nor Copilot.
 
-The Status card briefly explains the default repair scope: merge conflicts,
+The Fix area briefly explains the default repair scope: merge conflicts,
 failing checks and review feedback. Hover over, focus, or click/tap the small
 **i** control for permissions and limitations; click again or press Escape to
 close it. New runs can be asked to validate, commit and push fixes; earlier runs
@@ -670,6 +681,10 @@ panel. **This private file may contain remote URLs or authentication details:
 review and redact it before sharing.** Raw Git errors never go into the dashboard
 or lifecycle log. Failed prelaunch records are not resumed.
 
+Short Fix output uses only the space it needs; longer output scrolls locally.
+Earlier runs retain their status and identity, with output collapsed under
+**Show earlier run output** until opened. Selected or paused output remains
+open when a new main run appears, and explicit history expansion survives rerenders.
 The Fix output panel starts at the latest text and follows new output while you
 are at the bottom. Scroll or select text to read earlier output without being
 pulled back; reaching the bottom resumes following once any text selection is

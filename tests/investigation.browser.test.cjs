@@ -90,6 +90,7 @@ test('PR conversation follow-ups, lens selection, posting outcomes, cancellation
       [...document.querySelectorAll('[data-act="askPr"]')].find(x=>x.closest('.pr').dataset.key===prA.key).click();
     `);
     assert.equal(await evaluate(`document.activeElement.id`), 'investigationQuestion');
+    assert.equal(await evaluate(`$('#investigationSend').textContent`), 'Ask');
     await evaluate(`
       $('#investigationQuestion').value='  What genuinely improves?  ';
       $('#investigationQuestion').dispatchEvent(new Event('input',{bubbles:true}));
@@ -124,6 +125,10 @@ test('PR conversation follow-ups, lens selection, posting outcomes, cancellation
       {id:'0',title:'Concrete bug A',body:'A required property is dropped. ![hidden](https://example.invalid/image) [label](https://example.invalid/target) <img src="https://example.invalid/html">',path:'/src/code.cs',line:10,quote:'actual line'},
       {id:'1',title:'Concrete bug B',body:'Caller passes a rejected value.',path:'/src/code.cs',line:11,quote:'second line'}
     ])`);
+    assert.equal(await evaluate(`$('#investigationSend').textContent`), 'Generate private findings');
+    assert.equal(await evaluate(`document.querySelector('label[for="investigationQuestion"]').textContent`), 'Review focus');
+    assert.equal(await evaluate(`$('#postLensFindings').textContent`), 'Post selected findings to ADO...');
+    assert.match(await evaluate(`document.querySelector('.investigation-privacy').textContent`), /nothing posted to ADO/);
     assert.equal(await evaluate(`calls.filter(c=>c.method==='postLensFindings').length`), 0);
     assert.equal(await evaluate(`document.querySelector('.lens-finding .investigation-question').textContent.includes('https://example.invalid/image') &&
       document.querySelector('.lens-finding .investigation-question').textContent.includes('https://example.invalid/target') &&
@@ -142,6 +147,7 @@ test('PR conversation follow-ups, lens selection, posting outcomes, cancellation
     assert.deepEqual(post.findingIds, ['0', '1']);
     assert.equal(post.confirmed, true);
     assert.match(await evaluate(`$('#investigationStatus').textContent`), /1 comment.*1 failed or uncertain/);
+    assert.doesNotMatch(await evaluate(`document.querySelector('.investigation-privacy').textContent`), /nothing posted/);
     assert.equal(await evaluate(`document.querySelectorAll('[data-investigation-url]').length`), 1);
     assert.match(await evaluate(`$('#investigationTranscript').textContent`), /No automatic retry/);
     await evaluate(`

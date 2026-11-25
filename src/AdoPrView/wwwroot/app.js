@@ -51,6 +51,7 @@ const S = {
   settings: null,
   snap: { prs: [] },
   expanded: new Set(),
+  runHistoryOpen: new Set(),
   activeKeys: new Set(),
   lane: null,
   laneRetained: new Set(),
@@ -537,9 +538,6 @@ const runsForPr = key => [...S.runs.values()].reverse().filter(r => r.key === ke
   .sort((a, b) => (Date.parse(b.startedAt) || 0) - (Date.parse(a.startedAt) || 0));
 // A live run, else an outstanding (cancelable) recovery run, else the newest run.
 const runForPr = key => runsForPr(key).find(runActive) || runsForPr(key).find(runCancelable) || runsForPr(key).at(0);
-// Live/uncertain or starting runs lead the expanded detail; finished runs follow the PR context.
-const runLeads = key => runCancelable(runForPr(key)) || isBusy(key, 'triage');
-
 const explanationActive = r => !!r && ['preparing', 'running', 'cancelling'].includes(r.status);
 const explanationLabel = r => r?.status === 'failed' || r?.status === 'cancelled' ? 'Retry Explain' : r ? 'Explain again' : 'Explain this PR';
 function canExplain(key) {
@@ -580,13 +578,13 @@ function explanationBody(r) {
 function renderExplanation(key) {
   const r = S.explanations.get(key), active = explanationActive(r);
   return `<div class="card explanation" data-explain-key="${esc(key)}">
-    <h3><span class="grow">What does this PR do?</span>
+    <h3><span class="grow">AI assistance</span>
       <button class="mini" data-act="explainPr" ${active || isBusy(key, 'explainPr') || !canExplain(key) ? 'disabled' : ''}>${svg('spark')} ${explanationLabel(r)}</button>
       <button class="mini" data-act="cancelExplanation" data-request-id="${esc(r?.requestId || '')}" ${active ? '' : 'hidden'} ${r?.status === 'cancelling' ? 'disabled' : ''}>${svg('x')} Cancel</button></h3>
     <div class="body">
       <p class="explain-status small${r?.status === 'failed' ? ' error' : ''}" role="status" aria-live="polite">${esc(r?.message || 'A plain-spoken, code-grounded investigation of what improves, architecture, API changes and meaningful risks.')}</p>
-      <p><button class="mini" data-act="askPr" ${canExplain(key) ? '' : 'disabled'}>Ask Copilot about this PR...</button>
-        <button class="mini" data-act="lensPr" ${canExplain(key) ? '' : 'disabled'}>Review with a lens...</button></p>
+      <p class="ai-actions"><button class="mini" data-act="askPr" ${canExplain(key) ? '' : 'disabled'}>Ask about this PR...</button>
+        <button class="mini" data-act="lensPr" ${canExplain(key) ? '' : 'disabled'}>Focused AI review...</button></p>
       <div class="explain-output md" tabindex="0" aria-label="PR explanation" ${r?.output ? '' : 'hidden'}>${explanationBody(r)}</div>
       <details class="explain-details">
         <summary>Evidence and coverage<span class="explain-notices">${r?.coverage?.length ? ` · ${r.coverage.length} notices` : ''}</span></summary>
@@ -667,7 +665,7 @@ function renderExplanationShelf() {
 }
 
 const videoActive = r => !!r && ['preparing', 'storyboarding', 'rendering', 'cancelling'].includes(r.status);
-const videoLabel = r => r?.status === 'failed' || r?.status === 'cancelled' ? 'Retry video' : r?.status === 'completed' ? 'Generate again' : 'TikTok This PR';
+const videoLabel = r => r?.status === 'failed' || r?.status === 'cancelled' ? 'Retry video' : r?.status === 'completed' ? 'Generate again' : 'Generate video';
 function canVideo(key) {
   const p = S.pendingSnapshot ? S.pendingSnapshot.prs.find(p => p.key === key) : findPr(key);
   return canExplain(key) && p?.isActive !== false;
@@ -686,13 +684,14 @@ function videoContent(r) {
 function renderVideo(key) {
   const r = S.videos.get(key), active = videoActive(r);
   return `<div class="card pr-video" data-video-key="${esc(key)}">
-    <h3><span class="grow">A short PR explainer, with cats</span>
+    <h3><span class="grow">Short PR video explainer, with cats</span>
       <button class="mini" data-act="tiktokPr" ${active || isBusy(key, 'tiktokPr') || !canVideo(key) ? 'disabled' : ''}>${svg('play')} ${videoLabel(r)}</button>
       <button class="mini" data-act="cancelVideo" data-request-id="${esc(r?.requestId || '')}" ${active ? '' : 'hidden'} ${r?.status === 'cancelling' ? 'disabled' : ''}>${svg('x')} Cancel</button></h3>
     <div class="body">
-      <p class="video-status small${r?.status === 'failed' ? ' error' : ''}" role="status" aria-live="polite">${esc(r?.message || 'Opus 5.5 reads pinned PR code; narration uses your selected Azure Speech resource. No PR changes; the video stays local.')}</p>
+      <p class="video-status small${r?.status === 'failed' ? ' error' : ''}" role="status" aria-live="polite" ${r ? '' : 'hidden'}>${esc(r?.message || '')}</p>
       <div class="video-content" aria-busy="${active}">${videoContent(r)}</div>
       <details class="explain-details"><summary>Source evidence and generation details</summary>
+        <p class="small">Opus 5.5 reads pinned PR code; narration uses your selected Azure Speech resource. No PR changes; the video stays local.</p>
         <p class="small">AI-generated; verify important details against the code. Bounded source inspection, not a local checkout or Fix run. Videos are not resumed automatically.</p>
         <p class="video-meta small">${esc([r?.model, r?.voice, r?.durationSeconds && `${Math.round(r.durationSeconds)} seconds`].filter(Boolean).join(' · '))}</p>
         <p class="video-revision small">${esc(explanationRevision(r))}</p>
@@ -716,6 +715,7 @@ function updateVideo(r) {
   for (const card of document.querySelectorAll('.pr-video')) {
     if (card.dataset.videoKey !== r.key) continue;
     $('.video-status', card).textContent = r.message;
+    $('.video-status', card).hidden = false;
     $('.video-status', card).classList.toggle('error', r.status === 'failed');
     $('.video-meta', card).textContent = [r.model, r.voice, r.durationSeconds && `${Math.round(r.durationSeconds)} seconds`].filter(Boolean).join(' · ');
     $('.video-revision', card).textContent = explanationRevision(r);
@@ -836,7 +836,12 @@ function rememberRunOutput(view) {
 function captureRunOutputs() {
   // Apply queued retention before capturing offsets or detaching selected nodes.
   for (const card of document.querySelectorAll('.copilot-run')) syncRunOutput(card);
-  for (const view of S.runOutputs.values()) rememberRunOutput(view);
+  for (const [id, view] of S.runOutputs) {
+    rememberRunOutput(view);
+    if (view.element.isConnected && (runOutputSelected(view.element) ||
+        view.element === document.activeElement || !view.following))
+      S.runHistoryOpen.add(id);
+  }
   const selection = window.getSelection();
   if (!selection || selection.isCollapsed !== false) return null;
   const anchor = selection.anchorNode;
@@ -965,9 +970,12 @@ function renderRunCard(key, r = runForPr(key), earlier = false) {
     <h3><span class="grow">${runCardTitle(earlier)}</span>
       <button class="mini" data-act="cancelRun" data-run-id="${esc(r?.runId || '')}" ${runCancelable(r) ? '' : 'hidden'}>${svg('x')} Cancel run</button></h3>
     <div class="body">
-      <p class="run-status" role="status">${esc(r ? runSummary(r) : 'Not started. Use Fix PR to run the rich prompt, or Copy prompt to review it first.')}</p>
-      <p class="run-worktree small">${esc(runWorktreeText(r))}</p>
-      <pre class="run-output" tabindex="0" aria-label="Copilot stdout and stderr" ${r || isBusy(key, 'triage') ? '' : 'hidden'}>${esc(r?.output || '')}</pre>
+      <p class="run-status" role="status">${esc(r ? runSummary(r) : 'Not started. Choose Fix PR to begin, or Copy prompt to review the instructions first.')}</p>
+      <details class="run-history" data-run-id="${esc(r?.runId || '')}" ${!earlier || S.runHistoryOpen.has(r?.runId) ? 'open' : ''}>
+        <summary>Show earlier run output</summary>
+        <p class="run-worktree small">${esc(runWorktreeText(r))}</p>
+        <pre class="run-output" tabindex="0" aria-label="Copilot stdout and stderr" ${r || isBusy(key, 'triage') ? '' : 'hidden'}>${esc(r?.output || '')}</pre>
+      </details>
     </div></div>`;
 }
 
@@ -1089,6 +1097,11 @@ function reorderRunCards(key, runCards) {
   if (!main || !promoted || main === promoted) return;
   main.classList.add('run-earlier'); $('h3 .grow', main).textContent = runCardTitle(true);
   promoted.classList.remove('run-earlier'); $('h3 .grow', promoted).textContent = runCardTitle(false);
+  if (runOutputSelected($('.run-output', main)) || main.contains(document.activeElement) ||
+      S.runOutputs.get(main.dataset.runId)?.following === false)
+    S.runHistoryOpen.add(main.dataset.runId);
+  $('.run-history', main).open = S.runHistoryOpen.has(main.dataset.runId);
+  $('.run-history', promoted).open = true;
   main.before(promoted);
   let previous = promoted;
   for (const run of runsForPr(key).filter(run => run.runId !== latestId)) {
@@ -1108,43 +1121,26 @@ function selectionBlocksMove(elements) {
   return elements.some(el => range.intersectsNode(el));
 }
 
-// Move the existing run group (same nodes, reading and selection) when its leading/trailing placement or main run changes.
+// The Fix home never moves; only a newly preferred run is promoted within it.
 function relocateRunGroup(key) {
   const detail = [...document.querySelectorAll('#rows > .pr')].find(el => el.dataset.key === key)?.querySelector(':scope > .detail[data-run-lead]');
   if (!detail) return relocateShelfRuns(key);
-  const p = S.snap.prs.find(x => x.key === key), lead = runLeads(key);
   const cards = detail ? [...detail.querySelectorAll('.copilot-run')] : [];
   const latestId = runForPr(key)?.runId;
   const reorder = cards.some(el => el.dataset.runId === latestId) && cards.find(el => !el.classList.contains('run-earlier'))?.dataset.runId !== latestId;
-  if (!detail || !p || (detail.dataset.runLead === String(+lead) && !reorder)) { S.runRelocations.delete(key); return; }
+  if (!reorder) { S.runRelocations.delete(key); return; }
   if (!cards.length) { S.runRelocations.delete(key); renderRows(true); return; }
-  // Only the run cards move. Defer while rows are in use or a non-output text selection touches a moving card;
-  // selections elsewhere (failed logs, Explain, other PRs) are left attached.
-  if (rowsInUse() || crossRunOutputSelection() || selectionBlocksMove([...cards, ...detail.querySelectorAll('.lead-blockers')])) {
+  if (rowsInUse() || crossRunOutputSelection() || selectionBlocksMove(cards)) {
     S.runRelocations.add(key); renderStatus(); return;
   }
   S.runRelocations.delete(key);
   const outputSelection = captureRunOutputs();
   reorderRunCards(key, cards);
-  if (detail.dataset.runLead !== String(+lead)) {
-    const ordered = [...detail.querySelectorAll('.copilot-run')];
-    detail.querySelector('.lead-blockers')?.remove();
-    let leading = detail.firstElementChild.classList.contains('full') ? detail.firstElementChild : null;
-    if (lead) {
-      if (!leading) { leading = document.createElement('div'); leading.className = 'full stack'; detail.prepend(leading); }
-      leading.insertAdjacentHTML('beforeend', leadBlockersCard(p));
-      leading.append(...ordered);
-    } else {
-      detail.lastElementChild.append(...ordered);
-      if (leading && !leading.children.length) leading.remove();
-    }
-  }
   for (const card of cards) {
     const view = S.runOutputs.get(card.dataset.runId);
     if (view) { view.element.scrollTop = view.top; view.element.scrollLeft = view.left; view.top = view.element.scrollTop; }
   }
   restoreRunOutputSelection(outputSelection);
-  detail.dataset.runLead = String(+lead);
   renderStatus();
 }
 
@@ -1168,19 +1164,6 @@ function relocateShelfRuns(key) {
 }
 
 const humanText = a => ({ reviews: 'Human reviewer approval needed (+1)', pop: 'Proof of Presence — tap your security key', autocomplete: 'Auto-complete not set', publish: 'Draft — publish when ready' }[a] || a);
-
-// A leading run must not bury blockers that no leading card above already conveys (e.g. conflicts, required reviews).
-function leadBlockersCard(p) {
-  // Only a current approval offer conveys the required review; a cached outcome alone does not.
-  const approvalCard = !!p.approval;
-  // Exclude only reasons a leading card already shows: each failed-gate card conveys its "Build failed" blocker.
-  const shown = new Set((p.failedBuilds || []).map(fb => `Build failed: ${fb.name}`));
-  const reasons = [
-    ...(p.blockers || []).filter(x => !shown.has(x)).map(x => ['fail', x]),
-    ...(p.humanActions || []).filter(a => a !== 'reviews' || !approvalCard).map(a => ['human', humanText(a)]),
-  ];
-  return reasons.length ? `<div class="card lead-blockers"><h3>Blocking</h3><div class="body"><ul class="list blockers">${reasons.map(([c, t]) => `<li><span class="dot ${c}"></span><span class="k">${esc(t)}</span></li>`).join('')}</ul></div></div>` : '';
-}
 
 function syncCopilotButton(key) {
   for (const button of document.querySelectorAll('[data-act="triage"]')) {
@@ -1394,10 +1377,7 @@ function renderDetail(p) {
   const left = [];
   const right = [];
   const full = [];
-  // Blockers and actionable runs lead; results, idle tools and finished runs follow the PR context.
   const runGroup = renderRunCard(p.key) + earlierRunCards(p.key);
-  const lead = runLeads(p.key);
-  const trailing = [renderExplanation(p.key), renderVideo(p.key), ...(lead ? [] : [runGroup])];
 
   if (p.approval || S.approvals.has(p.key)) {
     const outcome = S.approvals.get(p.key);
@@ -1417,7 +1397,7 @@ function renderDetail(p) {
       </div></div>`);
   }
 
-  if (p.error) full.push(`<div class="card failed"><h3>Load error</h3><div class="body">${esc(p.error)}</div></div>`);
+  const loadError = p.error ? `<div class="card failed"><h3>Load error</h3><div class="body">${esc(p.error)}</div></div>` : '';
 
   // Failed gates with log tails
   for (const fb of p.failedBuilds || []) {
@@ -1443,11 +1423,6 @@ function renderDetail(p) {
       ${fb.evaluationId ? `<button class="mini" data-act="requeue" data-eval="${esc(fb.evaluationId)}">${svg('play')} Re-queue</button>` : ''}
       <button class="mini" data-act="url" data-url="${esc(fb.url)}">${svg('ext')} Open logs</button></h3>${tasks}</div>`);
   }
-  if (lead) {
-    const blockers = leadBlockersCard(p);
-    if (blockers) full.push(blockers);
-    full.push(runGroup);
-  }
 
   left.push(`<div class="card"><h3>Description</h3><div class="body md clamp">${md(p.description)}</div></div>`);
 
@@ -1470,10 +1445,13 @@ function renderDetail(p) {
     ...(p.waiting || []).map((x) => ['pending', x]),
   ];
   const fixActive = runActive(runForPr(p.key)), fixBusy = isBusy(p.key, 'triage');
-  right.push(`<div class="card"><h3>Status <span class="grow"></span>
+  const status = `<div class="card pr-status"><h3>Status</h3>
+    <div class="body"><ul class="list blockers">${items.length ? items.map(([c, t]) => `<li><span class="dot ${c}"></span><span class="k">${esc(t)}</span></li>`).join('') : '<li><span class="dot ok"></span><span class="k">All gates satisfied</span></li>'}</ul></div></div>`;
+  const fixHome = `<section class="full stack fix-home" aria-label="Fix PR">
+    <div class="fix-toolbar"><strong>Fix with Copilot</strong>
       <button class="mini ${fixActive ? 'running' : ''} ${fixBusy ? 'busy' : ''}" data-act="triage" ${fixBusy ? 'disabled' : ''} ${fixActive || fixBusy ? 'aria-busy="true"' : ''}>${svg(fixActive || fixBusy ? 'refresh' : 'spark')} ${runCancelable(runForPr(p.key)) ? 'Show run' : 'Fix PR'}</button>
-      <button class="mini" data-act="copyPrompt">${svg('copy')} Copy prompt</button></h3>
-    <div class="body"><ul class="list blockers">${items.length ? items.map(([c, t]) => `<li><span class="dot ${c}"></span><span class="k">${esc(t)}</span></li>`).join('') : '<li><span class="dot ok"></span><span class="k">All gates satisfied</span></li>'}</ul>${runScopeNotice()}</div></div>`);
+      <button class="mini" data-act="copyPrompt">${svg('copy')} Copy prompt</button></div>
+    ${runScopeNotice()}${runGroup}</section>`;
 
   const ac = autoCompleteDescription(p);
   right.push(`<div class="card"><h3>Merge <span class="grow"></span>
@@ -1509,15 +1487,23 @@ function renderDetail(p) {
       <p data-review-vote-outcome role="status" class="${outcome?.kind === 'error' ? 'error' : ''}" ${outcome ? '' : 'hidden'}>${esc(outcome?.message || '')}</p>
       </div></div>`);
   }
-  const revs = (p.reviewers || []).slice().sort((a, b) => (b.isRequired - a.isRequired) || (a.vote - b.vote));
+  const voteOrder = [10, 5, -10, -5, 0];
+  const rank = vote => { const index = voteOrder.indexOf(vote); return index < 0 ? voteOrder.length : index; };
+  const revs = (p.reviewers || []).slice().sort((a, b) => (rank(a.vote) - rank(b.vote)) || (b.isRequired - a.isRequired));
   if (revs.length) {
     const vl = { 10: 'Approved', 5: 'Approved w/ suggestions', 0: 'No vote', '-5': 'Waiting for author', '-10': 'Rejected' };
-    right.push(`<div class="card"><h3>Reviewers <span class="cnt">${revs.length}</span></h3><div class="body"><ul class="list">${revs.map((r) => `
+    const outstanding = [[-10, 'rejected'], [-5, 'waiting for author'], [0, 'no vote']]
+      .map(([vote, label]) => { const count = revs.filter(r => r.vote === vote).length; return count ? `${count} ${label}` : ''; }).filter(Boolean);
+    right.push(`<div class="card reviewers"><h3>Reviewers <span class="cnt">${revs.length}</span></h3><div class="body">
+      ${outstanding.length ? `<p class="reviewer-summary">${esc(outstanding.join(' · '))}</p>` : ''}
+      <ul class="list">${revs.map((r) => `
       <li>${avatar(r.name)}<span class="k">${esc(r.name)}${r.id?.toLowerCase() === p.reviewVote?.reviewerId?.toLowerCase() ? ' (you)' : ''} ${r.isRequired ? '<span class="badge req">required</span>' : ''}${r.isContainer ? ' <span class="badge">group</span>' : ''}</span>
       <span class="vote v${r.vote}">${vl[r.vote] ?? r.vote}</span></li>`).join('')}</ul></div></div>`);
   }
 
-  return `<div class="detail" data-run-lead="${+lead}">${full.length ? `<div class="full stack">${full.join('')}</div>` : ''}<div class="stack">${left.join('')}</div><div class="stack">${right.join('')}</div><div class="full stack">${trailing.join('')}</div></div>`;
+  return `<div class="detail" data-run-lead="1"><div class="full stack">${loadError}${status}
+    <section class="stack ai-assistance" aria-label="AI assistance">${renderExplanation(p.key)}${renderVideo(p.key)}</section></div>
+    ${fixHome}${full.length ? `<div class="full stack">${full.join('')}</div>` : ''}<div class="stack">${left.join('')}</div><div class="stack">${right.join('')}</div></div>`;
 }
 
 function formatLog(text, showTs) {
@@ -2302,6 +2288,12 @@ function wire() {
     message.hidden = false;
   }, true);
   document.addEventListener('contextmenu', openRowMenu);
+  document.addEventListener('toggle', e => {
+    if (!e.target.matches?.('.run-history') || !e.target.closest('.run-earlier')) return;
+    const id = e.target.dataset.runId;
+    if (e.target.open) S.runHistoryOpen.add(id);
+    else S.runHistoryOpen.delete(id);
+  }, true);
   for (const type of ['pointerover', 'focusin', 'pointerout', 'focusout']) {
     document.addEventListener(type, e => {
       const scope = e.target.closest('.run-scope');

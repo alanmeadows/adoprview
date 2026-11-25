@@ -33,6 +33,7 @@ a:hover { text-decoration: underline; }
   color: var(--text); background: var(--bg); border: 1px solid var(--control-border);
 }
 .investigation-dialog select { max-width: 100%; }
+.investigation-dialog .small, .investigation-privacy { font-size: 12px; line-height: 1.5; }
 .investigation-dialog pre { white-space: pre-wrap; overflow-wrap: anywhere; font-family: var(--mono); }
 #investigationSource, .investigation-question { white-space: pre-wrap; overflow-wrap: anywhere; }
 #investigationTranscript { max-height: 42vh; overflow: auto; }
@@ -120,7 +121,7 @@ select {
 @keyframes blink { 50% { opacity: .25; } }
 
 /* ------------------------------------------------------------------ table */
-main { flex: 1; overflow: auto; padding: 0 20px 28px; }
+main { flex: 1; overflow: auto; padding: 0 20px 28px; container-type: inline-size; }
 .table { min-width: 1238px; } /* 4px row inset + --cols; narrower cards clip the rightmost action slot. */
 .thead {
   position: sticky; top: 0; z-index: 5;
@@ -263,12 +264,15 @@ main { flex: 1; overflow: auto; padding: 0 20px 28px; }
   padding: 16px 18px 18px 38px;
   display: grid; grid-template-columns: minmax(0, 1.55fr) minmax(320px, 1fr); gap: 18px;
   cursor: default;
+  width: min(100%, 100cqw);
+  min-width: 0;
 }
 .detail .full { grid-column: 1 / -1; }
-.card { background: var(--bg2); border: 1px solid var(--border); border-radius: var(--card-radius); overflow: hidden; }
+.card { background: var(--bg2); border: 1px solid var(--border); border-radius: var(--card-radius); overflow: hidden; min-width: 0; }
 .card h3 {
   margin: 0; padding: 9px 12px; font-size: 11px; font-weight: 650; letter-spacing: .5px; text-transform: uppercase;
   color: var(--muted); border-bottom: 1px solid var(--border); display: flex; align-items: center; gap: 8px;
+  flex-wrap: wrap;
 }
 .card h3 .grow { flex: 1; }
 .approval h3 { flex-wrap: wrap; }
@@ -299,6 +303,21 @@ main { flex: 1; overflow: auto; padding: 0 20px 28px; }
 .explanation .body { padding: 14px 16px; }
 .explain-output { max-height: 520px; overflow: auto; scrollbar-gutter: stable; }
 .explain-output > * { max-width: 75ch; }
+.explain-output > pre { max-width: 100%; }
+.ai-actions, .fix-toolbar { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+.ai-actions { margin: 8px 0; }
+.fix-home { border: 1px solid var(--border2); border-radius: var(--card-radius); padding: 12px; background: var(--surface); gap: 10px; }
+.fix-toolbar strong { flex: 1; }
+.pr-status .blockers { display: flex; flex-wrap: wrap; gap: 4px 20px; }
+.pr-status .blockers li { border: 0; padding: 0; }
+.reviewer-summary { margin: 0 0 8px; font-size: 12px; color: var(--text2); }
+.reviewers .badge { font-size: 12px; line-height: 16px; }
+.run-history > summary { cursor: pointer; font-size: 12px; }
+.copilot-run:not(.run-earlier) .run-history > summary { display: none; }
+.ai-assistance .small, .fix-home .small { font-size: 12px; }
+@media (max-width: 760px) {
+  .detail { grid-template-columns: minmax(0, 1fr); padding: 12px; gap: 12px; }
+}
 .explain-output pre { white-space: pre; overflow-wrap: normal; }
 .explain-output pre ins { color: var(--ready); background: var(--ok-bg); text-decoration: none; }
 .explain-output pre del { color: var(--blocked); background: var(--fail-bg); text-decoration: none; }
@@ -465,10 +484,11 @@ pre.log .t { color: var(--muted); }
 .toast .grow { flex: 1; }
 .toast button { border: 0; background: none; color: var(--accent2); font-weight: 600; }
 @keyframes rise { from { transform: translateY(8px); opacity: 0; } }
-/* Inline CLI output never shifts the table while a run is streaming. */
-.run-output { height: 280px; overflow: auto; margin: 12px 0 0; padding: 14px; white-space: pre-wrap; overflow-wrap: anywhere; background: var(--log-bg); color: var(--log-text); font: 12px/1.5 var(--mono); user-select: text; }
+/* Short output stays compact; long output scrolls without growing beyond this bound. */
+.run-output { max-height: 280px; overflow: auto; margin: 12px 0 0; padding: 14px; white-space: pre-wrap; overflow-wrap: anywhere; background: var(--log-bg); color: var(--log-text); font: 12px/1.5 var(--mono); user-select: text; }
 .run-status, .run-worktree { overflow-wrap: anywhere; }
-.run-status { height: 4.5em; overflow: auto; }
+.run-status { max-height: 4.5em; overflow: auto; margin: 0; }
+.run-worktree:empty { display: none; }
 .run-worktree { white-space: pre-wrap; }
 .run-only { margin-top: 16px; }
 .run-heading { padding: 12px 14px; display: flex; gap: 8px; align-items: flex-start; cursor: pointer; }

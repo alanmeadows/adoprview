@@ -51,6 +51,12 @@ function renderInvestigation() {
   if (!key) return;
   const r = S.investigations.get(key);
   const busy = investigationPending || investigationActive(r);
+  const review = $('#investigationKind').value === 'lens';
+  document.querySelector('label[for="investigationQuestion"]').textContent = review ? 'Review focus' : 'Question or follow-up';
+  $('#investigationQuestion').placeholder = review
+    ? 'For example: Is this architecture aligned with our shared retry policy?'
+    : 'For example: Why does this PR use the shared workqueue?';
+  $('#investigationSend').textContent = review ? 'Generate private findings' : 'Ask';
   $('#investigationStatus').textContent = r?.message || 'Ask about the code or enter a concrete review lens. Preparing source uses your configured WSL checkout. Generation is read-only.';
   $('#investigationStatus').classList.toggle('error', r?.status === 'failed');
   $('#investigationSource').textContent = r?.revision
@@ -75,13 +81,14 @@ function renderInvestigation() {
           ${posted && /^https:\/\/dev\.azure\.com\//i.test(outcome.url || '') ? `<button type="button" class="mini" data-investigation-url="${esc(outcome.url)}">Open confirmed comment</button>` : ''}</p>` : ''}
       </div>`;
     }).join('');
-    return `<article class="investigation-turn"><h3>${turn.kind === 'lens' ? 'Review lens' : 'Question'}</h3>
+    return `<article class="investigation-turn"><h3>${turn.kind === 'lens' ? 'Focused AI review' : 'Question'}</h3>
+      ${turn.kind === 'lens' ? `<p class="investigation-privacy">${turn.outcomes.length ? 'AI review findings — see each selected finding for its ADO posting outcome.' : 'Private AI findings — nothing posted to ADO.'}</p>` : ''}
       <p class="investigation-question">${esc(turn.question)}</p>
       <div class="md">${explanationBody({ output: turn.answer, status: 'completed' })}</div>
       ${turn.kind === 'lens' && !turn.findings.length ? '<p class="small">No findings established in the inspected scope. No comments posted; this is not proof the PR is bug-free.</p>' : ''}
       ${findings}
       ${last && turn.kind === 'lens' && turn.findings.some(f => !turn.outcomes.some(o => o.findingId === f.id)) ?
-        `<button type="button" class="btn" id="postLensFindings" data-turn-id="${esc(turn.id)}" ${busy || r.status !== 'completed' ? 'disabled' : ''}>Post selected findings...</button>
+        `<button type="button" class="btn" id="postLensFindings" data-turn-id="${esc(turn.id)}" ${busy || r.status !== 'completed' ? 'disabled' : ''}>Post selected findings to ADO...</button>
         <p class="small">Only selected findings are posted, after confirmation and a fresh revision check. Nothing is selected by default.</p>` : ''}
     </article>`;
   }).join('');
@@ -147,7 +154,10 @@ function wireInvestigation() {
   });
   $('#investigationForm').addEventListener('submit', e => { e.preventDefault(); void investigationAction('send'); });
   $('#investigationQuestion').addEventListener('input', e => { if (investigationKey) investigationDrafts.get(investigationKey).question = e.target.value; });
-  $('#investigationKind').addEventListener('change', e => { if (investigationKey) investigationDrafts.get(investigationKey).kind = e.target.value; });
+  $('#investigationKind').addEventListener('change', e => {
+    if (investigationKey) investigationDrafts.get(investigationKey).kind = e.target.value;
+    renderInvestigation();
+  });
   $('#investigationReset').addEventListener('click', () => void investigationAction('reset'));
   $('#investigationCancel').addEventListener('click', () => void investigationAction('cancel'));
   $('#investigationTranscript').addEventListener('click', e => {

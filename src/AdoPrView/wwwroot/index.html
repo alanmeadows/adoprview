@@ -84,11 +84,11 @@
     <p id="investigationError" class="error" role="alert"></p>
     <form id="investigationForm">
       <label for="investigationKind">Request</label>
-      <select id="investigationKind"><option value="question">Ask a Copilot question</option><option value="lens">Review with this lens (preview only)</option></select>
-      <label for="investigationQuestion">Question, follow-up, or concrete review lens</label>
+      <select id="investigationKind"><option value="question">Ask a question</option><option value="lens">Focused review · private preview</option></select>
+      <label for="investigationQuestion">Question or follow-up</label>
       <textarea id="investigationQuestion" rows="3" maxlength="4000" required placeholder="For example: Do these ARM changes work with ACI?"></textarea>
       <div class="investigation-actions">
-        <button class="btn primary" id="investigationSend" type="submit">Send</button>
+        <button class="btn primary" id="investigationSend" type="submit">Ask</button>
         <button class="btn" id="investigationCancel" type="button" hidden>Cancel inspection</button>
         <button class="btn" id="investigationReset" type="button">New conversation</button>
       </div>

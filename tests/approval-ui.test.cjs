@@ -51,6 +51,34 @@ function setup(search = '?mock=1', native = false) {
   return { hooks, pr, window, elements, dialogs, document, context, element, sent };
 }
 
+test('expanded AI tools precede full diagnostics, Fix has one stable home, and approvals lead without hiding outstanding votes', () => {
+  const { hooks, pr } = setup();
+  pr.failedBuilds = [{ name: 'Failed synthetic build', tasks: [] }];
+  pr.reviewers = [
+    { name: 'Required no vote', vote: 0, isRequired: true },
+    { name: 'Optional approved', vote: 10, isRequired: false },
+    { name: 'Required rejected', vote: -10, isRequired: true },
+    { name: 'Required approved group', vote: 10, isRequired: true, isContainer: true },
+    { name: 'Suggestions', vote: 5, isRequired: false },
+    { name: 'Waiting', vote: -5, isRequired: false },
+    { name: 'Second optional approved', vote: 10, isRequired: false },
+  ];
+  for (const status of [null, 'running', 'completed', 'needs-attention']) {
+    hooks.S.runs.clear();
+    if (status) hooks.S.runs.set('one-run', { ...pr, runId: 'one-run', status, output: 'Synthetic output', mayBeRunning: status === 'running' });
+    const html = hooks.renderDetail(pr);
+    const order = ['Status</h3>', 'AI assistance</span>', 'Short PR video explainer', 'class="full stack fix-home"', 'Failed synthetic build', '>Description</h3>'];
+    assert.ok(order.every((text, i) => html.includes(text) && (!i || html.indexOf(text) > html.indexOf(order[i - 1]))), status);
+    assert.equal((html.match(/data-act="triage"/g) || []).length, 1);
+    assert.equal((html.match(/class="small run-scope"/g) || []).length, 1);
+    const reviewers = html.slice(html.indexOf('class="card reviewers"'));
+    const names = ['Required approved group', 'Optional approved', 'Second optional approved', 'Suggestions', 'Required rejected', 'Waiting', 'Required no vote'];
+    assert.ok(names.every((name, i) => !i || reviewers.indexOf(name) > reviewers.indexOf(names[i - 1])));
+    assert.match(reviewers, /1 rejected · 1 waiting for author · 1 no vote/);
+    assert.doesNotMatch(reviewers, /merge blockers/i);
+  }
+});
+
 test('native Fix delivery is acknowledged even when rendering rejects data; only native sequenced events get acknowledgements', () => {
   const { hooks, sent } = setup('', true);
   hooks.onHostMessage({ event: 'copilotRun', data: null, deliveryId: 41 });
