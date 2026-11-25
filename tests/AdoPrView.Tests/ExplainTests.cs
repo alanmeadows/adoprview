@@ -22,6 +22,131 @@ static class ExplainTests
 
     public static async Task Run(Func<string, Func<Task>, Task> test)
     {
+        const string bicepBefore = "resource account 'Microsoft.Storage/storageAccounts@2023-05-01' = {\n  name: 'sample'\n  properties: {\n    allowBlobPublicAccess: true\n  }\n}";
+        const string bicepAfter = "resource account 'Microsoft.Storage/storageAccounts@2023-05-01' = {\n  name: 'sample'\n  properties: {\n    allowBlobPublicAccess: false\n  }\n}";
+        await test("Explain ARM source examples survive capture model and final output with exact diff and assessment", async () =>
+        {
+            using var f = new Fixture();
+            ArmFixture(f, "/deploy.bicep", bicepBefore, bicepAfter);
+            await using var service = new ExplainService((_, ct) => f.Capture(ct), new Model(async (context, _, ct) =>
+            {
+                await context.ReadChangeAsync(0, ct);
+                context.Arm.Record(0, "source", bicepBefore, "source", bicepAfter,
+                    "Disables public blob access for this account.", "Consumers relying on anonymous access may fail; no deployment was run.",
+                    "allowBlobPublicAccess changes from true to false.");
+                return "The storage deployment disables public blob access.";
+            }));
+            service.Start(f.Pr.Key);
+            var result = await Finish(service);
+            Check(result.Status == "completed" && result.Output.Contains("#### Before") && result.Output.Contains("#### After"), "ARM output did not complete");
+            Check(result.Output.Contains("```bicep\n" + bicepBefore) && result.Output.Contains("```bicep\n" + bicepAfter), "Exact source examples changed");
+            Check(result.Output.Contains("-    allowBlobPublicAccess: true\n+    allowBlobPublicAccess: false") &&
+                result.Output.Contains("**Improvement:**") && result.Output.Contains("**Risks and uncertainty:**") &&
+                result.Output.Contains("Exact source excerpt"), "Missing visible differences, attribution or assessment");
+            if (Environment.GetEnvironmentVariable("ADOPRVIEW_ARM_EXAMPLE") is { Length: > 0 } examplePath)
+                File.WriteAllText(examplePath, result.Output);
+        });
+        await test("Explain ARM synthesis tool does not alter shared question lens or video source tools", async () =>
+        {
+            using var f = new Fixture();
+            using var context = await f.Capture();
+            var shared = ExplainModel.SourceTools(context, default);
+            var tools = ExplainModel.SourceTools(context, default, arm: true);
+            Check(shared.Select(t => t.Name).SequenceEqual(ExplainModel.ToolNames), "Shared read-only tool inventory changed");
+            Check(tools.Select(t => t.Name).SequenceEqual(ExplainModel.ToolNames.Append("explain_arm_change")), "Explain ARM tool missing");
+            Check(ExplainModel.RestrictedSession("offline", tools, arm: true).AvailableTools!.SequenceEqual(tools.Select(t => t.Name)),
+                "ARM session allowlist does not match registered tools");
+        });
+        await test("Explain ARM cannot complete with missing records and non-ARM output stays unchanged", async () =>
+        {
+            using var f = new Fixture();
+            ArmFixture(f, "/deploy.bicep", bicepBefore, bicepAfter);
+            await using var service = new ExplainService((_, ct) => f.Capture(ct), new Model((_, _, _) => Task.FromResult("Looks better.")));
+            service.Start(f.Pr.Key);
+            var result = await Finish(service);
+            Check(result.Status == "failed" && result.Message.Contains("ARM explanation missing"), "Missing ARM examples accepted as complete");
+            var arm = new ExplainArm();
+            var ordinary = new ExplainChange(0, "/model.go", null, "edit", false);
+            arm.Observe(ordinary, "type Request struct { Name string }", "type Request struct { Name string; Count int }");
+            Check(arm.Complete("Ordinary request field.", [ordinary]) == "Ordinary request field.", "Fabricated ARM section");
+            Check(!ExplainArm.Candidate(ordinary, "// /providers/Microsoft.Example/widgets/\nold()", "// /providers/Microsoft.Example/widgets/\nnew()"),
+                "Unchanged ARM reference classified an arbitrary Go edit");
+        });
+        await test("Explain ARM added deleted renamed and unavailable evidence retain honest meaningful sides", async () =>
+        {
+            foreach (var kind in new[] { "add", "delete", "rename, edit" })
+            {
+                var change = new ExplainChange(0, "/deploy.bicep", kind.StartsWith("rename") ? "/old.bicep" : null, kind, false);
+                var arm = new ExplainArm();
+                arm.Observe(change, kind == "add" ? "" : bicepBefore, kind == "delete" ? "" : bicepAfter);
+                arm.Record(0, kind == "add" ? "absent" : "source", bicepBefore, kind == "delete" ? "absent" : "source", bicepAfter,
+                    "Changes the account deployment.", "Deletion or access changes can affect consumers.", "Account added, removed or updated.");
+                var output = arm.Complete("Synthetic.", [change]);
+                Check(output.Contains(kind == "add" ? bicepAfter : bicepBefore) && output.Contains(kind == "rename, edit" ? "Changed lines" : "Not present"),
+                    "Added/deleted/renamed resource lost meaningful source or absence");
+                Check(output.Contains("```diff") && output.Contains(kind == "add" ? "+resource account" : kind == "delete" ? "-resource account" : "-    allowBlobPublicAccess"),
+                    "Added/deleted/modified resource lacks actual changed-line highlighting");
+            }
+            foreach (var pair in new (string? Before, string? After)[] { (null, bicepAfter), (bicepBefore, null), (new string('x', 80_001), bicepAfter) })
+            {
+                using var f = new Fixture();
+                ArmFixture(f, "/deploy.bicep", pair.Before, pair.After);
+                using var context = await f.Capture();
+                Check((await context.ReadChangeAsync(0, default)).Contains("No complete text diff"), "Missing/oversized evidence wasn't reported");
+                var beforeMissing = pair.Before is null || pair.Before.Length > 80_000;
+                context.Arm.Record(0, beforeMissing ? "unavailable" : "source", beforeMissing ? "Before source missing or beyond the size limit." : bicepBefore,
+                    pair.After is null ? "unavailable" : "source", pair.After is null ? "After source missing at pinned revision." : bicepAfter,
+                    "The visible side sets public blob access.", "Cannot establish the complete deployment change.", "Comparison limited by missing source.");
+                var limited = context.Arm.Complete("Limited evidence.", context.Changes);
+                Check(limited.Contains("Bicep example unavailable") && limited.Contains(beforeMissing ? bicepAfter : bicepBefore) &&
+                    context.Coverage().Length > 0, "Missing source silently invented");
+            }
+        });
+        await test("Explain ARM rejects fabricated source derived contracts and fence escapes", async () =>
+        {
+            var arm = new ExplainArm();
+            var change = new ExplainChange(0, "/deploy.bicep", null, "edit", false);
+            arm.Observe(change, bicepBefore, bicepAfter);
+            await Throws<ArgumentException>(() => Task.FromResult(arm.Record(0, "source", bicepAfter, "source", bicepAfter, "Benefit", "Risk", "Difference")));
+            await Throws<ArgumentException>(() => Task.FromResult(arm.Record(0, "absent", "", "source", bicepAfter, "Benefit", "Risk", "Difference")));
+            var contract = new ExplainChange(1, "/api/resource.go", null, "edit", false);
+            var before = "// /providers/Microsoft.Storage/storageAccounts/ 2023-05-01\nname sample properties allowBlobPublicAccess true";
+            var after = before.Replace("true", "false");
+            arm.Observe(contract, before, after);
+            arm.Record(1, "illustrative", bicepBefore, "illustrative", bicepAfter, "Benefit", "Compatibility uncertain", "Access changes");
+            Check(arm.Complete("Synthetic.", [contract]).Contains("Illustrative Bicep derived"), "Contract-derived Bicep mislabeled exact source");
+            foreach (var fabricated in new[] { bicepAfter.Replace("2023-05-01", "2099-01-01"), bicepAfter.Replace("allowBlobPublicAccess", "imaginaryFlag"),
+                bicepAfter.Replace("'sample'", "'invented'"), bicepAfter.Replace("Microsoft.Storage", "Microsoft.Invented"),
+                bicepAfter.Replace("properties: {", "properties: { imaginaryFlag: true,"),
+                bicepAfter.Replace("properties: {", "properties: { 'imaginaryFlag': true,") })
+                await Throws<ArgumentException>(() => Task.FromResult(arm.Record(1, "illustrative", bicepBefore, "illustrative", fabricated, "Benefit", "Risk", "Difference")));
+            var fenced = bicepBefore + "\n// ```\n// <script>hostile()</script>";
+            arm.Observe(change, fenced, bicepAfter);
+            arm.Record(0, "source", fenced, "source", bicepAfter, "Benefit", "Risk", "Difference");
+            Check(arm.Complete("Synthetic.", [change]).Contains("````bicep"), "Source backticks escaped the host code fence");
+            Check(ExplainArm.Candidate(contract, "", "// /providers/Microsoft.Example/widgets/") &&
+                ExplainArm.Candidate(new(2, "/deployment.json", null, "edit", false), "", "{\"$schema\":\"https://schema.management.azure.com/schemas/2019-04-01/deploymentTemplate.json#\"}") &&
+                !ExplainArm.Candidate(new(3, "/settings.json", null, "edit", false), "{}", "{\"enabled\":true}"), "ARM content detection is suffix-only or overbroad");
+        });
+        await test("Explain ARM derives API examples from inspected same-side context without borrowing target or opposite revisions", async () =>
+        {
+            var change = new ExplainChange(0, "/properties.go", null, "edit", false);
+            var arm = new ExplainArm();
+            arm.Observe(change, "allowBlobPublicAccess true", "allowBlobPublicAccess false");
+            const string metadata = "Microsoft.Storage/storageAccounts 2023-05-01 name sample properties";
+            arm.ObserveFile("/resource.json", "target", 1, metadata);
+            await Throws<ArgumentException>(() => Task.FromResult(arm.Record(0, "illustrative", bicepBefore, "illustrative", bicepAfter,
+                "Restricts public access.", "Consumers may fail.", "true to false")));
+            arm.ObserveFile("/resource.json", "before", 1, metadata);
+            await Throws<ArgumentException>(() => Task.FromResult(arm.Record(0, "illustrative", bicepBefore, "illustrative", bicepAfter,
+                "Restricts public access.", "Consumers may fail.", "true to false")));
+            arm.ObserveFile("/resource.json", "after", 1, metadata);
+            arm.Record(0, "illustrative", bicepBefore, "illustrative", bicepAfter,
+                "Restricts public access.", "Consumers may fail.", "true to false");
+            Check(arm.Complete("The ARM API changes access.", [change]).Contains("Illustrative Bicep derived"), "Inspected same-side metadata cannot ground the API example");
+            await Throws<ArgumentException>(() => Task.FromResult(arm.Record(0, "illustrative", bicepBefore, "illustrative",
+                bicepAfter.Replace("'sample'", "'sam'"), "Benefit", "Risk", "Difference")));
+        });
         await test("Explain runtime selects the packaged process architecture rather than the OS or another payload", () =>
         {
             var directory = Path.Combine(Path.GetTempPath(), "ado-explain-runtime-" + Guid.NewGuid().ToString("N"));
@@ -368,6 +493,29 @@ static class ExplainTests
             await bridge.HandleAsync("""{"id":3,"method":"explainPr","params":{"key":"captured"}}""");
             Check(reply!.Contains("unavailable") && reply.Contains("error"), "Unavailable host faked completion");
         });
+    }
+
+    static void ArmFixture(Fixture fixture, string path, string? before, string? after, string kind = "edit")
+    {
+        fixture.AdditionalResponse = request =>
+        {
+            Check(request.Method == HttpMethod.Get, "ARM explanation attempted an ADO write");
+            var uri = request.RequestUri!;
+            if (uri.AbsolutePath.EndsWith("/changes"))
+                return new(HttpStatusCode.OK) { Content = new StringContent(JsonSerializer.Serialize(new
+                {
+                    changeEntries = new[] { new { item = new { path }, changeType = kind } }, nextSkip = 0,
+                })) };
+            if (!uri.AbsolutePath.EndsWith("/items")) return null;
+            var isBefore = uri.Query.Contains(Fixture.Base);
+            var text = isBefore ? before : after;
+            if (text is null) return new(HttpStatusCode.NotFound) { Content = new StringContent("{}") };
+            return new(HttpStatusCode.OK) { Content = new StringContent(JsonSerializer.Serialize(new
+            {
+                path, commitId = isBefore ? Fixture.Base : Fixture.Source, gitObjectType = "blob",
+                contentMetadata = new { isBinary = false }, content = uri.Query.Contains("includeContent=true") ? text : null,
+            })) };
+        };
     }
 
     static async Task<ExplainState> Finish(ExplainService service)

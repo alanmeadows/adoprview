@@ -34,6 +34,7 @@ internal sealed class ExplainContext : IDisposable
     public IReadOnlyList<ExplainChange> Changes => _changes;
     public int DiffReads { get; private set; }
     public int ContextReads { get; private set; }
+    internal ExplainArm Arm { get; } = new();
 
     ExplainContext(AdoClient ado, PrView pr, string repoApi,
         ExplainRevision revision, List<ExplainChange> changes, bool capped, bool requireActive, Func<bool>? ignoreDrafts)
@@ -208,6 +209,7 @@ internal sealed class ExplainContext : IDisposable
             var kinds = change.Kind.Split(',').Select(s => s.Trim()).ToHashSet(StringComparer.OrdinalIgnoreCase);
             var before = kinds.Contains("add") ? "" : await ReadTextAsync(change.OriginalPath ?? change.Path, "before", ct);
             var after = kinds.Contains("delete") ? "" : await ReadTextAsync(change.Path, "after", ct);
+            Arm.Observe(change, before, after);
             if (before is null || after is null) return $"No complete text diff for {change.Path}. " + string.Join(" ", Coverage());
             var diff = new Differ().CreateLineDiffs(before, after, false);
             var output = new StringBuilder($"--- {change.OriginalPath ?? change.Path} @ {Revision.BaseCommit}\n+++ {change.Path} @ {Revision.SourceCommit}\n");
@@ -259,6 +261,7 @@ internal sealed class ExplainContext : IDisposable
                 Omit(path, "context window truncated at 16,000 characters");
                 output = output[..16_000] + "\n[WINDOW TRUNCATED]";
             }
+            else Arm.ObserveFile(path, side, startLine, string.Join("\n", lines.Skip(startLine - 1).Take(120)));
             return $"{path} @ {SideCommit(side)}; {lines.Length} total lines; window starts at {startLine}\n{output}";
         }
         catch (Exception ex) when (ex is not ArgumentException && !ct.IsCancellationRequested)

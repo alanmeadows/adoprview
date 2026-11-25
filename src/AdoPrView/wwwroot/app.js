@@ -555,11 +555,24 @@ function explanationRevision(r) {
 function explanationBody(r) {
   if (!r?.output) return '';
   if (r.status !== 'completed') return `<pre class="explain-stream">${esc(r.output)}</pre>`;
-  const html = window.marked ? marked.parse(r.output, { gfm: true, breaks: true }) : esc(r.output);
+  const renderer = window.marked ? new marked.Renderer() : undefined;
+  if (renderer) {
+    renderer.code = ({ text, lang }) => {
+      const label = lang?.split(/\s/)[0].toLowerCase();
+      const title = label === 'bicep' ? 'Bicep' : label === 'diff' ? 'Diff (- removed, + added)' : 'Code';
+      const body = text.split('\n').map(line => {
+        const safe = esc(line);
+        return label === 'diff' && /^[+-]/.test(line) && !/^(\+\+\+|---)/.test(line)
+          ? (line[0] === '+' ? `<ins>${safe}</ins>` : `<del>${safe}</del>`) : safe;
+      }).join('\n');
+      return `<p><strong>${title}</strong></p><pre><code>${body}\n</code></pre>`;
+    };
+  }
+  const html = window.marked ? marked.parse(r.output, { gfm: true, breaks: true, renderer }) : esc(r.output);
   // Model output cannot load remote media, navigate links or inject interactive controls.
   return window.DOMPurify ? DOMPurify.sanitize(html, {
     ALLOWED_TAGS: ['p', 'br', 'strong', 'em', 'ul', 'ol', 'li', 'code', 'pre', 'h1', 'h2', 'h3', 'h4',
-      'table', 'thead', 'tbody', 'tr', 'th', 'td', 'blockquote', 'hr', 'del'],
+      'table', 'thead', 'tbody', 'tr', 'th', 'td', 'blockquote', 'hr', 'del', 'ins'],
     ALLOWED_ATTR: [],
   }) : esc(r.output);
 }

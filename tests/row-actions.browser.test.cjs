@@ -420,6 +420,64 @@ test('real row hit testing and action identity across refreshes', { timeout: 900
       await send('Emulation.setDeviceMetricsOverride', {width:1600,height:1000,deviceScaleFactor:1,mobile:false});
     });
 
+    await t.test('Explain ARM Bicep preserves indentation, safe labels and highlighted differences through retained output', async () => {
+      const key = 'sample-service-id:101';
+      const before = "resource account 'Microsoft.Storage/storageAccounts@2023-05-01' = {\n  name: 'sample'\n  properties: {\n    allowBlobPublicAccess: true\n  }\n}";
+      const after = before.replace('true', 'false');
+      const output = process.env.ADOPRVIEW_ARM_EXAMPLE
+        ? require('node:fs').readFileSync(process.env.ADOPRVIEW_ARM_EXAMPLE, 'utf8')
+        : `## Azure Resource Manager changes\n\n### /deploy.bicep\n\n#### Before\n\nExact source excerpt (not deployment-validated):\n\n\`\`\`bicep\n${before}\n\`\`\`\n\n#### After\n\nExact source excerpt (not deployment-validated):\n\n\`\`\`bicep\n${after}\n\`\`\`\n\n#### Changed lines (- removed, + added)\n\n\`\`\`diff\n-    allowBlobPublicAccess: true\n+    allowBlobPublicAccess: false\n\`\`\`\n\n**Improvement:** Disables public blob access.\n\n**Risks and uncertainty:** Anonymous consumers may fail; no deployment was run.`;
+      for (const [width, theme] of [[1600, 'light'], [900, 'dark']]) {
+        await send('Emulation.setDeviceMetricsOverride', { width, height: 1100, deviceScaleFactor: 1, mobile: false });
+        await reset(true);
+        await evaluate(`changeTheme(${JSON.stringify(theme)});S.expanded.add('${key}');renderRows();
+          updateExplanation({key:'${key}',requestId:'arm-example',sequence:++window.explainSequence,status:'completed',
+            message:'Synthetic ARM explanation ready.',output:${JSON.stringify(output)},coverage:[]});`);
+        const check = () => evaluate(`(()=>{
+          const card=document.querySelector('[data-key="${key}"] .explanation'),out=card.querySelector('.explain-output');
+          const codes=[...out.querySelectorAll('pre code')];
+          return {
+            before:codes[0]?.textContent, after:codes[1]?.textContent,
+            whitespace:getComputedStyle(codes[0].parentElement).whiteSpace,
+            labels:[...out.querySelectorAll('p > strong')].map(n=>n.textContent),
+            removed:out.querySelector('pre del')?.textContent, added:out.querySelector('pre ins')?.textContent,
+            removedColor:getComputedStyle(out.querySelector('pre del')).color,
+            addedColor:getComputedStyle(out.querySelector('pre ins')).color,
+            safe:!out.querySelector('script,img,a,button,iframe,style,[onerror]'),
+            fits:card.scrollWidth<=card.clientWidth+1
+          };
+        })()`);
+        let actual = await check();
+        assert.equal(actual.before, before + '\n');
+        assert.equal(actual.after, after + '\n');
+        assert.equal(actual.whitespace, 'pre');
+        assert.ok(actual.labels.includes('Bicep'));
+        assert.equal(actual.removed, '-    allowBlobPublicAccess: true');
+        assert.equal(actual.added, '+    allowBlobPublicAccess: false');
+        assert.notEqual(actual.removedColor, actual.addedColor);
+        assert.ok(actual.safe && actual.fits);
+        if (width === 1600 && process.env.ADOPRVIEW_ARM_SCREENSHOT) {
+          await evaluate(`document.querySelector('[data-key="${key}"] .explanation').scrollIntoView({block:'start'});`);
+          const shot = await send('Page.captureScreenshot', { format: 'png' });
+          await writeFile(process.env.ADOPRVIEW_ARM_SCREENSHOT, Buffer.from(shot.data, 'base64'));
+          await evaluate(`const output=document.querySelector('[data-key="${key}"] .explain-output');output.scrollTop=output.scrollHeight;`);
+          const diffShot = await send('Page.captureScreenshot', { format: 'png' });
+          await writeFile(process.env.ADOPRVIEW_ARM_SCREENSHOT.replace(/\.png$/i, '-diff.png'), Buffer.from(diffShot.data, 'base64'));
+        }
+        await evaluate(`S.expanded.delete('${key}');renderRows();S.expanded.add('${key}');renderRows();`);
+        assert.deepEqual(await check(), actual, 'Retained output changed code or lost safe diff treatment');
+        const hostile = '```bicep onclick=evil\n  name: \'<script>window.armInjected=true</script>&<img src=x onerror=evil()>\'\n```\n\n```diff\n-<button onclick=evil()>old</button>\n+<img src=x onerror=evil()>\n```';
+        await evaluate(`updateExplanation({...S.explanations.get('${key}'),sequence:++window.explainSequence,output:${JSON.stringify(hostile)}});`);
+        assert.equal(await evaluate(`(()=>{
+          const out=document.querySelector('[data-key="${key}"] .explain-output');
+          return !window.armInjected&&!out.querySelector('script,img,button,[onclick],[onerror]')&&
+            out.querySelector('pre code').textContent.includes('<script>window.armInjected=true</script>&<img')&&
+            out.querySelector('pre ins').textContent==='+<img src=x onerror=evil()>';
+        })()`), true);
+      }
+      await send('Emulation.setDeviceMetricsOverride', { width:1600,height:1000,deviceScaleFactor:1,mobile:false });
+    });
+
     await t.test('Explain retained activity meets missing, filtered, hidden, cancellation, replacement and return contracts', async t => {
       const key = 'sample-service-id:101', other = 'sample-api-id:104';
       const metrics = [];

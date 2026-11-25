@@ -299,6 +299,9 @@ main { flex: 1; overflow: auto; padding: 0 20px 28px; }
 .explanation .body { padding: 14px 16px; }
 .explain-output { max-height: 520px; overflow: auto; scrollbar-gutter: stable; }
 .explain-output > * { max-width: 75ch; }
+.explain-output pre { white-space: pre; overflow-wrap: normal; }
+.explain-output pre ins { color: var(--ready); background: var(--ok-bg); text-decoration: none; }
+.explain-output pre del { color: var(--blocked); background: var(--fail-bg); text-decoration: none; }
 .explain-stream { white-space: pre-wrap; overflow-wrap: anywhere; font: inherit; margin: 0; color: var(--text2); }
 .explain-revision { overflow-wrap: anywhere; }
 .explain-coverage p { margin: 8px 0 0; color: var(--text2); overflow-wrap: anywhere; }

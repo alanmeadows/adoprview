@@ -371,6 +371,25 @@ paths, revision identifiers and omissions separately, collapsed by default.
 Drafts are supported. This is separate from
 **Fix PR**: it does not start WSL, edit files, approve, publish or update ADO.
 
+For Azure Resource Manager changes, Explain asks Copilot to identify deployment-facing
+Bicep, ARM templates and resource/API contract changes, not ARM CPU changes or arbitrary
+JSON/Go edits. A host-rendered **Azure Resource Manager changes** section includes
+**Before** and **After** Bicep, a focused `-`/`+` changed-lines block, improvement and
+risks/uncertainty. Exact Bicep excerpts are checked against the inspected revision;
+derived examples are labeled **illustrative**, with resource types, API versions,
+properties and literal values checked against that side's evidence. Neither means a
+deployment was validated. Added/deleted files explicitly mark the missing side.
+When a resource has no counterpart, or the available evidence cannot support Bicep,
+the example says **unavailable** and why rather than inventing a template.
+
+Detected Bicep/template changes cannot finish without recorded examples or explicit
+limitations; one bounded model follow-up requests missing records, otherwise Explain
+fails visibly. Semantic ARM API detection and the benefit/risk assessment still depend
+on the model's inspection and judgment. Unread/omitted changes can hide ARM changes;
+the coverage notes remain authoritative. Non-ARM explanations need no ARM section.
+Fenced code preserves indentation, labels Bicep, and highlights diff additions/removals
+with both signs and theme colors. Retained in-memory output uses the same renderer.
+
 Explain uses the native Windows Copilot SDK and its supported default model.
 Sign in with the native Windows Copilot CLI beforehand; the app reuses supported
 Copilot authentication, not your ADO token. Missing sign-in, model/access failures

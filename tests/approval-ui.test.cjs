@@ -482,7 +482,7 @@ test('Explain cancellation needs the exact active request, not current PR member
 test('Explain sanitizes completed Markdown without remote media/links/controls and labels partial errors', () => {
   const { hooks, pr, window, context } = setup();
   let options;
-  context.marked = window.marked = { parse: text => text };
+  context.marked = window.marked = { parse: text => text, Renderer: class {} };
   context.DOMPurify = window.DOMPurify = { sanitize: (_, config) => { options = config; return '<p>safe</p>'; } };
   assert.equal(hooks.explanationBody({ output: '<img src="https://evil.invalid/">', status: 'completed' }), '<p>safe</p>');
   for (const tag of ['a', 'img', 'script', 'iframe', 'input', 'button', 'style', 'svg'])
