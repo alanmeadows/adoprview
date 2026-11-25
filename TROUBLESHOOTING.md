@@ -107,9 +107,9 @@ with a message in the row; it does not stop the dashboard.
 
 | Feature | Windows needs | WSL needs | Sign-in used |
 |---|---|---|---|
-| Viewing PRs, merge re-checks, Auto, re-queue | .NET Desktop Runtime 10, WebView2 runtime, Azure CLI (`az`) | Nothing | `az login` in Windows, or `AZURE_DEVOPS_EXT_PAT` / `AZURE_DEVOPS_PAT` set before the app starts |
+| Viewing PRs, merge re-checks, Auto, re-queue | WebView2 runtime; Azure CLI (`az`) unless a PAT variable is set; .NET 10 Desktop Runtime only for framework-dependent builds (release downloads are self-contained) | Nothing | `az login` in Windows, or `AZURE_DEVOPS_EXT_PAT` / `AZURE_DEVOPS_PAT` set before the app starts |
 | **Explain this PR** | The full app package (bundled runtime), GitHub CLI `gh` on the app's PATH | Nothing | Windows `gh auth login` with Copilot access |
-| **Ask Copilot** / **Review with a lens** | Same as Explain | `wsl.exe`, a distro with `git` and `python3`, and a checkout of the PR's repository (Settings → Copilot in WSL, default `~/clones/<repo>`) whose remote matches the PR's ADO repository | Windows `gh` for Copilot; your existing WSL Git credentials for fetching |
+| **Ask Copilot** / **Review with a lens** | Same as Explain | `wsl.exe`, a distro with `git`, `python3` and `flock` (util-linux), and a checkout of the PR's repository (Settings → Copilot in WSL, default `~/clones/<repo>`) whose remote matches the PR's ADO repository | Windows `gh` for Copilot; your existing WSL Git credentials for fetching |
 | **TikTok This PR** | Same as Explain, plus Windows `az`, H.264/AAC encoders (Windows N needs the Media Feature Pack) | Nothing | Windows `gh` with access to the `claude-opus-5.5` model; `az login` with Speech access (**Cognitive Services Speech User**) |
 | **Fix PR** | `wsl.exe` | A distro with `git`, an authenticated `copilot` CLI, `bgtask` (on PATH or `~/go/bin/bgtask`), `flock`, `setsid`, `python3`; optional `~/.config/bash/environment` | `copilot` sign-in **inside that WSL distro**. Windows sign-ins are not used. |
 | **PoP** | WebView2 runtime | Nothing | Your normal organization sign-in in the PoP pane; human only |
@@ -155,7 +155,8 @@ All under `%LOCALAPPDATA%\AdoPrView` unless noted.
 | `Diagnostics\<session>\events.jsonl` (and `events.previous.jsonl`) | One JSON line per lifecycle event: start, window state, exit, handled and unhandled errors, WebView failures, update check failures. Exceptions are recorded as type, error code and method names only. Max 512 KiB per file; the 10 most recent sessions are kept. | Mostly. Read it first: some `reason` fields hold short messages (for example an update-check error). |
 | `Explain\runtime\logs\process-*.log` | The bundled Copilot runtime's own log for Explain. Errors only. | Review first; may contain local paths. |
 | `Investigations\runtime\logs`, `Videos\runtime\logs` | Same, for questions/lens reviews and TikTok. | Review first. |
-| `CopilotRuns` | Fix PR run records. Each run folder can hold `prepare.stderr` and the run's output log. | **No**, not without careful redaction: may contain remote URLs, authentication details and code. |
+| `CopilotRuns` | Fix PR recovery records and lock files on Windows. Not logs. | No: names your repositories and branches. |
+| In the WSL distro: `~/.local/state/ado-prview/runs/<run-id>/prepare.stderr` | Fix PR preparation errors. The Fix card shows this as **Private preparation log** and the `bgtask` output as **Supervised log**. | **No**, not without careful redaction: may contain remote URLs, authentication details and code. |
 | `Videos\completed`, `Videos\jobs` | Finished MP4s and private storyboards/narration. | No: derived from private code. |
 | `settings.json` | Your repositories, watched authors, WSL mappings. | No: names your organization and repositories. |
 | `WebView2`, `PoPWebView2` | Browser profiles, including sign-in cookies. | **Never.** |
