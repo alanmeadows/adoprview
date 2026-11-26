@@ -410,6 +410,58 @@ foreach (var (kind, status) in new[] { ("build", "rejected"), ("status", "reject
         return Task.CompletedTask;
     });
 
+foreach (var status in new[] { "running", "queued", "rejected", "broken" })
+    await Test("optional pipelines do not hide human actions: " + status, () =>
+    {
+        foreach (var kind in new[] { "build", "status", "review" })
+        foreach (var hasRequiredBuild in new[] { false, true })
+        {
+            var pr = Pr(autoCompleteBy: null);
+            if (hasRequiredBuild) pr.Policies.Add(Policy("build", "approved"));
+            pr.Policies.Add(Policy(kind, status, automaticReview: kind == "review", blocking: false));
+            pr.Policies.Add(Policy("pop", "rejected"));
+            PrService.Classify(pr);
+            Check(pr.Lane == Lane.NeedsHuman && pr.Blockers.Count == 0 && pr.Waiting.Count == 0 &&
+                pr.HumanActions.Contains("pop") && pr.Gates["build"].State == (hasRequiredBuild ? "ok" : "na"),
+                "Optional pipeline changed lane, build gate or PoP availability");
+            Check(pr.Gates["checks"].State == "na" && pr.Gates["reviews"].State == "ok",
+                "Optional status/review automation manufactured a gate");
+        }
+        return Task.CompletedTask;
+    });
+
+foreach (var status in new[] { "running", "queued", "rejected", "broken" })
+    await Test("optional pipelines preserve required pipeline precedence: " + status, () =>
+    {
+        var pr = Pr(autoCompleteBy: null);
+        pr.Policies.Add(Policy("build", status));
+        pr.Policies.Add(Policy("build", "rejected", blocking: false));
+        pr.Policies.Add(Policy("build", "running", blocking: false));
+        PrService.Classify(pr);
+        var failed = status is "rejected" or "broken";
+        Check(pr.Lane == (failed ? Lane.Blocked : Lane.Waiting) && pr.Gates["build"].State == (failed ? "fail" : "pending") &&
+            pr.Blockers.Count == (failed ? 1 : 0) && pr.Waiting.Count == (failed ? 0 : 1),
+            "Optional noise changed the required pipeline's outcome");
+        return Task.CompletedTask;
+    });
+
+foreach (var blocker in new[] { "conflict", "review", "thread", "bot", "required check" })
+    await Test("optional pipelines preserve nonpipeline blocker: " + blocker, () =>
+    {
+        var pr = Pr(autoCompleteBy: null);
+        pr.Policies.Add(Policy("build", "approved"));
+        pr.Policies.Add(Policy("build", "rejected", blocking: false));
+        if (blocker == "conflict") pr.MergeStatus = "conflicts";
+        if (blocker == "review") pr.Reviewers.Add(new("Reviewer", -10, true, false));
+        if (blocker == "thread") pr.Threads.Add(new(1, "active", "Reviewer", false, false, "Fix", 0, null, null, DateTimeOffset.UtcNow, "#"));
+        if (blocker == "bot") pr.Agency = new("findings", 1, 1, "Open finding");
+        if (blocker == "required check") pr.Policies.Add(Policy("status", "rejected"));
+        PrService.Classify(pr);
+        Check(pr.Lane == Lane.Blocked && pr.Blockers.Count == 1 && pr.Waiting.Count == 0 && pr.Gates["build"].State == "ok",
+            "Passed required build and optional failure concealed another blocker");
+        return Task.CompletedTask;
+    });
+
 await Test("only required no-vote reviewers create a human action", () =>
 {
     foreach (var required in new[] { false, true })

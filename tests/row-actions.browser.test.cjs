@@ -375,6 +375,54 @@ test('real row hit testing and action identity across refreshes', { timeout: 900
       return { ...p, x: menu.x, y: menu.y };
     };
 
+    await t.test('optional pipelines never become primary failed gates and keep exact secondary actions', async () => {
+      const key = 'sample-service-id:101';
+      for (const requiredFailed of [false, true]) {
+        await reset(true);
+        await evaluate(`(()=>{
+          const snap=structuredClone(S.snap),pr=snap.prs.find(p=>p.key==='${key}');
+          pr.approval=null;pr.error=null;pr.blockers=${JSON.stringify(requiredFailed ? ['Build failed: Required CI'] : [])};
+          pr.waiting=[];pr.humanActions=['pop'];pr.lane='${requiredFailed ? 'blocked' : 'needsHuman'}';
+          pr.gates.build={state:'${requiredFailed ? 'fail' : 'ok'}',label:'${requiredFailed ? 'Failed' : 'Passed'}',detail:'Required CI'};
+          pr.policies=[
+            {evaluationId:'required',kind:'build',name:'Required CI',isBlocking:true,status:'${requiredFailed ? 'rejected' : 'approved'}'},
+            {evaluationId:'optional-running',kind:'build',name:'Optional running',isBlocking:false,status:'running'},
+            {evaluationId:'optional-failed',kind:'build',name:'Optional failed',isBlocking:false,status:'rejected'}
+          ];
+          pr.failedBuilds=[
+            {buildId:222,evaluationId:'optional-failed',name:'Optional failed',isBlocking:false,url:'#',
+             tasks:[{name:'Optional task',issues:['Optional issue'],logId:22}]}
+          ];
+          ${requiredFailed ? `pr.failedBuilds.push({buildId:111,evaluationId:'required',name:'Required CI',isBlocking:true,url:'#',
+             tasks:[{name:'Required task',issues:['Required issue'],logId:11}]});` : ''}
+          S.logs.clear();setSnapshot(snap);S.expanded.add('${key}');renderRows();
+        })()`);
+        await frame();
+        const details = await evaluate(`(()=>{
+          const row=document.querySelector('[data-key="${key}"]');
+          return {primary:[...row.querySelectorAll('.card.failed h3')].map(e=>e.textContent),
+            secondary:row.querySelector('.optional-build')?.textContent,
+            status:row.querySelector('.pr-status')?.textContent,
+            optionalLabel:row.querySelector('.optional-build')?.closest('.full')!==null};
+        })()`);
+        assert.equal(details.primary.length, requiredFailed ? 1 : 0);
+        if (requiredFailed) assert.match(details.primary[0], /Failed gate.*Required CI/);
+        assert.match(details.secondary, /Optional failed build \(not a merge blocker\).*Optional failed/s);
+        assert.match(details.secondary, /Optional issue/);
+        assert.equal(details.optionalLabel, false, 'Optional failure must not enter full-width primary diagnostics');
+        assert.doesNotMatch(details.status, /Optional/);
+        const logReads = (await calls()).filter(c => c.method === 'logTail');
+        assert.deepEqual(logReads.map(c => c.buildId), requiredFailed ? [111] : []);
+        await click(await point(key, '.optional-build [data-act="loadLog"]'));
+        await frame();
+        assert.equal((await calls()).filter(c => c.method === 'logTail').at(-1).buildId, 222);
+        assert.equal((await calls()).filter(c => c.method === 'logTail').at(-1).logId, 22);
+        await click(await point(key, '.optional-build [data-act="requeue"]'));
+        await frame();
+        assert.equal((await calls()).filter(c => c.method === 'requeue').at(-1).evaluationId, 'optional-failed');
+      }
+    });
+
     await t.test('Explain preserves row targets, sanitizes output, discloses pinned evidence and supports cancel/retry at wide and narrow widths', async () => {
       const key='sample-service-id:101';
       for (const width of [1600,900]) {

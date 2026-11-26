@@ -93,7 +93,7 @@ Fixes AB#1234`;
     base(105, 'sample-service', 'Move reconciliation loop onto shared workqueue', 'blocked', {
       blockers: ['Build failed: sample-service-PR', '2 unresolved comment thread(s)'], human: ['reviews', 'autocomplete'], updated: 32, description: desc,
       gates: { ...okGates, build: g('fail', 'Failed', 'sample-service-PR'), comments: g('fail', '2 open'), reviews: g('human', 'Needs +1'), pop: g('human', 'Tap key'), autocomplete: g('human', 'Not set') },
-      failedBuilds: [{ buildId: 991200, name: 'sample-service-PR', url: '#', evaluationId: 'e1', tasks: [
+      failedBuilds: [{ buildId: 991200, name: 'sample-service-PR', url: '#', evaluationId: 'e1', isBlocking: true, tasks: [
         { name: 'Run unit tests', path: 'Validate › Unit', result: 'failed', logId: 41, issues: ["Bash exited with code '2'.", 'reconcile_test.go:142: expected requeue after 2s, got 0s'] },
         { name: 'Publish test results', path: 'Validate › Unit', result: 'failed', logId: 44, issues: ['There are one or more test failures.'] },
       ] }],
