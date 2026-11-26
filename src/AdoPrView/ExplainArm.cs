@@ -7,7 +7,7 @@ namespace AdoPrView;
 
 internal sealed class ExplainArm
 {
-    sealed record Source(ExplainChange Change, string? Before, string? After);
+    sealed record Source(ExplainChange Change, string? Before, string? After, string InspectedBefore, string InspectedAfter);
     readonly ConcurrentDictionary<int, Source> _sources = new();
     readonly ConcurrentDictionary<int, string> _sections = new();
     readonly ConcurrentDictionary<string, string> _context = new(StringComparer.Ordinal);
@@ -28,7 +28,10 @@ internal sealed class ExplainArm
     }
 
     internal void Observe(ExplainChange change, string? before, string? after) =>
-        _sources[change.Index] = new(change, before, after);
+        ObserveDiff(change, before, after, before ?? "", after ?? "");
+
+    internal void ObserveDiff(ExplainChange change, string? before, string? after, string inspectedBefore, string inspectedAfter) =>
+        _sources[change.Index] = new(change, before, after, inspectedBefore, inspectedAfter);
 
     internal void ObserveFile(string path, string side, int startLine, string text)
     {
@@ -71,17 +74,21 @@ internal sealed class ExplainArm
             return "Bicep example unavailable: " + Inline(code) + " No deployment validation was performed.";
         if (kind is not ("source" or "illustrative") || absent || text is null || string.IsNullOrWhiteSpace(code))
             throw new ArgumentException("Use source/illustrative with inspected evidence, absent only for an added/deleted file, or unavailable with an honest reason.");
+        var side = isBefore ? "before:" : "after:";
+        var path = isBefore ? source.Change.OriginalPath ?? source.Change.Path : source.Change.Path;
+        var inspected = isBefore ? source.InspectedBefore : source.InspectedAfter;
         if (kind == "source")
         {
-            var path = isBefore ? source.Change.OriginalPath ?? source.Change.Path : source.Change.Path;
+            var windows = _context.Where(p => p.Key.StartsWith($"{side}{path}:", StringComparison.Ordinal)).Select(p => p.Value);
+            var excerpt = code.Replace("\r\n", "\n").Trim();
             if (!path.EndsWith(".bicep", StringComparison.OrdinalIgnoreCase) ||
-                !text.Replace("\r\n", "\n").Contains(code.Replace("\r\n", "\n").Trim(), StringComparison.Ordinal))
+                !text.Replace("\r\n", "\n").Contains(excerpt, StringComparison.Ordinal) ||
+                !new[] { inspected }.Concat(windows).Any(window => window.Replace("\r\n", "\n").Contains(excerpt, StringComparison.Ordinal)))
                 throw new ArgumentException("An exact-source Bicep example must be a contiguous excerpt of the inspected Bicep side; use illustrative for derived API/template examples.");
         }
         else
         {
-            var side = isBefore ? "before:" : "after:";
-            text += "\n" + string.Join("\n", _context.Where(p => p.Key.StartsWith(side, StringComparison.Ordinal)).Select(p => p.Value));
+            text = inspected + "\n" + string.Join("\n", _context.Where(p => p.Key.StartsWith(side, StringComparison.Ordinal)).Select(p => p.Value));
             var resources = Regex.Matches(code, @"\bresource\s+\w+\s+'([^'@]+)@([^']+)'");
             if (resources.Count == 0) throw new ArgumentException("Derived Bicep needs an evidenced resource type and API version; otherwise use unavailable.");
             foreach (Match resource in resources)

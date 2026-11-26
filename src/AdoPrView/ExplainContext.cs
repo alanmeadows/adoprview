@@ -209,19 +209,29 @@ internal sealed class ExplainContext : IDisposable
             var kinds = change.Kind.Split(',').Select(s => s.Trim()).ToHashSet(StringComparer.OrdinalIgnoreCase);
             var before = kinds.Contains("add") ? "" : await ReadTextAsync(change.OriginalPath ?? change.Path, "before", ct);
             var after = kinds.Contains("delete") ? "" : await ReadTextAsync(change.Path, "after", ct);
-            Arm.Observe(change, before, after);
+            Arm.ObserveDiff(change, before, after, "", "");
             if (before is null || after is null) return $"No complete text diff for {change.Path}. " + string.Join(" ", Coverage());
             var diff = new Differ().CreateLineDiffs(before, after, false);
             var output = new StringBuilder($"--- {change.OriginalPath ?? change.Path} @ {Revision.BaseCommit}\n+++ {change.Path} @ {Revision.SourceCommit}\n");
+            var inspectedBefore = new StringBuilder();
+            var inspectedAfter = new StringBuilder();
+            void Line(char prefix, string line)
+            {
+                output.Append(prefix).AppendLine(line);
+                if (output.Length > 24_000) return;
+                if (prefix != '+') inspectedBefore.AppendLine(line);
+                if (prefix != '-') inspectedAfter.AppendLine(line);
+            }
             foreach (var block in diff.DiffBlocks)
             {
                 output.AppendLine($"@@ before line {block.DeleteStartA + 1}, after line {block.InsertStartB + 1} @@");
-                for (var i = Math.Max(0, block.DeleteStartA - 3); i < block.DeleteStartA; i++) output.AppendLine(" " + diff.PiecesOld[i]);
-                for (var i = block.DeleteStartA; i < block.DeleteStartA + block.DeleteCountA; i++) output.AppendLine("-" + diff.PiecesOld[i]);
-                for (var i = block.InsertStartB; i < block.InsertStartB + block.InsertCountB; i++) output.AppendLine("+" + diff.PiecesNew[i]);
+                for (var i = Math.Max(0, block.DeleteStartA - 3); i < block.DeleteStartA; i++) Line(' ', diff.PiecesOld[i]);
+                for (var i = block.DeleteStartA; i < block.DeleteStartA + block.DeleteCountA; i++) Line('-', diff.PiecesOld[i]);
+                for (var i = block.InsertStartB; i < block.InsertStartB + block.InsertCountB; i++) Line('+', diff.PiecesNew[i]);
                 for (var i = block.InsertStartB + block.InsertCountB; i < Math.Min(diff.PiecesNew.Count, block.InsertStartB + block.InsertCountB + 3); i++)
-                    output.AppendLine(" " + diff.PiecesNew[i]);
+                    Line(' ', diff.PiecesNew[i]);
             }
+            Arm.ObserveDiff(change, before, after, inspectedBefore.ToString(), inspectedAfter.ToString());
             if (!diff.DiffBlocks.Any()) output.AppendLine("No textual change (possibly a rename or metadata-only change).");
             NoteEvidence($"Diff: {change.OriginalPath ?? change.Path} -> {change.Path}." +
                 (output.Length > 24_000 ? " Partial inspection; diff truncated after 24,000 characters." : ""));

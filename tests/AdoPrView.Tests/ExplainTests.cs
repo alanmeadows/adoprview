@@ -109,6 +109,7 @@ static class ExplainTests
                 using var context = await f.Capture();
                 Check((await context.ReadChangeAsync(0, default)).Contains("No complete text diff"), "Missing/oversized evidence wasn't reported");
                 var beforeMissing = pair.Before is null || pair.Before.Length > 80_000;
+                await context.ReadFileAsync("/deploy.bicep", beforeMissing ? "after" : "before", 1, default);
                 context.Arm.Record(0, beforeMissing ? "unavailable" : "source", beforeMissing ? "Before source missing or beyond the size limit." : bicepBefore,
                     pair.After is null ? "unavailable" : "source", pair.After is null ? "After source missing at pinned revision." : bicepAfter,
                     "The visible side sets public blob access.", "Cannot establish the complete deployment change.", "Comparison limited by missing source.");
@@ -116,6 +117,31 @@ static class ExplainTests
                 Check(limited.Contains("Bicep example unavailable") && limited.Contains(beforeMissing ? bicepAfter : bicepBefore) &&
                     context.Coverage().Length > 0, "Missing source silently invented");
             }
+        });
+        await test("Explain ARM grounding excludes unseen diff tails and unchanged source until targeted reads", async () =>
+        {
+            using var f = new Fixture();
+            var padding = string.Join("\n", Enumerable.Repeat("// " + new string('x', 300), 100)) + "\n";
+            ArmFixture(f, "/deploy.bicep", padding + bicepBefore, padding.Replace('x', 'y') + bicepAfter);
+            using var context = await f.Capture();
+            Check((await context.ReadChangeAsync(0, default)).Contains("[DIFF TRUNCATED]"), "Fixture did not truncate the source tool response");
+            foreach (var kind in new[] { "source", "illustrative" })
+                await Throws<ArgumentException>(() => Task.FromResult(context.Arm.Record(0, kind, bicepBefore, kind, bicepAfter,
+                    "Benefit", "Risk", "Difference")));
+            await context.ReadFileAsync("/deploy.bicep", "before", 101, default);
+            await context.ReadFileAsync("/deploy.bicep", "after", 101, default);
+            context.Arm.Record(0, "source", bicepBefore, "source", bicepAfter, "Benefit", "Risk", "Difference");
+            Check(context.Arm.Complete("Read targeted source.", context.Changes).Contains("Exact source excerpt"),
+                "Explicitly delivered source windows could not ground exact examples");
+
+            using var hidden = new Fixture();
+            var gap = string.Join("\n", Enumerable.Repeat("// unchanged padding", 20));
+            ArmFixture(hidden, "/deploy.bicep", "// old\n" + gap + "\n" + bicepBefore, "// new\n" + gap + "\n" + bicepBefore);
+            using var hiddenContext = await hidden.Capture();
+            Check(!(await hiddenContext.ReadChangeAsync(0, default)).Contains("Microsoft.Storage"), "Unchanged resource was exposed in the diff");
+            foreach (var kind in new[] { "source", "illustrative" })
+                await Throws<ArgumentException>(() => Task.FromResult(hiddenContext.Arm.Record(0, kind, bicepBefore, "unavailable",
+                    "Not inspected.", "Benefit", "Risk", "Difference")));
         });
         await test("Explain ARM rejects fabricated source derived contracts and fence escapes", async () =>
         {

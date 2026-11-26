@@ -383,7 +383,10 @@ For Azure Resource Manager changes, Explain asks Copilot to identify deployment-
 Bicep, ARM templates and resource/API contract changes, not ARM CPU changes or arbitrary
 JSON/Go edits. A host-rendered **Azure Resource Manager changes** section includes
 **Before** and **After** Bicep, a focused `-`/`+` changed-lines block, improvement and
-risks/uncertainty. Exact Bicep excerpts are checked against the inspected revision;
+risks/uncertainty. Exact Bicep excerpts are checked against the inspected revision
+and the diff or same-file source windows actually delivered to the model.
+Truncated or unchanged source outside those windows cannot ground examples until
+the model requests the relevant source window;
 derived examples are labeled **illustrative**, with resource types, API versions,
 properties and literal values checked against that side's evidence. Neither means a
 deployment was validated. Added/deleted files explicitly mark the missing side.

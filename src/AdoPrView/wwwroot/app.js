@@ -422,10 +422,7 @@ function renderRows(whenIdle = false) {
   renderRowsContent(whenIdle);
   renderExplanationShelf();
   restoreRunOutputs(selection);
-  for (const placeholder of document.querySelectorAll('video[data-video-media]')) {
-    const existing = players.get(placeholder.dataset.videoMedia);
-    if (existing && existing !== placeholder) placeholder.replaceWith(existing);
-  }
+  restoreVideoPlayers(players);
   restoreExpansionFocus(focused);
   for (const card of document.querySelectorAll('.explanation')) {
     const key = card.dataset.explainKey, d = assistanceDraft(key);
@@ -469,7 +466,6 @@ function renderRowsContent(whenIdle = false) {
   S.runRelocations.clear();
   const vis = baseVisible();
   renderRunShelfContent();
-  renderVideoShelf();
   const rows = $('#rows');
   const empty = $('#empty');
   if (!S.snap.lastRefresh && !vis.length) {
@@ -662,6 +658,7 @@ function explanationIdentity(r) {
 function renderExplanationShelf() {
   const shelf = $('#explanationShelf');
   if (!shelf) return;
+  const players = new Map([...document.querySelectorAll('video[data-video-media]')].map(v => [v.dataset.videoMedia, v]));
   const inline = new Set([...document.querySelectorAll('#rows .explanation')].map(c => c.dataset.explainKey));
   const outside = [...new Map([
     ...[...S.explanations.values()].filter(explanationActive),
@@ -680,6 +677,15 @@ function renderExplanationShelf() {
     $('.explanation-identity', card.closest('.explanation-only')).textContent = explanationIdentity(S.explanations.get(key) || S.investigations.get(key));
     const start = $('[data-act="explainPr"]', card);
     if (start) start.disabled = !canExplain(key) || explanationActive(S.explanations.get(key)) || isBusy(key, 'explainPr');
+  }
+  renderVideoShelf();
+  restoreVideoPlayers(players);
+}
+
+function restoreVideoPlayers(players) {
+  for (const placeholder of document.querySelectorAll('video[data-video-media]')) {
+    const existing = players.get(placeholder.dataset.videoMedia);
+    if (existing && existing !== placeholder) placeholder.replaceWith(existing);
   }
 }
 
@@ -758,7 +764,15 @@ function updateVideo(r) {
 function renderVideoShelf() {
   const shelf = $('#videoShelf');
   if (!shelf) return;
-  const shown = new Set(laneVisible(baseVisible()).map(p => p.key));
+  const inline = new Map([...document.querySelectorAll('.pr-video')]
+    .filter(card => !shelf.contains(card)).map(card => [card.dataset.videoKey, card]));
+  for (const entry of shelf.querySelectorAll('.video-only')) {
+    const owner = inline.get(entry.dataset.key);
+    const player = entry.querySelector('video[data-video-media]');
+    const placeholder = owner?.querySelector('video[data-video-media]');
+    if (player && placeholder?.dataset.videoMedia === player.dataset.videoMedia) placeholder.replaceWith(player);
+  }
+  const shown = new Set(inline.keys());
   const outside = [...S.videos.values()].filter(r => !shown.has(r.key));
   const missing = new Set(outside.map(r => r.key));
   for (const entry of shelf.querySelectorAll('.video-only')) {

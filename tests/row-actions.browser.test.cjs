@@ -837,6 +837,36 @@ test('real row hit testing and action identity across refreshes', { timeout: 900
       assert.equal(cancelled[0].requestId,'1'.padStart(32,'0'));
     });
 
+    await t.test('video has one owner across expanded, retained assistance and standalone shelves without losing playback', async () => {
+      const key='sample-service-id:101';
+      await reset(true);
+      const states=await evaluate(`(()=>{
+        S.expanded.add('${key}');renderRows();
+        updateVideo({key:'${key}',requestId:'d'.repeat(32),sequence:++window.videoSequence,status:'completed',
+          message:'Offline playback fixture',evidence:[],coverage:[],model:'claude-opus-5.5',durationSeconds:1,
+          path:'offline.mp4',mediaUrl:'https://pr-video.local/'+'d'.repeat(32)+'.mp4'});
+        const player=document.querySelector('[data-video-key="${key}"] video');
+        player.currentTime=17;player.volume=.35;player.playbackRate=.75;
+        const snapshot=()=>{
+          const cards=document.querySelectorAll('[data-video-key="${key}"]');
+          const current=cards[0]?.querySelector('video');
+          return {count:cards.length,same:current===player,connected:player.isConnected,
+            position:current?.currentTime,volume:current?.volume,rate:current?.playbackRate};
+        };
+        const states=[snapshot()];
+        updateExplanation({key:'${key}',requestId:'video-owner-explain',sequence:1,status:'running',
+          message:'Synthetic explanation',output:'Reading source',coverage:[]});
+        S.q='no matching PR';renderRows();states.push(snapshot());
+        S.q='';renderRows();states.push(snapshot());
+        S.expanded.delete('${key}');renderRows();states.push(snapshot());
+        updateExplanation({...S.explanations.get('${key}'),sequence:2,status:'failed',
+          message:'Synthetic failure'});states.push(snapshot());
+        S.expanded.add('${key}');renderRows();states.push(snapshot());
+        return states;
+      })()`);
+      assert.deepEqual(states,Array.from({length:6},()=>({count:1,same:true,connected:true,position:17,volume:.35,rate:.75})));
+    });
+
     await t.test('shelf retries and membership changes retain unrelated player nodes, seek and playback settings', async () => {
       const playing='sample-service-id:101', retry='sample-api-id:104';
       await reset(true);

@@ -277,10 +277,14 @@ test('TikTok rejects unsafe media URLs, ignores stale events and escapes the loc
 
 test('video shelf follows the selected lane and keeps lane-retained jobs in their rows', () => {
   for (const [lane, retained] of [['blocked', false], ['waiting', false], ['blocked', true]]) {
-    const { hooks, pr, elements } = setup();
+    const { hooks, pr, elements, document } = setup();
     hooks.S.lane = lane;
     hooks.S.expanded.add(pr.key);
     if (retained) hooks.S.laneRetained.add(pr.key);
+    document.querySelector('#videoShelf').contains = () => false;
+    document.querySelectorAll = selector => selector === '.pr-video' &&
+      elements.get('#rows')?.innerHTML.includes(`data-video-key="${pr.key}"`)
+      ? [{ dataset: { videoKey: pr.key } }] : [];
     hooks.S.videos.set(pr.key, { key: pr.key, requestId: 'lane-job', sequence: 1,
       status: 'rendering', message: 'Rendering', evidence: [], coverage: [] });
     hooks.renderRows();
