@@ -96,7 +96,7 @@ test('task-led assistance keeps exact Explain context, private review intent, se
           if(e&&!explanationContexts.some(x=>x.requestId===e.requestId))explanationContexts.push({requestId:e.requestId,output:e.requestId==='E4'?'## Safe choice\\nSynthetic selected paragraph.\\n'+arm:e.output,revision:e.revision,evidence:e.evidence||[],coverage:e.coverage||[],sectionIndex:p.explanationSectionIndex,sectionTitle:p.explanationSectionIndex===1?'Safe choice':null,receipt:p.explanationSectionIndex===1?'Explicit Safe choice and entire host ARM block retained. Omitted: Large notes. Original coverage retained.':'Entire completed explanation retained.'});
           const referencePrContexts=[...(previous?.referencePrContexts||[])];
           const url='https://dev.azure.com/offline/project/_git/policy/pullrequest/77';
-          if(p.question.includes(url)&&!referencePrContexts.some(x=>x.url===url))referencePrContexts.push({url,revision:{...revision,key:'reference:77',repo:'synthetic-policy',id:77,sourceCommit:'d'.repeat(40)},output:'## Reference changes\\nSynthetic policy: exactly one retry owner.\\n\\n\`\`\`diff\\n+ owner: caller\\n\`\`\`',evidence:['Reference policy.bicep, synthetic fixture only.'],coverage:['Native mocked-source tests separately prove actual retrieval; this UI state is injected.']});
+          if(p.question.includes(url)&&!referencePrContexts.some(x=>x.url===url))referencePrContexts.push({url,revision:{...revision,key:'reference:77',repo:'synthetic-policy',id:77,sourceCommit:'d'.repeat(40)},output:'--- policy.xml @ base\\n+++ policy.xml @ source\\n@@ before line 1, after line 1 @@\\n-  <resource name="old">\\n+  <resource name="new">\\n+  # literal heading *literal* [link](https://evil.invalid/)\\n+  \`\`\`\\n+    indent\\n',evidence:['Reference policy.xml, synthetic fixture only.'],coverage:['Native mocked-source tests separately prove actual retrieval; this UI state is injected.']});
           return {key:p.key,conversationId:previous?.conversationId||'conversation-'+p.key,requestId:'turn-'+(++invRequest),sequence:++invSequence,status:'running',message:'Inspecting synthetic target and canonical ADO reference. No comments posted.',revision,worktree:'Synthetic isolated source',
             turns:previous?.turns||[],evidence:[],coverage:[],explanationContexts,referencePrContexts};
         }
@@ -152,6 +152,10 @@ test('task-led assistance keeps exact Explain context, private review intent, se
     await evaluate(`finishInv('lens',[{id:'f1',title:'Duplicate retry owner',body:'Synthetic comparison to reference policy: both caller and job retry.',path:'infra/main.bicep',line:4,quote:'retryPolicy: OnFailure'},{id:'f2',title:'Cancellation deadline',body:'Synthetic second concern.',path:'src/retry.cs',line:12,quote:'deadline'}])`);
     assert.match(await evaluate(`card().querySelector('.reference-context summary').textContent`), /synthetic-policy !77.*dddddddddddd/);
     await evaluate(`card().querySelector('.reference-context').open=true;`);
+    assert.equal(await evaluate(`card().querySelector('.reference-output').textContent`),
+      await evaluate(`S.investigations.get(prA.key).referencePrContexts[0].output`));
+    assert.equal(await evaluate(`card().querySelector('.reference-output').children.length`), 0,
+      'Reference source must not be interpreted as Markdown or HTML');
     await screenshot('05b-inspected-reference-result', 'Actual reference-result disclosure separates synthetic target/reference source identities and pinned comparison evidence.');
     await evaluate(`card().querySelector('.reference-context').open=false;`);
     await click('[data-lens-finding="f1"]');

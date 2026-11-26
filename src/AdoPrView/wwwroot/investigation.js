@@ -69,7 +69,7 @@ function renderContextReceipt(r, turn) {
         ${(c.coverage || []).map(x => `<p class="small">${esc(x)}</p>`).join('')}</details>`).join('')}` : ''}
     ${references.map(c => `<details class="reference-context"><summary>Reference PR: ${esc(c.revision.repo)} !${esc(c.revision.id)} · source ${esc(c.revision.sourceCommit.slice(0, 12))}</summary>
       <p class="small">${esc(c.url)}<br>${esc(explanationRevision(c))}</p>
-      <div class="md reference-output">${explanationBody({ output: c.output, status: 'completed' })}</div>
+      <pre class="reference-output" tabindex="0" aria-label="Pinned reference PR source diff">${esc(c.output)}</pre>
       <p class="small">Pinned reference comparison evidence; separate from the target. Inspection/coverage reflects this conversation, not proof of additional reads by this historical answer.</p>
       ${(c.evidence || []).concat(c.coverage || []).map(x => `<p class="small">${esc(x)}</p>`).join('')}</details>`).join('')}`;
 }

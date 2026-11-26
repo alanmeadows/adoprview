@@ -309,8 +309,7 @@ main { flex: 1; overflow: auto; padding: 0 20px 28px; container-type: inline-siz
 .assistance-content form { margin-top: 12px; }
 .assistance-context > details > .explain-output { max-height: 260px; }
 .reference-context { margin: 8px 0; }
-.reference-output { max-height: 260px; overflow: auto; }
-.reference-output pre { white-space: pre; overflow-wrap: normal; }
+.reference-output { max-height: 260px; overflow: auto; white-space: pre; overflow-wrap: normal; }
 .assistance-post-dialog { width: min(800px, 94vw); max-height: 92vh; overflow: auto; padding: 20px; color: var(--text); background: var(--surface, var(--bg2)); border: 1px solid var(--border2); border-radius: var(--card-radius); }
 .assistance-post-dialog::backdrop { background: var(--overlay); }
 .assistance-post-dialog h2 { font-size: 18px; margin-top: 0; }
