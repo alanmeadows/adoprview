@@ -14,6 +14,7 @@ internal sealed class ExplainArm
 
     internal static bool Candidate(ExplainChange change, string? before = null, string? after = null)
     {
+        if (change.Folder) return false;
         if (change.Path.EndsWith(".bicep", StringComparison.OrdinalIgnoreCase) ||
             change.OriginalPath?.EndsWith(".bicep", StringComparison.OrdinalIgnoreCase) == true) return true;
         var text = (before ?? "") + "\n" + (after ?? "");

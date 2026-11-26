@@ -72,6 +72,21 @@ static class ExplainTests
             Check(!ExplainArm.Candidate(ordinary, "// /providers/Microsoft.Example/widgets/\nold()", "// /providers/Microsoft.Example/widgets/\nnew()"),
                 "Unchanged ARM reference classified an arbitrary Go edit");
         });
+        await test("Explain ARM folder entries cannot require impossible records or block completed output", () =>
+        {
+            var folders = new[] {
+                new ExplainChange(0, "/examples.bicep", null, "add", true),
+                new ExplainChange(1, "/examples", "/old-examples.bicep", "rename", true),
+            };
+            var arm = new ExplainArm();
+            Check(arm.Complete("Folder-only changes; no textual ARM deployment change inspected.", folders) ==
+                "Folder-only changes; no textual ARM deployment change inspected.",
+                "An unread folder entry required an impossible ARM record");
+            foreach (var folder in folders)
+                Check(!ExplainArm.Candidate(folder, "", """{"$schema":"https://schema.management.azure.com/schemas/example"}"""),
+                    "Folder paths or supplied ARM-looking text made a folder a record candidate");
+            return Task.CompletedTask;
+        });
         await test("Explain ARM added deleted renamed and unavailable evidence retain honest meaningful sides", async () =>
         {
             foreach (var kind in new[] { "add", "delete", "rename, edit" })
