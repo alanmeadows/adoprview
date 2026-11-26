@@ -520,6 +520,15 @@ test('real row hit testing and action identity across refreshes', { timeout: 900
           document.querySelector('main').scrollTop===window.readingViewport`),true,mutation);
       }
       await evaluate(`window.getSelection().removeAllRanges();`);
+      await evaluate(`S.explanations.get('${key}').evidence=Array.from({length:80},(_,i)=>'Evidence paragraph '+i);
+        S.snap.prs=S.snap.prs.filter(p=>p.key==='${key}');renderRows();
+        renderInvestigation('${key}');
+        document.querySelector('[data-key="${key}"] .assistance-explanation .explain-details').open=true;
+        document.querySelector('main').scrollTop=document.querySelector('main').scrollHeight;
+        window.expandedEvidenceTop=document.querySelector('main').scrollTop;
+        renderInvestigation('${key}');`);
+      assert.equal(await evaluate(`document.querySelector('main').scrollTop`),
+        await evaluate('window.expandedEvidenceTop'), 'Reopening evidence precedes output scroll restoration so the viewport is not clamped');
     });
 
     await t.test('Explain ARM Bicep preserves indentation, safe labels and highlighted differences through retained output', async () => {
