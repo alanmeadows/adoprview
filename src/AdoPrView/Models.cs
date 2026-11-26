@@ -13,7 +13,7 @@ public sealed record PolicyView(
 
 public sealed record FailedTask(string Name, string Path, string Result, int? LogId, List<string> Issues);
 
-public sealed record FailedBuild(int BuildId, string Name, string Url, string? EvaluationId, List<FailedTask> Tasks);
+public sealed record FailedBuild(int BuildId, string Name, string Url, string? EvaluationId, List<FailedTask> Tasks, bool? IsBlocking = null);
 
 public sealed record ThreadView(
     int Id, string Status, string Author, bool IsBot, bool IsAgency, string Content, int Replies,

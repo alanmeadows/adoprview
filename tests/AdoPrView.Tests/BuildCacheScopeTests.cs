@@ -13,6 +13,44 @@ static class BuildCacheScopeTests
 
     public static async Task Run(Func<string, Func<Task>, Task> test)
     {
+        await test("optional pipelines retain evaluation requiredness through cached diagnostics and Fix ordering", async () =>
+        {
+            var handler = new Handler();
+            var store = new SettingsStore(new AppSettings { Repos = [new() { Org = "alpha", Project = "one", Repo = "repo" }] });
+            using var http = new HttpClient(handler);
+            var service = new PrService(new AdoClient(http, _ => Task.FromResult(new AuthenticationHeaderValue("Bearer", "offline"))), store);
+            string Evaluation(string id, string status, bool required) => $$$"""
+                {"evaluationId":"{{{id}}}","status":"{{{status}}}","context":{"buildId":123},
+                 "configuration":{"isEnabled":true,"isBlocking":{{{(required ? "true" : "false")}}},
+                 "type":{"id":"0609b952-1397-4640-95ec-e00a01b2c241","displayName":"Build"},"settings":{"displayName":"{{{id}}}"} } }
+                """;
+            foreach (var optionalStatus in new[] { "running", "queued", "rejected", "broken" })
+            {
+                handler.Evaluations = $$"""{"value":[{{Evaluation("optional", optionalStatus, false)}},{{Evaluation("required", "approved", true)}}]}""";
+                await service.RefreshAsync();
+                Check(service.Current.Error is null && service.Current.RepoErrors.Count == 0, "Refresh failed");
+                var pr = service.Current.Prs.Single();
+                Check(pr.Lane == Lane.NeedsHuman && pr.Gates["build"].State == "ok" && pr.Blockers.Count == 0 && pr.Waiting.Count == 0,
+                    "Parsed optional pipeline hid the available auto-complete action");
+                Check(pr.FailedBuilds.All(f => f.IsBlocking == false && f.EvaluationId == "optional" && f.Name == "optional"),
+                    "Optional diagnostics lost their evaluation identity");
+            }
+            // Two evaluations may share a build id; cached diagnostics must not share policy metadata.
+            handler.Evaluations = $$"""{"value":[{{Evaluation("optional", "rejected", false)}},{{Evaluation("required", "rejected", true)}}]}""";
+            await service.RefreshAsync();
+            var failed = service.Current.Prs.Single();
+            Check(failed.Lane == Lane.Blocked && failed.Blockers.SequenceEqual(["Build failed: required"]), "Optional failure entered blockers");
+            Check(failed.FailedBuilds.Count == 2 && failed.FailedBuilds[0] is { Name: "required", EvaluationId: "required", IsBlocking: true } &&
+                failed.FailedBuilds[1] is { Name: "optional", EvaluationId: "optional", IsBlocking: false }, "Cached policy metadata crossed evaluations");
+            // Reverse the stored order to verify the prompt's independent prioritization.
+            failed.FailedBuilds.Reverse();
+            var prompt = await service.BuildTriagePromptAsync(failed.Key);
+            Check(prompt.IndexOf("Failed required build: required") < prompt.IndexOf("Optional failed build (not a merge blocker): optional") &&
+                prompt.Contains("Issue alpha-one") && prompt.Split("```text").Length == 2, "Fix prompt failed to prioritize or label diagnostics");
+            var json = System.Text.Json.JsonSerializer.Serialize(failed, Bridge.Json);
+            Check(json.Contains("\"isBlocking\":false") && json.Contains("\"isBlocking\":true"), "Bridge lost build requiredness");
+            Check(handler.Reads["alpha/one/timeline"] == 1, "Policy metadata prevented scoped timeline reuse");
+        });
         await test("failed build diagnostics, log tails and Fix prompt never cross organizations or projects with equal build ids", async () =>
         {
             var handler = new Handler();
@@ -59,6 +97,7 @@ static class BuildCacheScopeTests
     sealed class Handler : HttpMessageHandler
     {
         public readonly ConcurrentDictionary<string, int> Reads = new();
+        public string? Evaluations { get; set; }
 
         protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken ct)
         {
@@ -91,7 +130,7 @@ static class BuildCacheScopeTests
                 path.EndsWith("/threads") ? """{"value":[]}""" :
                 path.EndsWith("/iterations") ? """{"value":[{"id":1,"sourceRefCommit":{"commitId":"source"},"updatedDate":"2026-01-01T00:00:00Z"}]}""" :
                 path.EndsWith("/refs") ? $$"""{"value":[{"name":"refs/heads/main","objectId":"{{main}}"}]}""" :
-                path.EndsWith("/evaluations") ? $$$"""
+                path.EndsWith("/evaluations") ? Evaluations ?? $$$"""
                     {"value":[{"evaluationId":"ev-{{{tag}}}","status":"rejected","context":{"buildId":123},
                       "configuration":{"isEnabled":true,"isBlocking":true,"type":{"id":"0609b952-1397-4640-95ec-e00a01b2c241","displayName":"Build"},"settings":{"displayName":"CI"} } }]}
                     """ :

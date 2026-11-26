@@ -150,6 +150,16 @@ merge preview is complete, current or clean, or that every policy is green. Open
 expanded row or ADO when in doubt. [DESIGN.md](DESIGN.md#classification-lanes-sorted-top--bottom)
 has the full classification rules.
 
+Only required pipeline policies contribute build/check failures or pending
+reasons to these lanes. Optional running, queued or failed pipelines do not
+hide available human actions once required gates pass. Other blockers, such as
+conflicts, unresolved threads and rejected reviews, still take precedence.
+Required failures lead the expanded row and Fix diagnostics. Optional failures
+remain inspectable in secondary cards labeled **not a merge blocker**, with
+on-demand log tails, and are labeled separately in the Fix prompt. Requiredness
+comes from the ADO policy evaluation, not the pipeline name; unavailable
+requiredness is shown as unknown rather than assumed optional.
+
 An optional **review bot** (`reviewBot` in settings: display name, ADO
 identity ID and the organization it reviews) gets its own gate column for
 that organization's PRs. Its open findings block; resolved

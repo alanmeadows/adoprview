@@ -81,6 +81,37 @@ test('expanded AI tools precede full diagnostics, Fix has one stable home, and a
   }
 });
 
+test('optional pipelines stay secondary to required failures and retain inspectable diagnostics', async () => {
+  const { hooks, pr, window } = setup();
+  pr.approval = null;
+  pr.failedBuilds = [
+    { buildId: 2, evaluationId: 'optional', name: 'Optional CI', isBlocking: false,
+      tasks: [{ name: 'Optional task', issues: ['Optional issue'], logId: 22 }] },
+    { buildId: 3, evaluationId: 'unknown', name: 'Legacy CI', tasks: [] },
+    { buildId: 1, evaluationId: 'required', name: 'Required CI', isBlocking: true,
+      tasks: [{ name: 'Required task', issues: ['Required issue'], logId: 11 }] },
+  ];
+  const reads = [];
+  window.MockHost.rpc = async (method, params) => { reads.push({ method, ...params }); return 'Synthetic log'; };
+  const html = hooks.renderDetail(pr);
+  await new Promise(resolve => setImmediate(resolve));
+  assert.match(html, /class="card optional-build".*Optional failed build \(not a merge blocker\) · Optional CI/s);
+  assert.match(html, /data-eval="optional"/);
+  assert.match(html, /Optional task/);
+  assert.match(html, /Optional issue/);
+  assert.match(html, /data-build="2" data-logid="22"/);
+  assert.match(html, /requiredness unknown/);
+  assert.ok(html.indexOf('Required CI') < html.indexOf('Optional CI'));
+  assert.ok(html.indexOf('Required CI') < html.indexOf('Legacy CI'));
+  assert.doesNotMatch(html, /Failed gate · Optional CI/);
+  assert.deepEqual(reads.filter(r => r.method === 'logTail').map(r => r.buildId), [1]);
+  pr.failedBuilds = pr.failedBuilds.filter(f => f.isBlocking === false);
+  const optionalOnly = hooks.renderDetail(pr);
+  assert.doesNotMatch(optionalOnly, /class="card failed"|Failed gate/);
+  assert.match(optionalOnly, /Optional failed build/);
+  assert.deepEqual(Array.from(pr.humanActions), ['pop', 'autocomplete']);
+});
+
 test('native Fix delivery is acknowledged even when rendering rejects data; only native sequenced events get acknowledgements', () => {
   const { hooks, sent } = setup('', true);
   hooks.onHostMessage({ event: 'copilotRun', data: null, deliveryId: 41 });

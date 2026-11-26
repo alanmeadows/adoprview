@@ -1433,11 +1433,13 @@ function renderDetail(p) {
   const loadError = p.error ? `<div class="card failed"><h3>Load error</h3><div class="body">${esc(p.error)}</div></div>` : '';
 
   // Failed gates with log tails
-  for (const fb of p.failedBuilds || []) {
+  for (const fb of (p.failedBuilds || []).slice().sort((a, b) =>
+    Number(b.isBlocking === true) - Number(a.isBlocking === true) || Number(a.isBlocking === false) - Number(b.isBlocking === false))) {
+    const optional = fb.isBlocking === false;
     const tasks = (fb.tasks || []).map((t, i) => {
       const lk = logKey(p, fb.buildId, t.logId);
       const log = t.logId != null ? S.logs.get(lk) : undefined;
-      if (t.logId != null && i === 0 && log === undefined) queueMicrotask(() => loadLog(p.key, fb.buildId, t.logId));
+      if (!optional && t.logId != null && i === 0 && log === undefined) queueMicrotask(() => loadLog(p.key, fb.buildId, t.logId));
       let logHtml = '';
       if (log === 'loading') logHtml = `<pre class="log">Loading log tail…</pre>`;
       else if (log instanceof Error) logHtml = `<pre class="log"><span class="e">${esc(log.message)}</span></pre>`;
@@ -1452,9 +1454,11 @@ function renderDetail(p) {
             : log === undefined || log instanceof Error ? `<button class="mini" data-act="loadLog" data-build="${fb.buildId}" data-logid="${t.logId}" ${S.logLoads.has(lk) ? 'disabled aria-busy="true"' : ''}>${log instanceof Error ? 'Retry log tail' : 'Load log tail'}</button>` : '') : ''}
         </div>${issues}${logHtml}</div>`;
     }).join('') || '<div class="body small">No failed task records found in the timeline.</div>';
-    full.push(`<div class="card failed"><h3>✕ Failed gate · ${esc(fb.name)} <span class="small">build ${fb.buildId}</span><span class="grow"></span>
+    const card = `<div class="card ${optional ? 'optional-build' : 'failed'}"><h3>${optional ? 'Optional failed build (not a merge blocker)' : '✕ Failed gate'} · ${esc(fb.name)} <span class="small">build ${fb.buildId}${fb.isBlocking == null ? ' · requiredness unknown' : ''}</span><span class="grow"></span>
       ${fb.evaluationId ? `<button class="mini" data-act="requeue" data-eval="${esc(fb.evaluationId)}">${svg('play')} Re-queue</button>` : ''}
-      <button class="mini" data-act="url" data-url="${esc(fb.url)}">${svg('ext')} Open logs</button></h3>${tasks}</div>`);
+      <button class="mini" data-act="url" data-url="${esc(fb.url)}">${svg('ext')} Open logs</button></h3>${tasks}</div>`;
+    if (optional) right.push(card);
+    else full.push(card);
   }
 
   left.push(`<div class="card"><h3>Description</h3><div class="body md clamp">${md(p.description)}</div></div>`);

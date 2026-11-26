@@ -534,10 +534,13 @@ public sealed partial class PrService
             }
             view.Policies.Add(p);
             if (kind == "build" && p.Status is "rejected" or "broken" && buildId is int fb)
-                failedBuilds.Add(GetFailedBuildAsync(view, fb, name, p.EvaluationId));
+                failedBuilds.Add(GetFailedBuildAsync(view, fb, name, p.EvaluationId, p.IsBlocking));
         }
         foreach (var fb in await Task.WhenAll(failedBuilds))
             if (fb != null) view.FailedBuilds.Add(fb);
+        var orderedFailures = view.FailedBuilds.OrderByDescending(f => f.IsBlocking == true).ThenBy(f => f.IsBlocking == false).ToList();
+        view.FailedBuilds.Clear();
+        view.FailedBuilds.AddRange(orderedFailures);
         view.Policies.Sort((a, b) => (b.IsBlocking ? 1 : 0).CompareTo(a.IsBlocking ? 1 : 0) is var c and not 0 ? c : StatusRank(a.Status).CompareTo(StatusRank(b.Status)));
     }
 
@@ -549,10 +552,10 @@ public sealed partial class PrService
          description.Contains("human sign-off is required", StringComparison.OrdinalIgnoreCase) ||
          Regex.IsMatch(description, @"(?i)waiting on reviewer(?:\(s\)|s)? to approve"));
 
-    async Task<FailedBuild?> GetFailedBuildAsync(PrView view, int buildId, string name, string evaluationId)
+    async Task<FailedBuild?> GetFailedBuildAsync(PrView view, int buildId, string name, string evaluationId, bool isBlocking)
     {
         var cacheKey = BuildKey(view.Org, view.Project, buildId);
-        if (_buildCache.TryGetValue(cacheKey, out var cached)) return cached with { EvaluationId = evaluationId };
+        if (_buildCache.TryGetValue(cacheKey, out var cached)) return cached with { Name = name, EvaluationId = evaluationId, IsBlocking = isBlocking };
         try
         {
             var tl = await _ado.GetAsync($"{Api(view.Org, view.Project)}build/builds/{buildId}/timeline?api-version=7.1");
@@ -578,7 +581,7 @@ public sealed partial class PrService
             var fb = new FailedBuild(buildId, name, $"https://dev.azure.com/{Esc(view.Org)}/{Esc(view.Project)}/_build/results?buildId={buildId}&view=logs", evaluationId, tasks);
             if (S(tl["records"]?.AsArray().FirstOrDefault(r => S(r?["type"]) == "Stage")?["state"]) is not "inProgress")
                 _buildCache[cacheKey] = fb;
-            return fb;
+            return fb with { IsBlocking = isBlocking };
         }
         catch (Exception ex)
         {
@@ -588,7 +591,7 @@ public sealed partial class PrService
                     ? [new FailedTask("Build no longer exists", "", "purged", null, [$"Build {buildId} was deleted by retention policy. Re-queue to get a fresh run with logs."])]
                     : [new FailedTask("Could not read timeline", "", "error", null, [ex.Message])]);
             if (purged) _buildCache[cacheKey] = fb;
-            return fb;
+            return fb with { IsBlocking = isBlocking };
         }
     }
 
@@ -1114,15 +1117,16 @@ public sealed partial class PrService
             foreach (var w in pr.Waiting) sb.AppendLine($"- {w}");
             sb.AppendLine();
         }
-        foreach (var fb in pr.FailedBuilds)
+        foreach (var fb in pr.FailedBuilds.OrderByDescending(f => f.IsBlocking == true).ThenBy(f => f.IsBlocking == false))
         {
-            sb.AppendLine($"## Failed build: {fb.Name} (build {fb.BuildId})");
+            var scope = fb.IsBlocking switch { true => "Failed required build", false => "Optional failed build (not a merge blocker)", null => "Failed build (requiredness unknown)" };
+            sb.AppendLine($"## {scope}: {fb.Name} (build {fb.BuildId})");
             sb.AppendLine(fb.Url);
             foreach (var t in fb.Tasks.Take(3))
             {
                 sb.AppendLine($"### {t.Path} › {t.Name}");
                 foreach (var i in t.Issues) sb.AppendLine($"- {i}");
-                if (t.LogId is int logId && fb.Tasks.IndexOf(t) == 0)
+                if (fb.IsBlocking != false && t.LogId is int logId && fb.Tasks.IndexOf(t) == 0)
                 {
                     try
                     {
