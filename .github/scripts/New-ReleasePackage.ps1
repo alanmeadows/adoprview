@@ -28,6 +28,9 @@ foreach ($old in "$name.zip", "$name-setup.exe", "AdoPrView-v$version-checksums.
 if ($LASTEXITCODE) { throw "dotnet publish failed with exit code $LASTEXITCODE." }
 
 foreach ($required in 'AdoPrView.exe', 'AdoPrView.dll', 'hostfxr.dll', 'coreclr.dll', 'PresentationFramework.dll',
+        'FixSupervisor\AdoPrView.FixSupervisor.exe', 'FixSupervisor\AdoPrView.FixSupervisor.dll',
+        'FixSupervisor\AdoPrView.FixSupervisor.runtimeconfig.json', 'FixSupervisor\AdoPrView.FixSupervisor.deps.json',
+        'FixSupervisor\hostfxr.dll', 'FixSupervisor\hostpolicy.dll', 'FixSupervisor\coreclr.dll',
         'Microsoft.Web.WebView2.Core.dll', 'WebView2Loader.dll', 'wwwroot\index.html',
         'Microsoft.Windows.SDK.NET.dll', 'WinRT.Runtime.dll',
         'VideoAssets\cats.json', 'VideoAssets\yawn.jpg', 'VideoAssets\rugby.jpg', 'licenses\cat-photos.txt',
@@ -40,6 +43,9 @@ foreach ($required in 'AdoPrView.exe', 'AdoPrView.dll', 'hostfxr.dll', 'coreclr.
 }
 $runtimeConfig = Get-Content -LiteralPath (Join-Path $stage 'AdoPrView.runtimeconfig.json') -Raw | ConvertFrom-Json
 if (-not $runtimeConfig.runtimeOptions.PSObject.Properties['includedFrameworks']) { throw 'Publish output is not self-contained.' }
+$supervisorConfig = Get-Content -LiteralPath (Join-Path $stage 'FixSupervisor\AdoPrView.FixSupervisor.runtimeconfig.json') -Raw | ConvertFrom-Json
+if (-not $supervisorConfig.runtimeOptions.PSObject.Properties['includedFrameworks']) { throw 'Fix supervisor output is not self-contained.' }
+if (Test-Path -LiteralPath (Join-Path $stage 'FixSupervisor\AdoPrView.dll')) { throw 'Fix supervisor must not load the dashboard assembly.' }
 
 # Copy package notices and the upstream license texts retained for packages
 # that declare a license expression without including its text.
@@ -77,6 +83,11 @@ foreach ($component in $components) {
     $target = Join-Path $licenses $component.Id
     New-Item -ItemType Directory -Force -Path $target | Out-Null
     foreach ($text in $texts) { Copy-Item -LiteralPath $text.FullName -Destination (Join-Path $target $text.Name) }
+    if ($component.Id -eq 'Microsoft.NETCore.App.Runtime.win-x64') {
+        $supervisorNotices = Join-Path $stage "FixSupervisor\licenses\$($component.Id)"
+        New-Item -ItemType Directory -Force -Path $supervisorNotices | Out-Null
+        foreach ($text in $texts) { Copy-Item -LiteralPath $text.FullName -Destination (Join-Path $supervisorNotices $text.Name) }
+    }
     $index.Add("- $($component.Id) $componentVersion`: licenses/$($component.Id)/ ($((@($texts.Name) | Sort-Object) -join ', '))")
     if ($component.Id -eq 'GitHub.Copilot.SDK') {
         $sdkProps = [xml](Get-Content -LiteralPath (Join-Path $source 'build\GitHub.Copilot.SDK.props') -Raw)

@@ -48,6 +48,7 @@ public sealed record CopilotRunState(
     public bool MayBeRunning { get; init; }
     public string? PreparationLogPath { get; init; }
     public string Backend { get; init; } = "legacy-wsl";
+    public string SupervisorDeployment { get; init; } = "legacy-app-host";
 }
 
 public sealed record CopilotProcessRequest(

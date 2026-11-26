@@ -7,6 +7,7 @@ internal static class NativeFixTests
 {
     const string Help = "--no-auto-update --no-ask-user --stream --no-color --deny-tool --yolo --session-id --resume";
     static string Exe => Path.Combine(AppContext.BaseDirectory, "AdoPrView.Tests.exe");
+    sealed record ShellProbe(bool Launched, int Pid, long Started, int Error);
 
     [System.Runtime.CompilerServices.ModuleInitializer]
     internal static void DispatchSyntheticFixture()
@@ -17,6 +18,20 @@ internal static class NativeFixTests
 
     static bool Fixture(string[] args)
     {
+        if (args is ["--native-fix-shell-launch", var ownership, var outcome])
+        {
+            using var self = Process.GetCurrentProcess();
+            try
+            {
+                NativeFixSupervisor.Launch(NativeFixSupervisor.Read<NativeFixSupervisor.Specification>(ownership));
+                NativeFixSupervisor.Write(outcome, new ShellProbe(true, self.Id, self.StartTime.ToUniversalTime().Ticks, 0));
+            }
+            catch (System.ComponentModel.Win32Exception ex)
+            {
+                NativeFixSupervisor.Write(outcome, new ShellProbe(false, self.Id, self.StartTime.ToUniversalTime().Ticks, ex.NativeErrorCode));
+            }
+            return true;
+        }
         if (args is ["--native-fix-child", var file])
         {
             File.WriteAllText(file, Environment.ProcessId.ToString());
@@ -38,6 +53,31 @@ internal static class NativeFixTests
             File.WriteAllText("fixture-prompt.txt", prompt);
             Console.WriteLine("synthetic native Fix started");
             Console.Error.WriteLine("synthetic stderr evidence");
+            if (File.ReadAllText("native-fixture.marker") == "new-start")
+            {
+                File.WriteAllText("first-start-baseline.txt", File.ReadAllText("sample.txt"));
+                File.WriteAllText("native-fix-edit.txt", "synthetic owned fix edit");
+                if (prompt.Contains("synthetic-auth-failure"))
+                {
+                    Console.Error.WriteLine("Error: You are not logged in. Run copilot login.");
+                    Environment.ExitCode = 1;
+                    return true;
+                }
+                if (prompt.Contains("synthetic-complete")) return true;
+            }
+            if (File.ReadAllText("native-fixture.marker") == "cleanup-failure")
+            {
+                var privatePrompt = Path.Combine(Directory.GetParent(Environment.CurrentDirectory)!.FullName, "prompt");
+                File.Delete(privatePrompt);
+                Directory.CreateDirectory(privatePrompt);
+                File.WriteAllText(Path.Combine(privatePrompt, "user-edit.txt"), "preserve cleanup obstacle");
+                return true;
+            }
+            if (File.ReadAllText("native-fixture.marker") == "receipt-failure")
+            {
+                Directory.CreateDirectory(Path.Combine(Directory.GetParent(Environment.CurrentDirectory)!.FullName, "receipt.json.pending"));
+                return true;
+            }
             if (File.ReadAllText("native-fixture.marker") == "auth")
             {
                 Console.Error.WriteLine("Error: You are not logged in. Run copilot login.");
@@ -118,6 +158,152 @@ internal static class NativeFixTests
 
     internal static async Task Run(Func<string, Func<Task>, Task> test)
     {
+        await NativeFixStartTests.Run(test);
+        if (Environment.GetEnvironmentVariable("ADOPRVIEW_TEST_NATIVE_SHELL_PROBE") == "1")
+            await test("Native Fix permitted desktop-shell fixture checks production launcher exit independence", async () =>
+            {
+                var root = Path.Combine(Environment.CurrentDirectory, ".native-shell-fixture-" + Guid.NewGuid().ToString("N"));
+                Directory.CreateDirectory(root);
+                var spec = Spec(root);
+                try
+                {
+                    using var current = Process.GetCurrentProcess();
+                    var desktops = Process.GetProcessesByName("explorer");
+                    try
+                    {
+                        if (!desktops.Any(process => process.SessionId == current.SessionId))
+                        {
+                            Console.WriteLine("NATIVE-SHELL production detach not established: no existing desktop shell in this session; no shell was started");
+                            return;
+                        }
+                    }
+                    finally { foreach (var desktop in desktops) desktop.Dispose(); }
+                    var deployment = NativeFixDeployment.Ensure(AppContext.BaseDirectory, root);
+                    spec = spec with { SupervisorExecutable = deployment.Executable, SupervisorBundleId = deployment.BundleId };
+                    NativeFixSupervisor.Write(NativeFixSupervisor.FilePath(spec, "ownership.json"), spec);
+                    var outcome = Path.Combine(root, "shell-outcome.json");
+                    var arguments = "--native-fix-shell-launch " + NativeFixSupervisor.Quote(NativeFixSupervisor.FilePath(spec, "ownership.json")) +
+                        " " + NativeFixSupervisor.Quote(outcome);
+                    var script = Path.Combine(root, "shell-launch.ps1");
+                    static string Ps(string value) => "'" + value.Replace("'", "''") + "'";
+                    File.WriteAllText(script, "$ErrorActionPreference='Stop'\n$shell=New-Object -ComObject Shell.Application\n" +
+                        "$shell.ShellExecute(" + Ps(Exe) + "," + Ps(arguments) + "," + Ps(root) + ",'open',0)\n" +
+                        "[void][Runtime.InteropServices.Marshal]::FinalReleaseComObject($shell)\n");
+                    using var deadline = new CancellationTokenSource(TimeSpan.FromSeconds(30));
+                    var shell = await CopilotRunService.NativeCommandAsync(Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.Windows),
+                        "System32", "WindowsPowerShell", "v1.0", "powershell.exe"), root,
+                        ["-NoLogo", "-NonInteractive", "-NoProfile", "-File", script], deadline.Token);
+                    if (shell.ExitCode != 0)
+                    {
+                        Console.WriteLine("NATIVE-SHELL production detach not established: desktop shell COM launch unavailable; no global/task/account configuration was changed");
+                        return;
+                    }
+                    await Until(() => File.Exists(outcome));
+                    var result = NativeFixSupervisor.Read<ShellProbe>(outcome);
+                    var launcher = new NativeFixSupervisor.Receipt(spec.RunId, spec.Token, spec.SessionId, result.Pid, result.Started, null, null, false);
+                    await Until(() => !NativeFixSupervisor.SupervisorAlive(launcher));
+                    if (!result.Launched)
+                    {
+                        Console.WriteLine("NATIVE-SHELL production detach not established: permitted shell host refused breakaway (Windows error " + result.Error + ")");
+                        return;
+                    }
+                    await Until(() => File.Exists(Path.Combine(spec.Worktree, "fixture-child.pid")));
+                    Check(NativeFixSupervisor.ActiveProcesses(spec) >= 2 &&
+                        NativeFixSupervisor.SupervisorAlive(NativeFixSupervisor.Status(spec)!), "Production job did not survive its actual launcher process exiting");
+                    NativeFixSupervisor.RequestCancel(spec);
+                    await Until(() => NativeFixSupervisor.Status(spec) is { DescendantsStopped: true });
+                    Check(NativeFixSupervisor.ActiveProcesses(spec) is null or 0, "Production detached run descendants were not stopped exactly");
+                    Console.WriteLine("NATIVE-SHELL production breakaway succeeded outside restricted tool parent; actual launcher exited; owned supervisor/CLI/descendant survived and exact Stop confirmed");
+                }
+                finally { await Clean(spec); Directory.Delete(root, true); }
+            });
+        await test("Native Fix accepts public organization-only ADO clone usernames but never copies embedded credentials", () =>
+        {
+            Check(!CopilotRunService.NativeRemoteHasCredential("https://offline-org@dev.azure.com/offline-org/project/_git/repo", "offline-org") &&
+                !CopilotRunService.NativeRemoteHasCredential("https://dev.azure.com/offline-org/project/_git/repo", "offline-org"),
+                "Standard ADO clone URL's public organization username required a Git configuration rewrite");
+            Check(CopilotRunService.NativeRemoteHasCredential("https://offline-org:synthetic-secret@dev.azure.com/offline-org/project/_git/repo", "offline-org") &&
+                CopilotRunService.NativeRemoteHasCredential("https://synthetic-secret@dev.azure.com/offline-org/project/_git/repo", "offline-org") &&
+                CopilotRunService.NativeRemoteHasCredential("ssh://git:synthetic-secret@ssh.dev.azure.com/v3/offline-org/project/repo", "offline-org"),
+                "Native durable remote metadata could copy embedded authentication secrets");
+            return Task.CompletedTask;
+        });
+        await test("Native Fix npm shim resolves only verified bounded native package entrypoints and skips malformed PATH", () =>
+        {
+            var root = Path.Combine(Environment.CurrentDirectory, ".native-npm-fixture-" + Guid.NewGuid().ToString("N"));
+            Directory.CreateDirectory(root);
+            var loader = Path.Combine(root, "node_modules", "@github", "copilot");
+            var platform = Path.Combine(root, "node_modules", "@github", "copilot-win32-x64");
+            Directory.CreateDirectory(loader); Directory.CreateDirectory(platform);
+            try
+            {
+                File.WriteAllText(Path.Combine(root, "copilot.cmd"), "@echo off\r\n\"%dp0%\\node_modules\\@github\\copilot\\npm-loader.js\" %*\r\n");
+                File.WriteAllText(Path.Combine(loader, "package.json"),
+                    """{"name":"@github/copilot","version":"1.0.112","bin":{"copilot":"npm-loader.js"},"optionalDependencies":{"@github/copilot-win32-x64":"1.0.112"}}""");
+                File.WriteAllText(Path.Combine(platform, "package.json"),
+                    """{"name":"@github/copilot-win32-x64","version":"1.0.112","os":["win32"],"cpu":["x64"],"exports":{".":{"import":"./copilot.exe"}}}""");
+                File.Copy(Exe, Path.Combine(platform, "copilot.exe"));
+                Check(CopilotRunService.NativeExecutable("copilot", searchPath: "\0malformed;" + root) == Path.Combine(platform, "copilot.exe"),
+                    "Official npm shim was rejected or executed rather than resolving its native payload");
+                Check(CopilotRunService.NativeExecutable("copilot", Path.Combine(root, "copilot.cmd")) == Path.Combine(platform, "copilot.exe"),
+                    "Explicit npm shim did not resolve directly to the native executable");
+                var nested = Path.Combine(loader, "node_modules", "@github", "copilot-win32-x64");
+                Directory.CreateDirectory(Path.GetDirectoryName(nested)!);
+                Directory.Move(platform, nested);
+                platform = nested;
+                File.WriteAllText(Path.Combine(platform, "package.json"),
+                    """{"name":"@github/copilot-win32-x64","version":"1.0.112","os":["win32"],"cpu":["x64"],"main":"copilot.exe"}""");
+                Check(NativeCopilotExecutable.ResolveNpmShim(Path.Combine(root, "copilot.cmd"), out _) == Path.Combine(platform, "copilot.exe"),
+                    "Nested npm native package main entrypoint was not supported");
+                File.WriteAllText(Path.Combine(platform, "package.json"),
+                    """{"name":"@github/copilot-win32-x64","version":"1.0.111","os":["win32"],"cpu":["x64"],"main":"copilot.exe"}""");
+                Check(NativeCopilotExecutable.ResolveNpmShim(Path.Combine(root, "copilot.cmd"), out _) is null,
+                    "Mismatched npm loader/platform package versions were accepted");
+                File.WriteAllText(Path.Combine(platform, "package.json"),
+                    """{"name":"@github/copilot-win32-x64","version":"1.0.112","os":["win32"],"cpu":["x64"],"main":"../../../arbitrary.exe"}""");
+                Check(NativeCopilotExecutable.ResolveNpmShim(Path.Combine(root, "copilot.cmd"), out var warning) is null &&
+                    warning!.Contains("could not be verified"), "Npm entrypoint traversal was trusted");
+                File.WriteAllText(Path.Combine(platform, "package.json"),
+                    """{"name":"@github/copilot-win32-x64","version":"1.0.112","os":["win32"],"cpu":["x64"],"main":"missing.exe"}""");
+                Check(NativeCopilotExecutable.ResolveNpmShim(Path.Combine(root, "copilot.cmd"), out warning) is null &&
+                    warning!.Contains("no matching native platform executable"), "Missing npm executable lacked specific repair guidance");
+                File.WriteAllText(Path.Combine(root, "copilot.cmd"), "@echo off\r\necho unrelated shell shim\r\n");
+                Check(NativeCopilotExecutable.ResolveNpmShim(Path.Combine(root, "copilot.cmd"), out _) is null,
+                    "An arbitrary shell shim was accepted as a verified Copilot npm installation");
+                try { CopilotRunService.NativeExecutable("git", searchPath: "\0malformed;relative-folder"); throw new Exception("Malformed PATH accepted"); }
+                catch (Exception ex) when (ex.Message.Contains("Malformed or relative PATH")) { }
+            }
+            finally { Directory.Delete(root, true); }
+            return Task.CompletedTask;
+        });
+
+        await test("Native Fix prompt and terminal receipt failures remain visible without false cleanup or replay", async () =>
+        {
+            var root = Path.Combine(Environment.CurrentDirectory, ".native-fix-fixture-" + Guid.NewGuid().ToString("N"));
+            Directory.CreateDirectory(root);
+            var cleanup = Spec(root);
+            var receipt = Spec(root);
+            try
+            {
+                File.WriteAllText(Path.Combine(cleanup.Worktree, "native-fixture.marker"), "cleanup-failure");
+                NativeFixSupervisor.Launch(cleanup, nestedSyntheticFixture: true);
+                await Until(() => NativeFixSupervisor.Status(cleanup) is { ExitCode: 0, DescendantsStopped: true });
+                Check(NativeFixSupervisor.Status(cleanup)!.Error!.Contains("Private prompt cleanup could not be confirmed") &&
+                    File.Exists(Path.Combine(cleanup.RunDirectory, "prompt", "user-edit.txt")), "Prompt cleanup failure was hidden or user work deleted");
+                File.WriteAllText(Path.Combine(receipt.Worktree, "native-fixture.marker"), "receipt-failure");
+                NativeFixSupervisor.Launch(receipt, nestedSyntheticFixture: true);
+                await Until(() => NativeFixSupervisor.Status(receipt) is { } status && !NativeFixSupervisor.SupervisorAlive(status));
+                Save(root, cleanup); Save(root, receipt);
+                await using var service = new CopilotRunService(stateDirectory: root);
+                await service.RecoverAsync();
+                await Until(() => service.Get(receipt.RunId)!.Status == "needs-attention");
+                Check(service.Get(cleanup.RunId)!.Error!.Contains("Private prompt cleanup could not be confirmed"),
+                    "Dashboard recovery discarded the terminal cleanup diagnostic");
+                Check(service.Get(receipt.RunId) is { MayBeRunning: false, ResumeAttempts: 0 } failed &&
+                    failed.Output.Contains("Native exit receipt could not be persisted"), "Receipt persistence failure was silently dropped or replayed");
+            }
+            finally { await Clean(cleanup); await Clean(receipt); Directory.Delete(root, true); }
+        });
         await test("Native Fix prerequisites fail without user PATH and old JSON remains legacy", () =>
         {
             try { CopilotRunService.NativeExecutable("copilot", searchPath: ""); throw new Exception("Missing native CLI was accepted"); }
@@ -323,7 +509,13 @@ internal static class NativeFixTests
                 await Until(() => File.Exists(Path.Combine(spec.Worktree, "fixture-child.pid")));
                 Save(directory, spec);
                 File.WriteAllText(Path.Combine(directory, spec.RunId + ".cancelled"), "");
-                await Until(() => NativeFixSupervisor.Status(spec) is { ExitCode: 143, DescendantsStopped: true });
+                try { await Until(() => NativeFixSupervisor.Status(spec) is { ExitCode: 143, DescendantsStopped: true }); }
+                catch (Exception ex)
+                {
+                    throw new Exception("Synthetic durable cancellation receipt=" + JsonSerializer.Serialize(NativeFixSupervisor.Status(spec)) +
+                        "; active=" + NativeFixSupervisor.ActiveProcesses(spec) + "; supervisor stderr=" +
+                        File.ReadAllText(NativeFixSupervisor.FilePath(spec, "supervisor.stderr.log")), ex);
+                }
                 File.WriteAllText(Path.Combine(auth.Worktree, "native-fixture.marker"), "auth");
                 NativeFixSupervisor.Launch(auth, nestedSyntheticFixture: true);
                 await Until(() => NativeFixSupervisor.Status(auth) is { ExitCode: 1, DescendantsStopped: true });

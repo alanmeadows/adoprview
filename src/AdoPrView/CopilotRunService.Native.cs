@@ -9,25 +9,59 @@ namespace AdoPrView;
 
 public sealed partial class CopilotRunService
 {
+    internal string? NativeLocalRemoteForTests { get; set; }
+    internal Action<NativeFixSupervisor.Specification>? NativeLauncherForTests { get; set; }
+    internal string? NativeSupervisorAppDirectoryForTests { get; set; }
+    internal const string NativeReadinessNotice =
+        "Native CLI capability check passed, not an authentication check. The full Windows CLI has no documented " +
+        "side-effect-free sign-in/provider readiness command; ACP checks readiness when creating a session. " +
+        "Sign in with the chosen CLI outside the dashboard. Actual Fix launch checks its own readiness; " +
+        "an authentication failure retains the prepared worktree and does not borrow Explain/WSL credentials.\n";
+
     internal static string NativeExecutable(string name, string? configured = null, string? searchPath = null)
     {
         if (configured is not null)
         {
+            if (name == "copilot" && Path.IsPathFullyQualified(configured) &&
+                configured.EndsWith(".cmd", StringComparison.OrdinalIgnoreCase))
+            {
+                var resolved = NativeCopilotExecutable.ResolveNpmShim(configured, out var diagnostic);
+                return resolved ?? throw new RunSetupException(diagnostic ?? "The configured Copilot npm shim is missing.");
+            }
             if (!Path.IsPathFullyQualified(configured) || !configured.EndsWith(".exe", StringComparison.OrdinalIgnoreCase) ||
                 !File.Exists(configured))
                 throw new RunSetupException($"The configured native {name} executable is missing or is not an absolute .exe path.");
             return Path.GetFullPath(configured);
         }
+        var invalidEntries = false;
+        string? npmDiagnostic = null;
         foreach (var directory in (searchPath ?? Environment.GetEnvironmentVariable("PATH") ?? "").Split(Path.PathSeparator))
         {
             if (string.IsNullOrWhiteSpace(directory)) continue;
-            var candidate = Path.Combine(directory.Trim('"'), name + ".exe");
-            if (Path.IsPathFullyQualified(candidate) && File.Exists(candidate)) return Path.GetFullPath(candidate);
+            try
+            {
+                var clean = directory.Trim().Trim('"');
+                if (clean.IndexOfAny(Path.GetInvalidPathChars()) >= 0 || !Path.IsPathFullyQualified(clean))
+                { invalidEntries = true; continue; }
+                var candidate = Path.Combine(clean, name + ".exe");
+                if (File.Exists(candidate)) return Path.GetFullPath(candidate);
+                if (name == "copilot")
+                {
+                    var resolved = NativeCopilotExecutable.ResolveNpmShim(Path.Combine(clean, "copilot.cmd"), out var diagnostic);
+                    if (resolved is not null) return resolved;
+                    npmDiagnostic ??= diagnostic;
+                }
+            }
+            catch (Exception ex) when (ex is ArgumentException or NotSupportedException or PathTooLongException)
+            { invalidEntries = true; }
         }
         var prerequisite = name == "git"
             ? "Install Git for Windows and make git.exe available on PATH."
-            : "Install the full native Windows Copilot CLI and make copilot.exe available on PATH (or supply an absolute NativeCopilotPath). The bundled SDK runtime and npm shell shims are not prompt executables.";
-        throw new RunSetupException($"Native Windows {name}.exe was not found on PATH. {prerequisite} New Fix runs do not invoke WSL.");
+            : "Install the full native Windows Copilot CLI or its official Windows npm package and make it available on PATH (or supply an absolute NativeCopilotPath). The bundled SDK stdio runtime is not a prompt executable.";
+        throw new RunSetupException($"Native Windows {name}.exe was not found on PATH. {prerequisite} " +
+            (invalidEntries ? "Malformed or relative PATH entries were skipped; repair Windows PATH with absolute directory entries. " : "") +
+            (npmDiagnostic is null ? "" : npmDiagnostic + " ") +
+            "New Fix runs do not invoke WSL.");
     }
 
     internal static async Task<CopilotProcessResult> NativeCommandAsync(string executable, string directory,
@@ -58,16 +92,47 @@ public sealed partial class CopilotRunService
 
     async Task<string> NativeGitAsync(string git, string root, CancellationToken token, params string[] arguments)
     {
+        var stage = arguments[0] switch
+        {
+            "rev-parse" when arguments.Contains("--show-toplevel") => "repository-root",
+            "rev-parse" when arguments.Contains("--git-common-dir") => "common-directory",
+            "rev-parse" => "source-commit",
+            "remote" when arguments.Length == 1 => "remote-list",
+            "remote" when arguments.Contains("--push") => "push-destinations",
+            "remote" => "fetch-destination",
+            "check-ref-format" => "source-ref",
+            "ls-remote" => "source-ref-readback",
+            "fetch" => "source-fetch",
+            "worktree" => "owned-worktree-creation",
+            "symbolic-ref" => "owned-branch-verification",
+            _ => "workspace-verification"
+        };
         using var timeout = CancellationTokenSource.CreateLinkedTokenSource(token);
         timeout.CancelAfter(TimeSpan.FromSeconds(60));
-        var result = await NativeCommandAsync(git, root,
-            ["-c", "core.hooksPath=NUL", "-c", "credential.interactive=false", .. arguments], timeout.Token).ConfigureAwait(false);
+        CopilotProcessResult result;
+        try
+        {
+            result = await NativeCommandAsync(git, root,
+                ["--no-replace-objects", "-c", "core.fsmonitor=false", "-c", "core.hooksPath=NUL",
+                 "-c", "credential.interactive=false", .. arguments], timeout.Token).ConfigureAwait(false);
+        }
+        catch (Win32Exception ex)
+        { throw new RunSetupException($"Native Git {stage} could not start (Windows error {ex.NativeErrorCode}). Check the Windows git.exe installation and configured local directory; no sign-in dialog or WSL fallback was used."); }
+        catch (OperationCanceledException) when (!token.IsCancellationRequested)
+        { throw new RunSetupException($"Native Git {stage} timed out after 60 seconds. Check the Windows checkout, remote connectivity and non-interactive Git authentication. Work is retained."); }
         if (result.ExitCode != 0)
         {
             if (new[] { "Authentication failed", "could not read Username", "terminal prompts disabled", "interaction is disabled" }
                 .Any(marker => result.StandardError.Contains(marker, StringComparison.OrdinalIgnoreCase)))
-                throw new RunSetupException("Native Windows Git authentication failed or requires interaction. Sign in with the chosen Windows Git credential helper outside this non-interactive run. No tokens/configuration were copied; work is preserved.");
-            throw new RunSetupException("Native Git preparation/ownership verification failed. Check the configured Windows checkout and exact captured source revision. No sign-in dialog is available; work is preserved.");
+                throw new RunSetupException($"Native Git {stage} exited with code {result.ExitCode}: Windows Git authentication failed or requires interaction. Sign in with the chosen Windows Git credential helper outside this non-interactive run. No tokens/configuration were copied; work is preserved.");
+            var advice = stage is "source-ref-readback" or "source-fetch"
+                ? "Check the configured Git remote/repository access, network connectivity, non-interactive Windows Git authentication and captured source ref."
+                : stage is "repository-root" or "common-directory"
+                    ? "Select an existing local Git repository root, not a missing, non-Git or nested folder."
+                    : stage == "owned-worktree-creation"
+                        ? "Check free disk space, run-directory access and the exact captured source commit; any partial worktree is retained."
+                        : "Check the configured Windows checkout, Git remote and exact captured source revision.";
+            throw new RunSetupException($"Native Git {stage} exited with code {result.ExitCode}. {advice} No private Git output/URLs are included in this diagnostic; work is preserved.");
         }
         return result.StandardOutput.TrimEnd('\r', '\n');
     }
@@ -93,6 +158,7 @@ public sealed partial class CopilotRunService
                     "The bundled SDK stdio runtime is not a prompt CLI. Check native 'copilot --help'; required flags missing: " +
                     string.Join(", ", missing) + ". No task was launched; no CLI/account configuration was changed.");
         }
+        Append(e, NativeReadinessNotice, false);
         var actualRoot = Path.GetFullPath(await NativeGitAsync(git, root, token, "rev-parse", "--show-toplevel").ConfigureAwait(false));
         if (!actualRoot.Equals(Path.TrimEndingDirectorySeparator(root), StringComparison.OrdinalIgnoreCase))
             throw new RunSetupException("The configured Windows directory must be the repository root, not a nested directory.");
@@ -105,13 +171,13 @@ public sealed partial class CopilotRunService
             var name = candidate.TrimEnd('\r');
             if (name.StartsWith('-')) continue;
             var url = await NativeGitAsync(git, root, token, "remote", "get-url", name).ConfigureAwait(false);
-            if (!RemoteMatches(url, request.Org, request.Project, request.Repo) || HasCredential(url)) continue;
+            if (!NativeRemoteMatches(url, request) || NativeRemoteHasCredential(url, request.Org)) continue;
             var destinations = request.PushToSource
                 ? (await NativeGitAsync(git, root, token, "remote", "get-url", "--push", "--all", name)
                     .ConfigureAwait(false)).Split('\n').Select(v => v.TrimEnd('\r')).ToArray()
                 : Array.Empty<string>();
             if (request.PushToSource && (destinations.Length == 0 ||
-                destinations.Any(v => HasCredential(v) || !RemoteMatches(v, request.Org, request.Project, request.Repo)))) continue;
+                destinations.Any(v => NativeRemoteHasCredential(v, request.Org) || !NativeRemoteMatches(v, request)))) continue;
             remote = name; fetch = url; push = destinations; break;
         }
         if (remote is null || fetch is null)
@@ -128,6 +194,11 @@ public sealed partial class CopilotRunService
         var commit = await NativeGitAsync(git, root, token, "rev-parse", "--verify", request.SourceCommit + "^{commit}").ConfigureAwait(false);
         if (!commit.Equals(request.SourceCommit, StringComparison.OrdinalIgnoreCase))
             throw new RunSetupException("Native Git did not verify the exact source commit; no task was launched.");
+        NativeFixDeployment.Deployment deployment;
+        try { deployment = NativeFixDeployment.Ensure(NativeSupervisorAppDirectoryForTests ?? AppContext.BaseDirectory, store!.DirectoryPath); }
+        catch (NativeFixDeployment.DeploymentException ex) { throw new RunSetupException(ex.Message); }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or InvalidOperationException or System.Text.Json.JsonException)
+        { throw new RunSetupException("Separate native supervisor deployment failed before worktree creation. Check the complete FixSupervisor payload, free space and the owned state-directory access; existing deployments/runs were not modified."); }
         var runDirectory = Path.Combine(store!.DirectoryPath, "native", e.State.RunId);
         NativeFixSupervisor.SafePath(runDirectory);
         if (System.IO.Directory.Exists(runDirectory)) throw new RunSetupException("The new native run directory already exists; nothing was reused.");
@@ -135,10 +206,11 @@ public sealed partial class CopilotRunService
         var worktree = Path.Combine(runDirectory, "worktree");
         var branch = $"ado-prview/pr-{request.Id}-{e.State.RunId}";
         var specification = new NativeFixSupervisor.Specification(e.State.RunId, e.OwnershipToken, e.State.SessionId!,
-            runDirectory, root, common, worktree, branch, commit, git, cli, remote, fetch, push, request.PushToSource);
+            runDirectory, root, common, worktree, branch, commit, git, cli, remote, fetch, push, request.PushToSource)
+        { SupervisorBundleId = deployment.BundleId, SupervisorExecutable = deployment.Executable };
         NativeFixSupervisor.Write(Path.Combine(runDirectory, "ownership.json"), specification);
         e.Native = specification; e.RunDirectory = runDirectory;
-        Update(e, s => s with { SourcePath = root, WorktreeStatus = "preparing",
+        Update(e, s => s with { SourcePath = root, WorktreeStatus = "preparing", SupervisorDeployment = "stable:" + deployment.BundleId,
             PreparationLogPath = Path.Combine(runDirectory, "stderr.log") });
         // Complete Git metadata updates without interruption, then honor cancellation before any CLI launch.
         await NativeGitAsync(git, root, CancellationToken.None, "worktree", "add", "-b", branch, worktree, commit).ConfigureAwait(false);
@@ -148,8 +220,19 @@ public sealed partial class CopilotRunService
         return specification;
     }
 
-    static bool HasCredential(string url) => Uri.TryCreate(url, UriKind.Absolute, out var uri) &&
-        (uri.Scheme == "https" && uri.UserInfo.Length != 0 || uri.Scheme == "ssh" && uri.UserInfo.Contains(':'));
+    bool NativeRemoteMatches(string url, CopilotRunRequest request)
+    {
+        if (NativeLocalRemoteForTests is null) return RemoteMatches(url, request.Org, request.Project, request.Repo);
+        // Local Git transport is admitted only through an internal synthetic-fixture seam, never settings or requests.
+        return Path.IsPathFullyQualified(url) && !url.StartsWith(@"\\", StringComparison.Ordinal) &&
+            Path.GetFullPath(url).Equals(Path.GetFullPath(NativeLocalRemoteForTests), StringComparison.OrdinalIgnoreCase);
+    }
+
+    // ADO's standard clone URL may use the public organization name as its username, not an embedded secret.
+    internal static bool NativeRemoteHasCredential(string url, string organization) => Uri.TryCreate(url, UriKind.Absolute, out var uri) &&
+        (uri.Scheme == "https" && uri.UserInfo.Length != 0 &&
+            !Uri.UnescapeDataString(uri.UserInfo).Equals(organization, StringComparison.OrdinalIgnoreCase) ||
+         uri.Scheme == "ssh" && uri.UserInfo.Contains(':'));
 
     static string PsQuote(string value) => "'" + value.Replace("'", "''") + "'";
 
@@ -200,7 +283,11 @@ public sealed partial class CopilotRunService
             lifetime.Token.ThrowIfCancellationRequested();
             e.LaunchIntent = true;
             Update(e, s => s with { MayBeRunning = true, LogPath = NativeFixSupervisor.FilePath(spec, "stdout.log") });
-            try { NativeFixSupervisor.Launch(spec); }
+            try
+            {
+                if (NativeLauncherForTests is { } launch) launch(spec);
+                else NativeFixSupervisor.Launch(spec);
+            }
             catch { e.TaskConfirmedStopped = true; throw; }
             Update(e, s => s with { Status = "running", WorktreeStatus = "in-use" });
             await FollowNativeAsync(e, lifetime.Token).ConfigureAwait(false);
@@ -215,7 +302,7 @@ public sealed partial class CopilotRunService
         catch (Exception ex)
         {
             NativeFinish(e, e.LaunchIntent && !e.TaskConfirmedStopped ? "needs-attention" : "failed", null,
-                ex is RunSetupException ? ex.Message : ex is Win32Exception w
+                ex is RunSetupException or NativeFixSupervisor.OwnershipException ? ex.Message : ex is Win32Exception w
                     ? $"Native Windows launch failed (Windows error {w.NativeErrorCode}). A host job may prohibit detached breakaway; no WSL fallback was attempted."
                     : "Native Windows Fix preparation/supervision failed. Inspect the native prerequisites and retained run; no successful fix is claimed.");
         }
@@ -243,6 +330,13 @@ public sealed partial class CopilotRunService
             }
             // Stop/history do not require today's CLI or remote/authentication configuration.
             NativeFixSupervisor.Verify(saved.Native);
+            if (saved.TaskConfirmedStopped && !File.Exists(NativeFixSupervisor.FilePath(saved.Native, "receipt.json")) &&
+                saved.State.Status is "failed" or "cancelled" && NativeFixSupervisor.ActiveProcesses(saved.Native) is null or 0)
+            {
+                // CreateProcess failures are definite no-child launches, not missing live-supervisor receipts.
+                ReplayNativeLogs(e);
+                return;
+            }
             if (!saved.LaunchIntent)
             {
                 if (saved.State.IsActive)
@@ -258,7 +352,7 @@ public sealed partial class CopilotRunService
         { await RetryNativeStopAsync(e).ConfigureAwait(false); }
         catch (Exception ex)
         {
-            RecoveryBlocked(e, ex is RunSetupException ? ex.Message :
+            RecoveryBlocked(e, ex is RunSetupException or NativeFixSupervisor.OwnershipException ? ex.Message :
                 "Native run ownership/liveness could not be verified. Its work, saved session and same-PR reservation are preserved; no fresh prompt was replayed.");
         }
         finally
@@ -274,12 +368,17 @@ public sealed partial class CopilotRunService
         var s = e.Native!;
         using var stdout = new NativeLogTail(NativeFixSupervisor.FilePath(s, "stdout.log"));
         using var stderr = new NativeLogTail(NativeFixSupervisor.FilePath(s, "stderr.log"));
+        using var supervisorErrors = new NativeLogTail(NativeFixSupervisor.FilePath(s, "supervisor.stderr.log"));
         var startup = Stopwatch.StartNew();
+        var receiptFailure = false;
         while (true)
         {
             token.ThrowIfCancellationRequested();
             Append(e, stdout.Read(), false, history: true, token: token);
             Append(e, stderr.Read(), true, history: true, token: token);
+            var supervisionError = supervisorErrors.Read();
+            receiptFailure |= supervisionError.Contains("Native exit receipt could not be persisted", StringComparison.Ordinal);
+            Append(e, supervisionError, true, history: true, token: token);
             var receipt = NativeFixSupervisor.Status(s);
             var active = NativeFixSupervisor.ActiveProcesses(s);
             if (receipt is { DescendantsStopped: true, ExitCode: not null } && active is null or 0)
@@ -287,6 +386,7 @@ public sealed partial class CopilotRunService
                 e.TaskConfirmedStopped = true;
                 DrainNativeLog(e, stdout, false, token);
                 DrainNativeLog(e, stderr, true, token);
+                DrainNativeLog(e, supervisorErrors, true, token);
                 NativeFinish(e, store!.IsCancelled(e.State.RunId) || e.Cancellation.IsCancellationRequested ? "cancelled" :
                     receipt.ExitCode == 0 ? "completed" : "failed", receipt.ExitCode, receipt.Error ??
                     (receipt.ExitCode == 0 ? null : NativeExitError(e)));
@@ -296,11 +396,15 @@ public sealed partial class CopilotRunService
             {
                 e.TaskConfirmedStopped = true;
                 NativeFinish(e, store!.IsCancelled(e.State.RunId) || e.Cancellation.IsCancellationRequested ? "cancelled" : "needs-attention", null,
-                    "The native supervisor exited without a completion receipt. Its kill-on-close job is inactive; work and exact saved session are retained. No automatic replay/restart was attempted.");
+                    receiptFailure
+                        ? "Native exit receipt could not be persisted. The supervisor exited and its exact kill-on-close job is inactive; work/session are retained. No automatic replay/restart was attempted."
+                        : "The native supervisor exited without a completion receipt. Its kill-on-close job is inactive; work and exact saved session are retained. No automatic replay/restart was attempted.");
                 return;
             }
             if (receipt is null && startup.Elapsed > TimeSpan.FromSeconds(15))
-                throw new RunSetupException("Native supervisor startup was not confirmed. Work and its reservation are retained; no duplicate prompt was launched.");
+                throw new RunSetupException(receiptFailure
+                    ? "Native receipt persistence failed and supervisor startup/liveness could not be confirmed. Work and its reservation are retained; no duplicate prompt was launched."
+                    : "Native supervisor startup was not confirmed. Work and its reservation are retained; no duplicate prompt was launched.");
             if (e.State.Status != "running" || !e.State.MayBeRunning)
                 Update(e, state => state with { Status = "running", MayBeRunning = true, FinishedAt = null, Error = null });
             if (store!.IsCancelled(e.State.RunId) && e.DriverLease is not null) NativeFixSupervisor.RequestCancel(s);
@@ -371,8 +475,10 @@ public sealed partial class CopilotRunService
     {
         using var stdout = new NativeLogTail(NativeFixSupervisor.FilePath(e.Native!, "stdout.log"));
         using var stderr = new NativeLogTail(NativeFixSupervisor.FilePath(e.Native!, "stderr.log"));
+        using var supervisor = new NativeLogTail(NativeFixSupervisor.FilePath(e.Native!, "supervisor.stderr.log"));
         DrainNativeLog(e, stdout, false, CancellationToken.None);
         DrainNativeLog(e, stderr, true, CancellationToken.None);
+        DrainNativeLog(e, supervisor, true, CancellationToken.None);
     }
 
     void DrainNativeLog(Entry e, NativeLogTail log, bool stderr, CancellationToken token)
@@ -385,11 +491,12 @@ public sealed partial class CopilotRunService
         }
     }
 
-    static void DiscardNativePrompt(Entry e)
+    void DiscardNativePrompt(Entry e)
     {
         if (e.Native is null || e.LaunchIntent && !e.TaskConfirmedStopped) return;
-        try { NativeFixSupervisor.Verify(e.Native); File.Delete(NativeFixSupervisor.FilePath(e.Native, "prompt")); }
-        catch { /* Retain ownership/work when private-file cleanup cannot be verified. */ }
+        var warning = NativeFixSupervisor.DiscardPrompt(e.Native);
+        if (warning is not null && e.State.Error?.Contains(warning, StringComparison.Ordinal) != true)
+            Update(e, state => state with { Error = state.Error is null ? warning : state.Error + "\n" + warning });
     }
 
     sealed class NativeLogTail(string path) : IDisposable
