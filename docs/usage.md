@@ -401,10 +401,14 @@ the coverage notes remain authoritative. Non-ARM explanations need no ARM sectio
 Fenced code preserves indentation, labels Bicep, and highlights diff additions/removals
 with both signs and theme colors. Retained in-memory output uses the same renderer.
 
-Explain uses the native Windows Copilot SDK and its supported default model.
-Sign in with the native Windows Copilot CLI beforehand; the app reuses supported
-Copilot authentication, not your ADO token. Missing sign-in, model/access failures
-and ADO errors appear inline. One explanation runs at a time; **Cancel** stops it.
+Explain uses the Copilot runtime bundled with the app (native Windows Copilot SDK)
+and its supported default model. That runtime keeps a private Copilot home, so a
+standalone `copilot login` (Windows or WSL) and VS Code's Copilot sign-in are not
+used. Sign in with the **Windows GitHub CLI** (`gh auth login`) using an account
+with Copilot access; `gh` must be on the PATH ADO PR View started with. Exit the
+app from the tray and reopen it after installing `gh`. Your ADO token is never
+used for Copilot. Missing sign-in, model/access failures and ADO errors appear
+inline; see [TROUBLESHOOTING.md](../TROUBLESHOOTING.md#explain-says-copilot-is-not-signed-in). One explanation runs at a time; **Cancel** stops it.
 Partial or failed responses are labeled and must not be treated as completed.
 Results stay in memory until the app exits; **Explain again** starts a fresh session
 and a distinct result. **Working result** returns to a retained explanation or
