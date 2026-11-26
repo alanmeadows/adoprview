@@ -1817,7 +1817,9 @@ test('real row hit testing and action identity across refreshes', { timeout: 900
           window.layoutLog===window.layoutRow.querySelector('pre.log[data-log]') && window.layoutLog.isConnected`), true,
           'Explanation streaming updates in place without rebuilding the failed log');
         assert.equal(await evaluate('window.getSelection().toString()'), await evaluate('window.layoutSelected'));
-        assert.equal(await evaluate(`window.layoutRow.querySelector('.explain-output').textContent.includes('Streaming synthetic explanation')`), true);
+        assert.equal(await evaluate(`window.layoutRow.querySelector('.explain-output').hidden &&
+          window.layoutRow.querySelector('.explain-output').textContent==='' &&
+          !!window.layoutRow.querySelector('.explain-waiting:not([hidden]) .video-spinner')`), true);
         if (process.env.ADOPRVIEW_LAYOUT_SCREENSHOTS) {
           await evaluate(`window.getSelection().removeAllRanges();document.querySelector('#rows [data-key="${key}"]').scrollIntoView({block:'start'});`);
           await frame();
