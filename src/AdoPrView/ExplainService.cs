@@ -1,7 +1,8 @@
 namespace AdoPrView;
 
 internal sealed record ExplainState(string Key, string RequestId, long Sequence, string Status, string Message,
-    string Output, ExplainRevision? Revision, string[] Coverage, string[]? Evidence = null);
+    string Output, ExplainRevision? Revision, string[] Coverage, string[]? Evidence = null,
+    ExplainSection[]? ExplanationSections = null);
 
 internal sealed class ExplainService(Func<string, CancellationToken, Task<ExplainContext>> capture, IExplainModel? model = null) : IAsyncDisposable
 {
@@ -12,10 +13,13 @@ internal sealed class ExplainService(Func<string, CancellationToken, Task<Explai
         public Task Work = Task.CompletedTask;
         public bool CancelRequested;
         public long LastStream;
+        public ExplainSections? Sections;
     }
 
+    sealed record Artifact(ExplainState State, ExplainSections Sections);
     readonly object _gate = new();
     readonly Dictionary<string, Operation> _operations = new(StringComparer.Ordinal);
+    readonly Dictionary<string, List<Artifact>> _artifacts = new(StringComparer.Ordinal);
     readonly IExplainModel _model = model ?? new ExplainModel();
     bool _disposed;
     Task? _disposeTask;
@@ -23,7 +27,27 @@ internal sealed class ExplainService(Func<string, CancellationToken, Task<Explai
     public event Action<ExplainState>? Changed;
 
     internal static bool Active(string status) => status is "preparing" or "running" or "cancelling";
-    public ExplainState[] States { get { lock (_gate) return _operations.Values.Select(o => o.State).ToArray(); } }
+    public ExplainState[] States { get { lock (_gate) return _operations.Values.Select(o => Snapshot(o.State)).ToArray(); } }
+    public ExplainState[] Artifacts { get { lock (_gate) return _artifacts.Values.SelectMany(a => a).Select(a => Snapshot(a.State)).ToArray(); } }
+
+    static ExplainState Snapshot(ExplainState state) => state with { Coverage = [.. state.Coverage], Evidence = [.. state.Evidence ?? []],
+        ExplanationSections = state.ExplanationSections is null ? null : [.. state.ExplanationSections] };
+
+    public ExplanationAttachment Resolve(string key, string requestId) => Resolve(key, requestId, null);
+
+    public ExplanationAttachment Resolve(string key, string requestId, int? sectionIndex)
+    {
+        lock (_gate)
+        {
+            ObjectDisposedException.ThrowIf(_disposed, this);
+            var artifact = _artifacts.GetValueOrDefault(key)?.SingleOrDefault(a => a.State.RequestId == requestId);
+            var state = artifact?.State;
+            if (state is null || state.Status != "completed" || state.Revision is null || state.Revision.Key != key)
+                throw new InvalidOperationException("The selected explanation is missing, expired, unfinished, or belongs to another PR. Generate a completed explanation before attaching it.");
+            if (sectionIndex is int index) return artifact!.Sections.Attach(state, index);
+            return new(state.RequestId, state.Output, state.Revision, [.. state.Evidence ?? []], [.. state.Coverage]);
+        }
+    }
 
     public ExplainState Start(string key)
     {
@@ -54,9 +78,15 @@ internal sealed class ExplainService(Func<string, CancellationToken, Task<Explai
                 op.State = op.State with { Status = "cancelling", Message = "Cancelling the explanation..." };
             if (op.CancelRequested && op.State.Status == "completed")
                 op.State = op.State with { Status = "cancelled", Message = "Explanation cancelled. Partial text is not a finished explanation." };
+            if (op.State.Status == "completed")
+            {
+                if (!_artifacts.TryGetValue(op.State.Key, out var artifacts)) _artifacts[op.State.Key] = artifacts = [];
+                artifacts.Add(new(Snapshot(op.State), op.Sections!));
+                if (artifacts.Count > 12) artifacts.RemoveAt(0);
+            }
             if (stream && Environment.TickCount64 - op.LastStream < 100) return;
             op.LastStream = Environment.TickCount64;
-            state = op.State;
+            state = Snapshot(op.State);
         }
         Changed?.Invoke(state);
     }
@@ -78,9 +108,12 @@ internal sealed class ExplainService(Func<string, CancellationToken, Task<Explai
             }, stream: true), linked.Token);
             linked.Token.ThrowIfCancellationRequested();
             await context.VerifyAsync(linked.Token);
+            var original = result;
+            result = context.Arm.Complete(result, context.Changes);
             if (result.Length > 64_000) throw new InvalidOperationException("Copilot output exceeded the explanation limit.");
+            op.Sections = ExplainSections.Create(result, result == original ? null : original.TrimEnd().Length + 2);
             Update(op, s => s with { Status = "completed", Message = "Investigation ready. See inspected evidence and unread areas below.",
-                Output = result, Coverage = context.Coverage(), Evidence = context.Evidence() });
+                Output = result, Coverage = context.Coverage(), Evidence = context.Evidence(), ExplanationSections = op.Sections.Metadata });
         }
         catch (OperationCanceledException)
         {
@@ -103,13 +136,13 @@ internal sealed class ExplainService(Func<string, CancellationToken, Task<Explai
         {
             if (!_operations.TryGetValue(key, out op!) || op.State.RequestId != requestId)
                 throw new InvalidOperationException("This explanation is no longer current.");
-            if (!Active(op.State.Status)) return op.State;
+            if (!Active(op.State.Status)) return Snapshot(op.State);
             op.CancelRequested = true;
             op.Cancel.Cancel();
         }
         Update(op, s => s with { });
         await op.Work;
-        lock (_gate) return op.State;
+        lock (_gate) return Snapshot(op.State);
     }
 
     public ValueTask DisposeAsync()

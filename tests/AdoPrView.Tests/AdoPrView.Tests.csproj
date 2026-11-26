@@ -9,4 +9,11 @@
   <ItemGroup>
     <ProjectReference Include="..\..\src\AdoPrView\AdoPrView.csproj" />
   </ItemGroup>
+  <Target Name="CopyFixSupervisorFixture" AfterTargets="Build">
+    <ItemGroup>
+      <FixSupervisorFixture Include="..\..\src\AdoPrView\bin\$(Configuration)\$(TargetFramework)\$(RuntimeIdentifier)\FixSupervisor\**\*" />
+    </ItemGroup>
+    <RemoveDir Directories="$(TargetDir)FixSupervisor" />
+    <Copy SourceFiles="@(FixSupervisorFixture)" DestinationFiles="@(FixSupervisorFixture->'$(TargetDir)FixSupervisor\%(RecursiveDir)%(Filename)%(Extension)')" SkipUnchangedFiles="true" />
+  </Target>
 </Project>

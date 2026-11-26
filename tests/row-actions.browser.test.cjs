@@ -74,6 +74,8 @@ test('Additional Fix fields are independently editable and restored in the real 
       S.snap.approvalProvider=null;
       S.settings.triageInstructions=null;S.settings.additionalTriageInstructions=null;
       S.settings.futureSetting='SYNTHETIC-KEEP';
+      S.settings.wslDistro='Legacy-Ubuntu';S.settings.wslRepoDirectories={'offline/project/repo':'/legacy/source'};
+      S.settings.nativeRepoDirectories={};
       window.fixSaved=[];
       window.fixExisting=['running','recovering','completed'].map((status,i)=>({
         key:'offline:'+i,runId:'existing-'+i,status,output:'Captured session '+i
@@ -86,6 +88,12 @@ test('Additional Fix fields are independently editable and restored in the real 
       };
     `);
     await click('#settingsBtn');
+    assert.equal(await evaluate(`!!document.querySelector('[data-native-repo]')&&!document.querySelector('[data-wsl-repo]')&&!document.querySelector('#wslDistro')`), true);
+    assert.equal(await evaluate(`getComputedStyle(document.querySelector('.native-repo label small')).display`), 'block');
+    const nativeKey = await evaluate(`document.querySelector('[data-native-repo]').dataset.nativeRepo`);
+    const nativeDirectory = 'C:\\synthetic\\checkout with spaces';
+    await click('[data-native-repo]');
+    await send('Input.insertText', { text: nativeDirectory });
     const labels = await evaluate(`['triageInstructions','additionalTriageInstructions'].map(id=>
       document.querySelector('label[for="'+id+'"]').textContent)`);
     assert.deepEqual(labels, ['Custom Ask (override)', 'Additional instructions (append)']);
@@ -101,8 +109,12 @@ test('Additional Fix fields are independently editable and restored in the real 
     assert.equal(saved.triageInstructions, ask);
     assert.equal(saved.additionalTriageInstructions, extra);
     assert.equal(saved.futureSetting, 'SYNTHETIC-KEEP');
+    assert.equal(saved.nativeRepoDirectories[nativeKey], nativeDirectory);
+    assert.equal(saved.wslDistro, 'Legacy-Ubuntu');
+    assert.equal(saved.wslRepoDirectories['offline/project/repo'], '/legacy/source');
     await evaluate('closeDrawer();S.settings=structuredClone(window.fixSaved[0]);');
     await click('#settingsBtn');
+    assert.equal(await evaluate(`document.querySelector('[data-native-repo]').value`), nativeDirectory);
     assert.deepEqual(await evaluate(`['triageInstructions','additionalTriageInstructions'].map(id=>
       document.getElementById(id).value)`), [ask, extra]);
     await click('[data-dact="save"]');
@@ -336,10 +348,10 @@ test('real row hit testing and action identity across refreshes', { timeout: 900
       await frame();
       await evaluate(`S.expanded.clear();S.lane=null;S.repo='';S.q='';S.scope='all';
         document.querySelector('#search').value='';
-        S.rowOrder=[];S.orderRevision=null;S.laneRetained.clear();S.runs.clear();S.busy.clear();closeRowMenu();
+        S.rowOrder=[];S.orderRevision=null;S.laneRetained.clear();S.runs.clear();S.runHistoryOpen.clear();S.busy.clear();closeRowMenu();
         window.holdLog=false;S.settings.hidden=['sample-deploy-id:1001'];S.settings.ignoreDrafts=false;S.hideUndo=[];
         window.confirmations=[];window.confirmResult=true;window.autoFailure=false;S.autoCompleteErrors.clear();
-        window.explainSequence=0;S.explanations.clear();S.explanationPrs?.clear();window.videoSequence=0;S.videos.clear();
+        window.explainSequence=0;S.explanations.clear();S.explanationPrs?.clear();explanationArtifacts.clear();investigationDrafts.clear();window.videoSequence=0;S.videos.clear();
         S.settings.videoSpeech={voice:'offline-configured-voice'};
         window.speechMissingAz=false;window.speechDenied=false;window.speechListDenied=false;window.holdSpeechSelection=false;
         window.holdApproval=false;window.approvalFailure=false;S.reviewVotes.clear();
@@ -418,6 +430,64 @@ test('real row hit testing and action identity across refreshes', { timeout: 900
         assert.deepEqual((await calls()).map(c=>c.method),['explainPr','cancelExplanation','explainPr']);
       }
       await send('Emulation.setDeviceMetricsOverride', {width:1600,height:1000,deviceScaleFactor:1,mobile:false});
+    });
+
+    await t.test('Explain ARM Bicep preserves indentation, safe labels and highlighted differences through retained output', async () => {
+      const key = 'sample-service-id:101';
+      const before = "resource account 'Microsoft.Storage/storageAccounts@2023-05-01' = {\n  name: 'sample'\n  properties: {\n    allowBlobPublicAccess: true\n  }\n}";
+      const after = before.replace('true', 'false');
+      const output = process.env.ADOPRVIEW_ARM_EXAMPLE
+        ? require('node:fs').readFileSync(process.env.ADOPRVIEW_ARM_EXAMPLE, 'utf8')
+        : `## Azure Resource Manager changes\n\n### /deploy.bicep\n\n#### Before\n\nExact source excerpt (not deployment-validated):\n\n\`\`\`bicep\n${before}\n\`\`\`\n\n#### After\n\nExact source excerpt (not deployment-validated):\n\n\`\`\`bicep\n${after}\n\`\`\`\n\n#### Changed lines (- removed, + added)\n\n\`\`\`diff\n-    allowBlobPublicAccess: true\n+    allowBlobPublicAccess: false\n\`\`\`\n\n**Improvement:** Disables public blob access.\n\n**Risks and uncertainty:** Anonymous consumers may fail; no deployment was run.`;
+      for (const [width, theme] of [[1600, 'light'], [900, 'dark']]) {
+        await send('Emulation.setDeviceMetricsOverride', { width, height: 1100, deviceScaleFactor: 1, mobile: false });
+        await reset(true);
+        await evaluate(`S.settings.theme=${JSON.stringify(theme)};applySavedTheme();S.expanded.add('${key}');renderRows();
+          updateExplanation({key:'${key}',requestId:'arm-example',sequence:++window.explainSequence,status:'completed',
+            message:'Synthetic ARM explanation ready.',output:${JSON.stringify(output)},coverage:[]});`);
+        const check = () => evaluate(`(()=>{
+          const card=document.querySelector('[data-key="${key}"] .explanation'),out=card.querySelector('.explain-output');
+          const codes=[...out.querySelectorAll('pre code')];
+          return {
+            before:codes[0]?.textContent, after:codes[1]?.textContent,
+            whitespace:getComputedStyle(codes[0].parentElement).whiteSpace,
+            labels:[...out.querySelectorAll('p > strong')].map(n=>n.textContent),
+            removed:out.querySelector('pre del')?.textContent, added:out.querySelector('pre ins')?.textContent,
+            removedColor:getComputedStyle(out.querySelector('pre del')).color,
+            addedColor:getComputedStyle(out.querySelector('pre ins')).color,
+            safe:!out.querySelector('script,img,a,button,iframe,style,[onerror]'),
+            fits:card.scrollWidth<=card.clientWidth+1
+          };
+        })()`);
+        let actual = await check();
+        assert.equal(actual.before, before + '\n');
+        assert.equal(actual.after, after + '\n');
+        assert.equal(actual.whitespace, 'pre');
+        assert.ok(actual.labels.includes('Bicep'));
+        assert.equal(actual.removed, '-    allowBlobPublicAccess: true');
+        assert.equal(actual.added, '+    allowBlobPublicAccess: false');
+        assert.notEqual(actual.removedColor, actual.addedColor);
+        assert.ok(actual.safe && actual.fits);
+        if (width === 1600 && process.env.ADOPRVIEW_ARM_SCREENSHOT) {
+          await evaluate(`document.querySelector('[data-key="${key}"] .explanation').scrollIntoView({block:'start'});`);
+          const shot = await send('Page.captureScreenshot', { format: 'png' });
+          await writeFile(process.env.ADOPRVIEW_ARM_SCREENSHOT, Buffer.from(shot.data, 'base64'));
+          await evaluate(`const output=document.querySelector('[data-key="${key}"] .explain-output');output.scrollTop=output.scrollHeight;`);
+          const diffShot = await send('Page.captureScreenshot', { format: 'png' });
+          await writeFile(process.env.ADOPRVIEW_ARM_SCREENSHOT.replace(/\.png$/i, '-diff.png'), Buffer.from(diffShot.data, 'base64'));
+        }
+        await evaluate(`S.expanded.delete('${key}');renderRows();S.expanded.add('${key}');renderRows();`);
+        assert.deepEqual(await check(), actual, 'Retained output changed code or lost safe diff treatment');
+        const hostile = '```bicep onclick=evil\n  name: \'<script>window.armInjected=true</script>&<img src=x onerror=evil()>\'\n```\n\n```diff\n-<button onclick=evil()>old</button>\n+<img src=x onerror=evil()>\n```';
+        await evaluate(`updateExplanation({...S.explanations.get('${key}'),sequence:++window.explainSequence,output:${JSON.stringify(hostile)}});`);
+        assert.equal(await evaluate(`(()=>{
+          const out=document.querySelector('[data-key="${key}"] .explain-output');
+          return !window.armInjected&&!out.querySelector('script,img,button,[onclick],[onerror]')&&
+            out.querySelector('pre code').textContent.includes('<script>window.armInjected=true</script>&<img')&&
+            out.querySelector('pre ins').textContent==='+<img src=x onerror=evil()>';
+        })()`), true);
+      }
+      await send('Emulation.setDeviceMetricsOverride', { width:1600,height:1000,deviceScaleFactor:1,mobile:false });
     });
 
     await t.test('Explain retained activity meets missing, filtered, hidden, cancellation, replacement and return contracts', async t => {
@@ -647,6 +717,7 @@ test('real row hit testing and action identity across refreshes', { timeout: 900
       const key='sample-service-id:101';
       await reset(true);
       await evaluate(`S.settings.videoSpeech=null;window.speechMissingAz=true;S.expanded.add('${key}');renderRows();`);
+      await click(await point(key,'.detail .assistance-video > summary')); await frame();
       await click(await point(key,'.detail [data-act="tiktokPr"]')); await frame();
       assert.equal(await evaluate(`document.querySelector('#speechDialog').open`),true);
       assert.match(await evaluate(`document.querySelector('#speechBody').textContent`),/az.*not available/);
@@ -678,6 +749,7 @@ test('real row hit testing and action identity across refreshes', { timeout: 900
       const voice='en-US-AvaMultilingualNeural';
       await reset(true);
       await evaluate(`S.settings.videoSpeech=null;window.speechListDenied=true;S.expanded.add('${key}');renderRows();`);
+      await click(await point(key,'.detail .assistance-video > summary')); await frame();
       await click(await point(key,'.detail [data-act="tiktokPr"]')); await frame();
       assert.match(await evaluate(`document.querySelector('#speechBody').textContent`),/Subscription listing denied/);
       await evaluate(`document.querySelector('#speechBody details').open=true;document.querySelector('#speechExactId').focus();`);
@@ -716,6 +788,7 @@ test('real row hit testing and action identity across refreshes', { timeout: 900
         await reset(true);
         await evaluate(`S.expanded.add('${key}');renderRows();
           window.originalFix=document.querySelector('[data-key="${key}"] .row [data-act="triage"]');`);
+        await click(await point(key,'.detail .assistance-video > summary')); await frame();
         await click(await point(key,'.detail [data-act="tiktokPr"]')); await frame();
         assert.deepEqual((await calls()).map(c=>c.method),['tiktokPr']);
         assert.equal(await evaluate(`(()=>{
@@ -763,6 +836,7 @@ test('real row hit testing and action identity across refreshes', { timeout: 900
       const key='sample-service-id:101';
       await reset(true);
       await evaluate(`S.expanded.add('${key}');renderRows();`);
+      await click(await point(key,'.detail .assistance-video > summary')); await frame();
       await click(await point(key,'.detail [data-act="tiktokPr"]')); await frame();
       await click(await elementPoint('[data-lane="blocked"]')); await frame();
       assert.equal(await evaluate(`!!document.querySelector('#rows [data-key="${key}"]')`),false);
@@ -773,6 +847,36 @@ test('real row hit testing and action identity across refreshes', { timeout: 900
       assert.equal(cancelled.length,1);
       assert.equal(cancelled[0].key,key);
       assert.equal(cancelled[0].requestId,'1'.padStart(32,'0'));
+    });
+
+    await t.test('video has one owner across expanded, retained assistance and standalone shelves without losing playback', async () => {
+      const key='sample-service-id:101';
+      await reset(true);
+      const states=await evaluate(`(()=>{
+        S.expanded.add('${key}');renderRows();
+        updateVideo({key:'${key}',requestId:'d'.repeat(32),sequence:++window.videoSequence,status:'completed',
+          message:'Offline playback fixture',evidence:[],coverage:[],model:'claude-opus-5.5',durationSeconds:1,
+          path:'offline.mp4',mediaUrl:'https://pr-video.local/'+'d'.repeat(32)+'.mp4'});
+        const player=document.querySelector('[data-video-key="${key}"] video');
+        player.currentTime=17;player.volume=.35;player.playbackRate=.75;
+        const snapshot=()=>{
+          const cards=document.querySelectorAll('[data-video-key="${key}"]');
+          const current=cards[0]?.querySelector('video');
+          return {count:cards.length,same:current===player,connected:player.isConnected,
+            position:current?.currentTime,volume:current?.volume,rate:current?.playbackRate};
+        };
+        const states=[snapshot()];
+        updateExplanation({key:'${key}',requestId:'video-owner-explain',sequence:1,status:'running',
+          message:'Synthetic explanation',output:'Reading source',coverage:[]});
+        S.q='no matching PR';renderRows();states.push(snapshot());
+        S.q='';renderRows();states.push(snapshot());
+        S.expanded.delete('${key}');renderRows();states.push(snapshot());
+        updateExplanation({...S.explanations.get('${key}'),sequence:2,status:'failed',
+          message:'Synthetic failure'});states.push(snapshot());
+        S.expanded.add('${key}');renderRows();states.push(snapshot());
+        return states;
+      })()`);
+      assert.deepEqual(states,Array.from({length:6},()=>({count:1,same:true,connected:true,position:17,volume:.35,rate:.75})));
     });
 
     await t.test('shelf retries and membership changes retain unrelated player nodes, seek and playback settings', async () => {
@@ -1464,12 +1568,34 @@ test('real row hit testing and action identity across refreshes', { timeout: 900
       await evaluate(`window.MockHost.rpc=window.originalRpc;delete window.originalRpc;`);
     });
 
+    await t.test('layout primary AI and Fix controls fit desktop and narrow detail independently of the panning table', async () => {
+      for (const width of [1600, 1000, 760]) {
+        await send('Emulation.setDeviceMetricsOverride', { width, height: 1000, deviceScaleFactor: 1, mobile: false });
+        await reset();
+        const key = 'sample-service-id:105';
+        await evaluate(`S.expanded.add('${key}');renderRows();`);
+        const fitting = await evaluate(`(()=>{const row=document.querySelector('#rows [data-key="${key}"]'),main=document.querySelector('main');
+          main.scrollLeft=0;
+          return [...row.querySelectorAll('.detail [data-act="explainPr"],.detail [data-assistance-intent],.detail [data-act="triage"],.detail [data-act="copyPrompt"]')]
+            .every(el=>{const r=el.getBoundingClientRect();return r.width>0&&r.left>=0&&r.right<=main.clientWidth+main.getBoundingClientRect().left;});})()`);
+        assert.equal(fitting, true, 'Primary controls fit width '+width);
+        assert.equal(await evaluate(`document.querySelector('#rows [data-key="${key}"] .run-output').hidden`), true, 'No idle log well');
+        await evaluate(`{const pr=S.snap.prs.find(p=>p.key==='${key}');
+          S.runs.set('fit-earlier',{...pr,runId:'fit-earlier',status:'completed',output:'Earlier\\n',startedAt:'2026-01-01T00:00:00Z'});
+          S.runs.set('fit-main',{...pr,runId:'fit-main',status:'completed',output:'Short output\\n',startedAt:'2026-01-02T00:00:00Z'});renderRows();}`);
+        assert.equal(await evaluate(`document.querySelector('#rows [data-key="${key}"] .run-earlier .run-history').open`), false);
+        await click(await point(key, '.run-earlier .run-history > summary')); await move(0, 0); await frame();
+        assert.equal(await evaluate(`document.querySelector('#rows [data-key="${key}"] .run-earlier .run-history').open`), true, 'History opens by real input');
+        assert.ok(await evaluate(`document.querySelector('#rows [data-key="${key}"] .copilot-run:not(.run-earlier) .run-output').clientHeight`) < 100, 'Short output has content-driven height');
+      }
+    });
+
     const layoutCards = key => evaluate(`(()=>{const row=document.querySelector('#rows [data-key="${key}"]'),detail=row.querySelector('.detail');
       const box=e=>{const r=e.getBoundingClientRect();return {top:r.top,bottom:r.bottom};};
       return {cards:[...detail.querySelectorAll('.card')].map(c=>({head:c.querySelector('h3').textContent.trim().replace(/\\s+/g,' '),
           run:c.classList.contains('copilot-run'),earlier:c.classList.contains('run-earlier'),...box(c)})),
         columns:[...detail.querySelectorAll(':scope > .stack:not(.full)')].map(box),trailing:box(detail.lastElementChild),
-        scopes:[...row.querySelectorAll('.run-scope')].map(p=>({inStatus:!!p.closest('.card')?.querySelector('[data-act="triage"]'),
+        scopes:[...row.querySelectorAll('.run-scope')].map(p=>({inStatus:!!p.closest('.fix-home')?.querySelector('[data-act="triage"]'),
           inRun:!!p.closest('.copilot-run'),visible:p.getClientRects().length>0,text:p.textContent}))};})()`);
     const cardIndex = (layout, head) => {
       const i = layout.cards.findIndex(c => c.head.startsWith(head));
@@ -1479,10 +1605,84 @@ test('real row hit testing and action identity across refreshes', { timeout: 900
     const assertOneStatusScope = layout => {
       assert.equal(layout.scopes.length, 1, 'One Fix PR execution notice per expanded PR');
       assert.deepEqual([layout.scopes[0].inStatus, layout.scopes[0].inRun, layout.scopes[0].visible], [true, false, true]);
-      assert.match(layout.scopes[0].text, /^Fix PR starts in a separate PR worktree with --yolo:.*not a filesystem sandbox.*Exit 0 does not verify the PR fix\.$/s);
+      assert.match(layout.scopes[0].text, /By default, Fix PR asks Copilot on Windows to try to fix merge conflicts, failing checks and review feedback/);
     };
 
-    await t.test('layout hierarchy leads with load errors and failed gates; idle tools and finished runs follow PR context', async () => {
+    await t.test('Fix PR plain-language summary and accessible permission details survive panel updates', async () => {
+      await reset();
+      const key = 'sample-service-id:105', root = `#rows [data-key="${key}"]`;
+      await evaluate(`S.expanded.add('${key}');renderRows();`);
+      await move(0, 0); await frame();
+      const state = () => evaluate(`(()=>{
+        const scope=document.querySelector('${root} .run-scope'),button=scope.querySelector('button');
+        const detail=document.getElementById(button.getAttribute('aria-controls'));
+        return {summary:scope.querySelector('.run-summary').textContent,hidden:detail.hidden,
+          expanded:button.getAttribute('aria-expanded'),name:button.getAttribute('aria-label'),
+          associated:button.getAttribute('aria-describedby')===detail.id,details:detail.textContent,
+          visible:detail.getClientRects().length>0};
+      })()`);
+      const info = await state();
+      assert.match(info.summary, /try to fix merge conflicts, failing checks and review feedback/);
+      assert.match(info.summary, /New runs are asked to validate, commit and push fixes back to this PR/);
+      assert.doesNotMatch(info.summary, /--yolo|sandbox|confirmation/);
+      assert.deepEqual([info.hidden, info.expanded, info.visible, info.associated], [true, 'false', false, true]);
+      assert.equal(info.name, 'Fix PR permissions and limitations');
+      for (const text of ['--yolo', 'not globally', 'not a filesystem sandbox', 'prompt instruction, not enforced',
+        'no-approval/policy-bypass', 'Legacy WSL runs keep their recorded environment and original permission/publish scope', 'Sign-in is required',
+        'noninteractive', 'Exit 0 does not verify', 'verify the results'])
+        assert.ok(info.details.includes(text), `Missing boundary: ${text}`);
+
+      const control = await point(key, '.run-info-button');
+      await move(control.x, control.y); await frame();
+      assert.equal((await state()).visible, true, 'Mouse hover reveals details');
+      await keyboard('Escape', 27);
+      assert.equal((await state()).hidden, true, 'Escape dismisses hover content without focusing the icon');
+      await move(0, 0); await move(control.x, control.y); await frame();
+      const detailPoint = await point(key, '.run-info-details');
+      await move(detailPoint.x, detailPoint.y); await frame();
+      assert.equal((await state()).visible, true, 'Pointer can move onto the details to read them');
+      await move(0, 0); await frame();
+      assert.equal((await state()).hidden, true, 'Leaving a transient preview closes it');
+      await evaluate(`document.querySelector('${root} [data-act="copyPrompt"]').focus();`);
+      await keyboard('Tab', 9);
+      assert.equal(await evaluate(`document.activeElement.matches('${root} .run-info-button')`), true);
+      assert.equal((await state()).expanded, 'true', 'Keyboard focus reveals associated details');
+      await keyboard('Escape', 27);
+      assert.equal((await state()).hidden, true);
+      assert.equal(await evaluate(`document.querySelector('${root}').classList.contains('open')`), true,
+        'Dismissing details must not collapse the PR');
+      await keyboard('Enter', 13);
+      await keyboard('Tab', 9);
+      assert.equal((await state()).visible, true, 'Keyboard activation pins details after focus leaves');
+      await click(await point(key, '.run-info-button'));
+      assert.equal((await state()).hidden, true, 'Second activation closes pinned details');
+      await move(0, 0);
+      await evaluate('document.activeElement.blur();');
+      const touch = await point(key, '.run-info-button');
+      await send('Input.dispatchTouchEvent', { type: 'touchStart', touchPoints: [{ x: touch.x, y: touch.y }] });
+      await send('Input.dispatchTouchEvent', { type: 'touchEnd', touchPoints: [] });
+      await frame();
+      assert.equal((await state()).visible, true, 'Touch opens details without hover');
+
+      // Re-rendered PRs get fresh disclosure state; recovered output keeps its captured notice.
+      await evaluate(`{
+        const pr=S.snap.prs.find(p=>p.key==='${key}');
+        S.runs.set('legacy-copy-run',{...pr,runId:'legacy-copy-run',status:'running',
+          message:'Earlier run: no push permitted',output:'Original no-push scope',revision:1});
+        renderRows();
+      }`);
+      await move(0, 0); await evaluate('document.activeElement.blur();'); await frame();
+      assert.equal((await state()).hidden, true, 'Panel replacement resets pinned state');
+      assert.match(await evaluate(`document.querySelector('${root} .run-status').textContent`), /Earlier run: no push permitted/);
+      await evaluate(`updateCopilotRun({...S.runs.get('legacy-copy-run'),status:'completed',revision:2,
+        message:'Earlier run: no push permitted; inspect results',exitCode:0});`);
+      assert.match(await evaluate(`document.querySelector('${root} .run-status').textContent`),
+        /exit 0: Earlier run: no push permitted; inspect results/);
+      assert.equal((await state()).hidden, true);
+      assert.deepEqual((await calls()).filter(c=>c.method==='startCopilot'), [], 'Info never starts a run');
+    });
+
+    await t.test('layout hierarchy leads with status and AI; stable Fix home precedes full diagnostic logs and context', async () => {
       const key = 'sample-service-id:105';
       for (const loadError of [false, true]) {
         await send('Emulation.setDeviceMetricsOverride', { width: 1600, height: 1000, deviceScaleFactor: 1, mobile: false });
@@ -1496,15 +1696,13 @@ test('real row hit testing and action identity across refreshes', { timeout: 900
         await frame();
         const layout = await layoutCards(key);
         const gate = cardIndex(layout, '✕ Failed gate'), description = cardIndex(layout, 'Description'), status = cardIndex(layout, 'Status');
-        const explain = cardIndex(layout, 'What does this PR do?'), video = cardIndex(layout, 'A short PR explainer');
+        const explain = cardIndex(layout, 'PR assistance'), video = cardIndex(layout, 'Short PR video explainer');
         const run = layout.cards.findIndex(c => c.run);
-        if (loadError) assert.ok(cardIndex(layout, 'Load error') < gate, 'Load error leads the failed gate');
-        assert.ok(gate < description && description < status && status < explain && explain < video && video < run,
+        if (loadError) assert.ok(cardIndex(layout, 'Load error') < status, 'Load error leads the tools');
+        assert.ok(status < explain && explain < video && video < run && run < gate && gate < description,
           `Unexpected detail order: ${layout.cards.map(c => c.head).join(' | ')}`);
-        const g = layout.cards[gate], contextBottom = Math.max(...layout.columns.map(c => c.bottom));
-        assert.ok(g.bottom <= layout.cards[description].top && g.bottom <= layout.cards[status].top, 'Failed gate renders above PR context');
-        assert.ok(layout.trailing.top >= contextBottom - .5, 'Idle tools and finished runs render below Description and Status');
-        assert.ok(layout.cards[run].top >= layout.cards[status].bottom, 'A finished run renders after Status');
+        assert.ok(layout.cards[run].bottom <= layout.cards[gate].top, 'Completed Fix remains before full logs');
+        assert.equal(await evaluate(`!!document.querySelector('#rows [data-key="${key}"] .explanation > .assistance-body > .assistance-video .pr-video')`), true, 'Video is an alternate output inside assistance, not a peer card');
         assertOneStatusScope(layout);
         if (loadError) {
           assert.equal(await evaluate(`document.querySelector('#rows [data-key="${key}"] .explanation [data-act="explainPr"]').disabled`), true);
@@ -1553,9 +1751,8 @@ test('real row hit testing and action identity across refreshes', { timeout: 900
         const gate = cardIndex(layout, '✕ Failed gate'), description = cardIndex(layout, 'Description');
         const runs = layout.cards.map((c, i) => c.run ? i : -1).filter(i => i >= 0);
         assert.deepEqual(runs.map(i => layout.cards[i].earlier), [false, true]);
-        assert.ok(gate < runs[0] && runs[1] < description, 'The live run group follows blockers and precedes PR context');
-        assert.ok(layout.cards[runs[0]].top >= layout.cards[gate].bottom && layout.cards[runs[1]].bottom <= layout.cards[description].top);
-        assert.ok(cardIndex(layout, 'What does this PR do?') > cardIndex(layout, 'Status'));
+        assert.ok(cardIndex(layout, 'Status') < runs[0] && runs[1] < gate && gate < description, 'The live run group follows compact blockers and AI, before full diagnostics');
+        assert.ok(cardIndex(layout, 'PR assistance') < runs[0]);
         assertOneStatusScope(layout);
         assert.equal(await evaluate(`(()=>{const c=document.querySelector('#rows [data-key="${key}"] .copilot-run:not(.run-earlier)');
           return c.dataset.runId==='layout-live-run' && !c.querySelector('[data-act="cancelRun"]').hidden &&
@@ -1582,7 +1779,7 @@ test('real row hit testing and action identity across refreshes', { timeout: 900
       }
     });
 
-    await t.test('layout run lifecycle relocates the run group without a manual render and defers while rows are in use', async () => {
+    await t.test('layout run lifecycle keeps its home stable and defers exact-run promotion while rows are in use', async () => {
       await send('Emulation.setDeviceMetricsOverride', { width: 1600, height: 1000, deviceScaleFactor: 1, mobile: false });
       await reset();
       const key = 'sample-service-id:105';
@@ -1599,7 +1796,8 @@ test('real row hit testing and action identity across refreshes', { timeout: 900
           beforeContext: runs.every(i => i < cardIndex(layout, 'Description')), adjacent: runs[1] === runs[0] + 1,
           label: await evaluate(`document.querySelector('#rows [data-key="${key}"] .detail [data-act="triage"]').textContent.trim()`) };
       };
-      assert.deepEqual(await place(), { lead: '0', ids: ['lc-new', 'lc-old:earlier'], beforeContext: false, adjacent: true, label: 'Fix PR' });
+      assert.deepEqual(await place(), { lead: '1', ids: ['lc-new', 'lc-old:earlier'], beforeContext: true, adjacent: true, label: 'Fix PR' });
+      await evaluate(`window.fixHome=document.querySelector('#rows [data-key="${key}"] .fix-home');`);
       await evaluate(`updateCopilotRun({...S.runs.get('lc-old'),status:'running',mayBeRunning:true})`);
       await frame();
       assert.deepEqual(await place(), { lead: '1', ids: ['lc-old', 'lc-new:earlier'], beforeContext: true, adjacent: true, label: 'Show run' },
@@ -1613,8 +1811,9 @@ test('real row hit testing and action identity across refreshes', { timeout: 900
       assert.equal((await place()).label, 'Fix PR', 'Label still updates in place while deferred');
       await move(10, 10);
       await frame();
-      assert.deepEqual(await place(), { lead: '0', ids: ['lc-new', 'lc-old:earlier'], beforeContext: false, adjacent: true, label: 'Fix PR' },
-        'Finished run group moves behind PR context once rows are idle');
+      assert.deepEqual(await place(), { lead: '1', ids: ['lc-new', 'lc-old:earlier'], beforeContext: true, adjacent: true, label: 'Fix PR' },
+        'Completed group keeps its early home while preferred run updates');
+      assert.equal(await evaluate(`document.querySelector('#rows [data-key="${key}"] .fix-home').previousElementSibling.querySelector('.ai-assistance')!==null`), true);
       for (let i = 0; i < 3; i++) await evaluate(`updateCopilotRun({...S.runs.get('lc-new'),output:S.runs.get('lc-new').output+'tick\\n',outputOffset:S.runs.get('lc-new').outputOffset+5,revision:${i + 1}})`);
       assert.equal(await evaluate(`document.querySelector('#rows [data-key="${key}"] .copilot-run').isConnected && !S.rowsPending && !S.runRelocations.size`), true);
       // Latest run uncertain but not maybe-running is still cancelable: it leads and the label is Show run.
@@ -1623,7 +1822,7 @@ test('real row hit testing and action identity across refreshes', { timeout: 900
       assert.deepEqual(await place(), { lead: '1', ids: ['lc-new', 'lc-old:earlier'], beforeContext: true, adjacent: true, label: 'Show run' });
     });
 
-    await t.test('layout a leading run never buries conflicts or required reviews that no leading card conveys', async () => {
+    await t.test('layout compact Status keeps all conflicts and required-review work visible above AI and Fix', async () => {
       await send('Emulation.setDeviceMetricsOverride', { width: 1600, height: 1000, deviceScaleFactor: 1, mobile: false });
       for (const c of [{ blockers: ['Merge conflicts'], humanActions: [], expect: ['Merge conflicts'] },
         { blockers: [], humanActions: ['reviews'], cached: true, expect: ['Human reviewer approval needed (+1)'] },
@@ -1640,29 +1839,29 @@ test('real row hit testing and action identity across refreshes', { timeout: 900
           S.expanded.add(key);renderRows();}`);
         await frame();
         const layout = await layoutCards(key);
-        const blocking = cardIndex(layout, 'Blocking'), run = layout.cards.findIndex(x => x.run);
+        const blocking = cardIndex(layout, 'Status'), run = layout.cards.findIndex(x => x.run);
         assert.ok(blocking < run && run < cardIndex(layout, 'Description'), layout.cards.map(x => x.head).join(' | '));
-        const blockingText = await evaluate(`document.querySelector('#rows [data-key="${key}"] .lead-blockers').textContent`);
+        const blockingText = await evaluate(`document.querySelector('#rows [data-key="${key}"] .pr-status').textContent`);
         for (const reason of c.expect) assert.ok(blockingText.includes(reason), `Blocking card misses ${reason}: ${blockingText}`);
         if (c.mixed) {
-          assert.ok(cardIndex(layout, '✕ Failed gate') < run, 'The failed gate still leads the live run');
-          assert.ok(!blockingText.includes('Build failed'), 'The failed-gate card already conveys its own build blocker');
+          assert.ok(cardIndex(layout, '✕ Failed gate') > run, 'Full diagnostics follow primary tools');
+          assert.ok(blockingText.includes('Build failed'), 'The compact summary retains the failed build before full logs');
         }
         assertOneStatusScope(layout);
       }
-      // A selection in the Blocking card defers the run group's relocation (which removes that card) until it clears.
+      // Status never moves or disappears when a run completes.
       const key = 'sample-service-id:105';
       await move(10, 10);
-      await evaluate(`{const el=document.querySelector('#rows [data-key="${key}"] .lead-blockers li .k'),r=document.createRange();r.selectNodeContents(el);
+      await evaluate(`{const el=document.querySelector('#rows [data-key="${key}"] .pr-status li .k'),r=document.createRange();r.selectNodeContents(el);
         window.getSelection().removeAllRanges();window.getSelection().addRange(r);window.blockNode=el.firstChild;window.blockText=window.getSelection().toString();}`);
       await evaluate(`updateCopilotRun({...S.runs.get('lead-live'),status:'completed',mayBeRunning:false,revision:5})`);
       await frame();
-      assert.deepEqual(await evaluate(`[window.blockNode.isConnected,window.getSelection().toString()===window.blockText,S.runRelocations.has('${key}')]`), [true, true, true],
-        'A selected Blocking reason stays attached while the relocation waits');
+      assert.deepEqual(await evaluate(`[window.blockNode.isConnected,window.getSelection().toString()===window.blockText,S.runRelocations.has('${key}')]`), [true, true, false],
+        'A selected status reason stays attached without needing relocation');
       await evaluate('window.getSelection().removeAllRanges()');
       await frame(); await frame();
-      assert.deepEqual(await evaluate(`[!!document.querySelector('#rows [data-key="${key}"] .lead-blockers'),S.runRelocations.size]`), [false, 0],
-        'The finished run moves behind the context once the selection clears');
+      assert.deepEqual(await evaluate(`[!!document.querySelector('#rows [data-key="${key}"] .pr-status'),S.runRelocations.size]`), [true, 0],
+        'Status remains present after completion');
     });
 
     await t.test('layout run relocation leaves native text selections in failed logs and Explain prose attached', async () => {
@@ -1692,7 +1891,7 @@ test('real row hit testing and action identity across refreshes', { timeout: 900
         await evaluate(`updateCopilotRun({...S.runs.get('sel-old'),status:'${status}',mayBeRunning:${status === 'running'},revision:${status === 'running' ? 1 : 2}})`);
         await frame();
         assert.equal(await intact(), true, `${name} selection stays attached across run relocation`);
-        assert.deepEqual([await lead(), await runs()], status === 'running' ? ['1', ['sel-old', 'sel-new']] : ['0', ['sel-new', 'sel-old']],
+        assert.deepEqual([await lead(), await runs()], status === 'running' ? ['1', ['sel-old', 'sel-new']] : ['1', ['sel-new', 'sel-old']],
           `${name} selection outside the run cards does not delay relocation`);
       }
       // A selection spanning into a moving card defers the move until the selection clears.
@@ -1705,8 +1904,8 @@ test('real row hit testing and action identity across refreshes', { timeout: 900
         !!r && r.startContainer===window.selNodes[0] && r.endContainer===window.selNodes[1] && window.selNodes.every(n=>n.isConnected) &&
         window.selRow===document.querySelector('#rows [data-key="${key}"]') &&
         s.toString().startsWith('Synthetic selectable prose for ${key}') && s.toString().trimEnd().endsWith('New')}`);
-      assert.deepEqual([await attached(), await lead(), await evaluate(`S.runRelocations.has('${key}')`)], [true, '0', true],
-        'A selection crossing a run card keeps the group in place');
+      assert.deepEqual([await attached(), await lead(), await evaluate(`S.runRelocations.has('${key}')`)], [true, '1', false],
+        'Same preferred run requires no placement change and keeps crossing selections attached');
       await evaluate('window.getSelection().removeAllRanges()');
       await frame(); await frame();
       assert.deepEqual([await lead(), await runs(), await evaluate('S.runRelocations.size')], ['1', ['sel-new', 'sel-old'], 0],
@@ -1735,7 +1934,8 @@ test('real row hit testing and action identity across refreshes', { timeout: 900
         S.runs.set('sel-rec',{...pr,runId:'sel-rec',id:0,status:'needs-attention',mayBeRunning:false,startedAt:'2025-12-31T00:00:00Z',output:'Recovered\\n',outputOffset:10});
         S.runs.set('sel-new',{...S.runs.get('sel-new'),status:'completed',mayBeRunning:false,revision:5});render();}`);
       await frame();
-      assert.deepEqual([await lead(), await runs()], ['0', ['sel-new', 'sel-old', 'sel-rec']]);
+      assert.deepEqual([await lead(), await runs()], ['1', ['sel-new', 'sel-old', 'sel-rec']]);
+      await evaluate(`document.querySelector('#rows [data-key="${key}"] .copilot-run[data-run-id="sel-rec"] .run-history').open=true;`);
       await select(`#rows [data-key="${key}"] .explain-output`, `#rows [data-key="${key}"] .copilot-run[data-run-id="sel-rec"] .run-output`);
       assert.equal(await intact(), true, 'The recovery-crossing selection baseline is intact before promotion');
       await evaluate(`window.recCard=document.querySelector('#rows [data-key="${key}"] .copilot-run[data-run-id="sel-rec"]');
@@ -1744,7 +1944,7 @@ test('real row hit testing and action identity across refreshes', { timeout: 900
       assert.deepEqual([await evaluate(`{const s=window.getSelection(),r=s.rangeCount&&s.getRangeAt(0);
         !!r && r.startContainer===window.selNodes[0] && r.endContainer===window.selNodes[1] && window.selNodes.every(n=>n.isConnected) &&
         window.selRow===document.querySelector('#rows [data-key="${key}"]') && s.toString().startsWith('Synthetic selectable prose for ${key}') && s.toString().trimEnd().endsWith('Recovered')}`),
-        await lead(), await runs(), await evaluate(`S.runRelocations.has('${key}')`)], [true, '0', ['sel-new', 'sel-old', 'sel-rec'], true],
+        await lead(), await runs(), await evaluate(`S.runRelocations.has('${key}')`)], [true, '1', ['sel-new', 'sel-old', 'sel-rec'], true],
         'Promotion of a recovered run waits while a selection endpoint sits in its card');
       // A queued full-row render (idle render, then flush) must not rebuild under the held relocation.
       assert.deepEqual(await evaluate(`renderRows(true); flushRowUpdates();
@@ -1769,6 +1969,7 @@ test('real row hit testing and action identity across refreshes', { timeout: 900
       assert.deepEqual(await shelfMain(), [['shelf-new', false], ['shelf-old', true]]);
       await evaluate(`{const row=document.querySelector('#runShelf [data-key="${key}"]'),a=row.querySelector('.run-scope'),
           b=row.querySelector('.copilot-run[data-run-id="shelf-old"] .run-output'),r=document.createRange();
+        b.closest('.run-history').open=true;
         const w=e=>document.createTreeWalker(e,NodeFilter.SHOW_TEXT),s=w(a).nextNode(),bw=w(b);let t=null,n;while((n=bw.nextNode()))t=n;
         r.setStart(s,0);r.setEnd(t,t.length);window.getSelection().removeAllRanges();window.getSelection().addRange(r);
         window.selNodes=[r.startContainer,r.endContainer];window.shelfOld=b.closest('.copilot-run');}`);
@@ -2004,7 +2205,7 @@ test('real row hit testing and action identity across refreshes', { timeout: 900
               await evaluate(`document.querySelector('[data-key="${key}"] .${action === 'approve' ? surface : 'row'} [data-act="${action}"]').focus()`);
               assert.equal(await evaluate(`document.activeElement.id`), 'closeDrawer', 'Inert review buttons cannot take focus');
             }
-            await keyboard('Tab', 9);
+            await evaluate(`document.querySelector('#wlInput').focus()`);
             await keyboard('Enter', 13);
             await keyboard('Enter', 13);
             assert.equal(await evaluate(`!!document.activeElement.closest('#drawer')`), true, 'Tab/Enter stays in Settings rather than approving');
@@ -2070,8 +2271,8 @@ test('real row hit testing and action identity across refreshes', { timeout: 900
           start:document.activeElement.selectionStart,end:document.activeElement.selectionEnd
         })`), { id: 'triageInstructions', value: 'Synthetic saved instructions with an unsaved longer draft', start: 40, end: 47 },
         'Draft text must be restored before its focused selection');
-        await evaluate(`document.querySelector('[data-wsl-repo]').focus();renderDrawer()`);
-        assert.equal(await evaluate(`document.activeElement.dataset.wslRepo===document.querySelector('[data-wsl-repo]').dataset.wslRepo`), true);
+        await evaluate(`document.querySelector('[data-native-repo]').focus();renderDrawer()`);
+        assert.equal(await evaluate(`document.activeElement.dataset.nativeRepo===document.querySelector('[data-native-repo]').dataset.nativeRepo`), true);
         await evaluate(`document.querySelector('[data-dact="discover"]').focus();renderDrawer()`);
         assert.equal(await evaluate(`document.activeElement.id`), 'closeDrawer', 'Removed button focus falls back inside the drawer');
         for (const outcome of ['saved', 'failed', 'moved', 'discover', 'closed']) {
@@ -2103,7 +2304,7 @@ test('real row hit testing and action identity across refreshes', { timeout: 900
         assert.equal((await calls()).filter(c => c.method === 'setTheme').length, 5);
         assert.equal((await calls()).some(c => c.method === 'saveSettings'), false, 'Theme saves remain separate from all other Settings');
       } finally {
-        await evaluate(`if(S.themeBusy)window.completeTheme()`);
+        await evaluate(`if(S.themeBusy && typeof window.completeTheme==='function')window.completeTheme()`);
         await settleTheme();
         await evaluate(`if(S.drawer)closeDrawer();window.MockHost.rpc=window.settingsRpc;delete window.settingsRpc;
           S.settings.triageInstructions=window.savedTriageInstructions;delete window.savedTriageInstructions;`);
@@ -2334,7 +2535,7 @@ test('real row hit testing and action identity across refreshes', { timeout: 900
           assert.ok(layout.scrollHeight <= layout.height + 1 && layout.fits,
             `All metadata must fit without internal scrolling or clipping at ${width}px`);
           assert.equal(layout.rowPreserved && layout.outputPreserved, true, 'Metadata updates must not replace the owning row or stream');
-          assert.equal(layout.outputHeight, 280, 'The streaming output area keeps its fixed height');
+          assert.ok(layout.outputHeight > 0 && layout.outputHeight <= 280, 'Short streaming output remains compact within the 280px scrolling bound');
           assert.equal(layout.output, 'Updated synthetic stdout\n');
         }
       } finally {
@@ -2717,6 +2918,7 @@ test('real row hit testing and action identity across refreshes', { timeout: 900
           window.olderOutput=window.promotionRow.querySelector('[data-run-id="older-recovered-run"] .run-output');
           window.newerOutput=window.promotionRow.querySelector('[data-run-id="newer-completed-run"] .run-output');
           window.middleOutput=window.promotionRow.querySelector('[data-run-id="middle-completed-run"] .run-output');
+          window.olderOutput.closest('.run-history').open=true;window.middleOutput.closest('.run-history').open=true;
           window.olderOutput.scrollTop=400;window.newerOutput.scrollTop=700;
           window.middleOutput.scrollTop=500;
           window.olderNode=window.olderOutput.firstChild;
@@ -3228,6 +3430,9 @@ test('real row hit testing and action identity across refreshes', { timeout: 900
       await evaluate(`window.draftRpc=MockHost.rpc;window.originalDraftSettings=structuredClone(S.settings);
         S.settings.futureProvider={preserve:'synthetic unknown field'};
         S.settings.autoComplete.futureOption='synthetic nested option';
+        S.settings.wslDistro='Legacy-Ubuntu';
+        S.settings.wslRepoDirectories={'legacy/project/repo':'/legacy/checkout'};
+        S.settings.nativeRepoDirectories={};
         window.committedDraftSettings=structuredClone(S.settings);
         window.draftWrites=[];window.denyDraftMethod='';window.holdDraftMethod='';
         MockHost.rpc=async(method,p)=>{
@@ -3238,7 +3443,6 @@ test('real row hit testing and action identity across refreshes', { timeout: 900
             const next=structuredClone(window.committedDraftSettings);
             if(method==='saveSettings'){
               Object.assign(next,p.settings,{theme:next.theme});
-              next.wslDistro=next.wslDistro?.trim()||null;
             }
             if(method==='setTheme')next.theme=p.theme;
             if(method==='addRepo'){
@@ -3255,20 +3459,20 @@ test('real row hit testing and action identity across refreshes', { timeout: 900
       try {
         await click(await elementPoint('#settingsBtn')); await frame();
         await evaluate(`window.readDraftFields=()=>({
-          ...Object.fromEntries(['triageInstructions','refreshSeconds','mergeCheckMinutes','mergeStrategy','wslDistro',
+          ...Object.fromEntries(['triageInstructions','refreshSeconds','mergeCheckMinutes','mergeStrategy',
             ...(document.querySelector('#additionalTriageInstructions')?['additionalTriageInstructions']:[])].map(id=>[id,document.getElementById(id).value])),
           ...Object.fromEntries(['notifications','sound','ignoreDrafts','deleteSourceBranch','transitionWorkItems'].map(id=>[id,document.getElementById(id).checked])),
-          wslRepoDirectories:Object.fromEntries([...document.querySelectorAll('[data-wsl-repo]')].map(e=>[e.dataset.wslRepo,e.value]))
+          nativeRepoDirectories:Object.fromEntries([...document.querySelectorAll('[data-native-repo]')].map(e=>[e.dataset.nativeRepo,e.value]))
         });
         document.querySelector('#triageInstructions').value='Unsaved Custom Ask\\n';
         if(document.querySelector('#additionalTriageInstructions'))document.querySelector('#additionalTriageInstructions').value='Unsaved additive instructions\\n';
         document.querySelector('#refreshSeconds').value='333';
         document.querySelector('#mergeCheckMinutes').value='23';
         document.querySelector('#mergeStrategy').value='rebase';
-        document.querySelector('#wslDistro').value='Synthetic Ubuntu';
         for(const id of ['notifications','sound','deleteSourceBranch','transitionWorkItems'])document.getElementById(id).checked=false;
         document.querySelector('#ignoreDrafts').checked=true;
-        [...document.querySelectorAll('[data-wsl-repo]')].forEach((e,i)=>e.value='/home/synthetic/checkout-'+i);
+        [...document.querySelectorAll('[data-native-repo]')].forEach((e,i)=>e.value='C:\\\\synthetic\\\\checkout-'+i);
+        window.draftNativeKey=document.querySelector('[data-native-repo]').dataset.nativeRepo;
         window.expectedDraftFields=window.readDraftFields();`);
         const saved = await evaluate('structuredClone(window.committedDraftSettings)');
         const assertDraft = async () => assert.deepEqual(await evaluate('window.readDraftFields()'), await evaluate('window.expectedDraftFields'));
@@ -3325,7 +3529,9 @@ test('real row hit testing and action identity across refreshes', { timeout: 900
           assert.deepEqual(await evaluate('S.settings'), committed, 'Fresh boot reads only confirmed synthetic host settings');
           assert.equal(await evaluate(`document.querySelector('#triageInstructions').value`), 'Unsaved Custom Ask\n');
           assert.equal(await evaluate(`document.querySelector('#refreshSeconds').value`), '334');
-          assert.equal(await evaluate(`document.querySelector('#wslDistro').value`), 'Synthetic Ubuntu');
+          assert.equal(await evaluate(`document.querySelector('[data-native-repo]').value`), Object.values(committed.nativeRepoDirectories)[0]);
+          assert.equal(await evaluate(`S.settings.wslDistro`), 'Legacy-Ubuntu');
+          assert.deepEqual(await evaluate(`S.settings.wslRepoDirectories`), { 'legacy/project/repo': '/legacy/checkout' });
           assert.equal(await evaluate(`document.querySelector('#repoUrl').value`), '');
           assert.equal(await evaluate(`document.querySelector('#wlInput').value`), '');
         } finally {
@@ -3354,7 +3560,7 @@ test('real row hit testing and action identity across refreshes', { timeout: 900
         const withRepo = { ...saved, repos: [...saved.repos, { org:'contoso', project:'Sample', repo:'synthetic-draft-repo' }] };
         await assertCommitted(withRepo);
         const fields = await evaluate('window.readDraftFields()'), expected = await evaluate('window.expectedDraftFields');
-        assert.deepEqual(fields, { ...expected, wslRepoDirectories: { ...expected.wslRepoDirectories, 'contoso/sample/synthetic-draft-repo': '' } });
+        assert.deepEqual(fields, { ...expected, nativeRepoDirectories: { ...expected.nativeRepoDirectories, 'contoso/sample/synthetic-draft-repo': '' } });
         assert.equal(await evaluate(`document.querySelector('#repoUrl').value`), '');
         await evaluate(`window.expectedDraftFields=window.readDraftFields();window.denyDraftMethod='saveSettings';
           document.querySelector('#wlInput').value='Unfinished author';document.querySelector('#toasts').replaceChildren();`);
@@ -3430,19 +3636,22 @@ test('real row hit testing and action identity across refreshes', { timeout: 900
         assert.equal(await evaluate(`document.querySelector('#notifications').checked`), true);
         assert.equal(await evaluate(`document.querySelector('#repoUrl').value`), 'Unsubmitted repository URL');
         assert.equal(await evaluate(`document.querySelector('#wlInput').value`), 'Unsubmitted author');
-        assert.equal(await evaluate(`document.querySelector('#wslDistro').value`), 'Synthetic Ubuntu');
+        assert.equal(await evaluate(`document.querySelector('[data-native-repo]').value`), 'C:\\synthetic\\checkout-0');
 
-        await evaluate(`window.holdDraftMethod='saveSettings';document.querySelector('#wslDistro').value='  Submitted distro  ';`);
+        await evaluate(`window.holdDraftMethod='saveSettings';
+          window.submittedNativePath='  C:\\\\synthetic\\\\submitted  ';
+          document.querySelector('[data-native-repo]').value=window.submittedNativePath;`);
         await click(await elementPoint('[data-dact="save"]')); await frame();
         await evaluate(`(async()=>{closeDrawer();await openDrawer();
           document.querySelector('#triageInstructions').value='Newer Custom Ask';
-          document.querySelector('#wslDistro').value='  Submitted distro  ';
+          document.querySelector('[data-native-repo]').value=window.submittedNativePath;
           document.querySelector('#wlInput').value='Reopened author';renderDrawer();})()`);
         await finishWrite();
         assert.equal(await evaluate('S.settings.triageInstructions'), 'Newer Custom Ask');
         assert.equal(await evaluate(`document.querySelector('#triageInstructions').value`), 'Newer Custom Ask');
-        assert.equal(await evaluate('S.settings.wslDistro'), 'Submitted distro');
-        assert.equal(await evaluate(`document.querySelector('#wslDistro').value`), '  Submitted distro  ', 'Same-valued reopened input is not normalized by the previous drawer Save');
+        assert.equal(await evaluate('S.settings.nativeRepoDirectories[window.draftNativeKey]'), 'C:\\synthetic\\submitted');
+        assert.equal(await evaluate(`document.querySelector('[data-native-repo]').value`), '  C:\\synthetic\\submitted  ', 'Same-valued reopened input is not normalized by the previous drawer Save');
+        assert.equal(await evaluate('S.settings.wslDistro'), 'Legacy-Ubuntu');
         assert.equal(await evaluate(`document.querySelector('#wlInput').value`), 'Reopened author');
 
         for (const action of ['addRepo','addWl']) {

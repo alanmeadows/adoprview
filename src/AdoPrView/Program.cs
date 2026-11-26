@@ -39,6 +39,11 @@ public static class Program
     [STAThread]
     public static void Main(string[] args)
     {
+        if (args is ["--native-fix-supervisor", var specification])
+        {
+            Environment.ExitCode = NativeFixSupervisor.Run(specification);
+            return;
+        }
         var diagnostics = new AppDiagnostics(System.IO.Path.Combine(SettingsStore.Dir, "Diagnostics"), ex =>
         {
             var message = $"ADO PR View could not persist its diagnostic log ({ex.GetType().Name}). " +

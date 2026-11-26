@@ -63,14 +63,44 @@ also checks exact-request cancellation without current PR membership.
 PR investigation tests use fake models and synthetic ADO responses, including
 follow-up identity, cancellation, stale revisions, lens preview validation,
 explicit selection/confirmation, idempotency and partial/uncertain posting.
+The production default is `AdoInvestigationSource`: full pinned Azure DevOps
+source reads through `ExplainContext`, no WSL process, local checkout or Git
+configuration. Native tests deliberately supply unusable legacy WSL settings,
+then exercise the production capture path, all three revision sides, broader
+files/directories, exact finding windows, read bounds and denied/wrong-scope
+responses. No real authentication, model or ADO write is invoked.
 Run `dotnet run --project tests\AdoPrView.Tests` with
 `ADOPRVIEW_TEST_FILTER=Investigation|Explain` for these targeted checks.
 Set `ADOPRVIEW_TEST_WSL_INVESTIGATION=1` to also exercise the production worktree
-scripts against a disposable local Git upstream in WSL; it does not authenticate
+scripts retained for legacy parity against a disposable local Git upstream in WSL; it does not authenticate
 or contact ADO/Copilot. The fixture checks pinned before/after reads, symlink/LFS/
 size omissions, no executed checkout filters and an unchanged primary checkout.
 `node --test tests\investigation.browser.test.cjs` exercises the real popup in a
 temporary headless Edge profile with synthetic host replies, never live comments.
+
+New Windows Fix coverage lives in `NativeFixTests.cs` and `NativeFixStartTests.cs`. Its bounded synthetic
+fixtures exercise native executable discovery, captured Git preparation,
+supervisor/job ownership, log recovery and exact stopping without a real model,
+private checkout, WSL launch or ADO write:
+
+```powershell
+$env:ADOPRVIEW_TEST_FILTER = 'Native Fix|Copilot'
+dotnet run --project tests\AdoPrView.Tests -c Release
+Remove-Item Env:\ADOPRVIEW_TEST_FILTER
+```
+
+The separate supervisor runs from an immutable versioned deployment outside the
+installer's app directory: `CopilotRuns\supervisors\<content-hash>`.
+`AdoPrView.FixSupervisor` is a separate self-contained host; release packaging
+ships its bundle, and new runs deploy the verified version into private state.
+Upgrade fixtures replace the disposable app
+files while the old supervisor keeps its job alive, then reconnect and stop it
+from a new dashboard instance. Preserve active deployment versions and recorded
+ownership; replacing only the process name is not upgrade isolation.
+Restricted automation hosts may reject detached Windows Job breakaway. Nested
+fixtures can verify job assignment, recovery and exact descendant cancellation,
+but do not by themselves prove independence from that enclosing host's exit.
+Never silently use inherited-lifetime execution as production fallback.
 
 ## Offline checks
 

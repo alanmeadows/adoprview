@@ -9,13 +9,16 @@ public sealed partial class CopilotRunService
     Task? recovery;
 
     internal sealed record SavedRun(int Version, CopilotRunState State, EnvironmentInfo? Environment,
-        string? RunDirectory, string OwnershipToken, bool LaunchIntent, bool TaskConfirmedStopped, string? TaskIdentity);
+        string? RunDirectory, string OwnershipToken, bool LaunchIntent, bool TaskConfirmedStopped, string? TaskIdentity)
+    {
+        public NativeFixSupervisor.Specification? Native { get; init; }
+    }
 
     SavedRun Save(Entry e, CopilotRunState? state = null) => new(1, (state ?? e.State) with
     {
         Request = e.State.Request with { Prompt = "", AdditionalInstructions = null }, Output = ""
     }, e.Environment is null ? null : e.Environment with { Help = "" },
-        e.RunDirectory, e.OwnershipToken, e.LaunchIntent, e.TaskConfirmedStopped, e.TaskIdentity);
+        e.RunDirectory, e.OwnershipToken, e.LaunchIntent, e.TaskConfirmedStopped, e.TaskIdentity) { Native = e.Native };
 
     void Persist(Entry e)
     {
@@ -68,12 +71,13 @@ public sealed partial class CopilotRunService
                 {
                     Environment = saved.Environment, RunDirectory = saved.RunDirectory,
                     OwnershipToken = saved.OwnershipToken, LaunchIntent = saved.LaunchIntent,
-                    TaskConfirmedStopped = saved.TaskConfirmedStopped, TaskIdentity = saved.TaskIdentity,
+                    TaskConfirmedStopped = saved.TaskConfirmedStopped, TaskIdentity = saved.TaskIdentity, Native = saved.Native,
                     DriverLease = store.TryLease(saved.State.RunId)
                 };
                 runs.Add(entry.State.RunId, entry);
                 if (ReservesPr(saved)) activePrs.Add(PrIdentity(entry.State.Request));
-                entry.Completion = Task.Run(() => RecoverEntryAsync(entry, saved));
+                entry.Completion = Task.Run(() => saved.State.Backend == "windows-native"
+                    ? RecoverNativeAsync(entry, saved) : RecoverEntryAsync(entry, saved));
                 ready.Add(entry.Reconciled.Task);
             }
         }
@@ -351,6 +355,7 @@ public sealed partial class CopilotRunService
 
     internal sealed class DurableStore(string directory)
     {
+        public string DirectoryPath => Path.GetFullPath(directory);
         void Ensure()
         {
             Directory.CreateDirectory(directory);
@@ -402,7 +407,15 @@ public sealed partial class CopilotRunService
                         saved.State.Request.Prompt.Length != 0 || saved.State.Output.Length != 0 ||
                         saved.State.Status is not ("preparing" or "running" or "recovering" or "cancelling" or "needs-attention" or "completed" or "failed" or "cancelled") ||
                         saved.State.Request.Id <= 0 || string.IsNullOrWhiteSpace(saved.State.Request.Org) ||
-                        string.IsNullOrWhiteSpace(saved.State.Request.Project) || string.IsNullOrWhiteSpace(saved.State.Request.Repo))
+                        string.IsNullOrWhiteSpace(saved.State.Request.Project) || string.IsNullOrWhiteSpace(saved.State.Request.Repo) ||
+                        saved.State.Backend is not ("legacy-wsl" or "windows-native") ||
+                        saved.Native is not null && (saved.State.Backend != "windows-native" ||
+                            saved.Native.RunId != saved.State.RunId || saved.Native.Token != saved.OwnershipToken ||
+                            saved.Native.SessionId != saved.State.SessionId || saved.Native.RunDirectory != saved.RunDirectory ||
+                            saved.Native.PushToSource != saved.State.Request.PushToSource ||
+                            saved.Native.Worktree != saved.State.WorktreePath && (saved.State.WorktreePath is not null || saved.LaunchIntent) ||
+                            saved.Native.SourceDirectory != saved.State.SourcePath ||
+                            !saved.Native.Commit.Equals(saved.State.Request.SourceCommit, StringComparison.OrdinalIgnoreCase)))
                         throw new IOException();
                     PathFor(saved.State.RunId, ".json");
                 }

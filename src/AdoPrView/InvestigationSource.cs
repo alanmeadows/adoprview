@@ -10,6 +10,7 @@ internal interface IInvestigationSource : IAsyncDisposable
     ExplainContext Context { get; }
     string Location { get; }
     string[] Evidence { get; }
+    ReferencePrContext[] References => [];
     Task<string> ReadFileAsync(string path, string side, int startLine, CancellationToken ct);
     Task<string> ListDirectoryAsync(string path, string side, CancellationToken ct);
     void ValidateFinding(LensFinding finding);
@@ -49,7 +50,13 @@ internal sealed class InvestigationSource : IInvestigationSource
     public static async Task<IInvestigationSource> CreateAsync(ExplainContext context, PrView pr, AppSettings settings,
         CancellationToken ct, ICopilotRunTransport? transport = null, Action? checkAvailable = null)
     {
-        transport ??= new WslCopilotRunTransport();
+        if (transport is null)
+        {
+            checkAvailable?.Invoke();
+            await context.VerifyAsync(ct);
+            checkAvailable?.Invoke();
+            return new AdoInvestigationSource(context, checkAvailable);
+        }
         settings.WslRepoDirectories.TryGetValue($"{pr.Org}/{pr.Project}/{pr.Repo}".ToLowerInvariant(), out var directory);
         var output = await Execute(transport, settings.WslDistro, DiscoverScript,
             [directory ?? "", pr.Repo], ct);

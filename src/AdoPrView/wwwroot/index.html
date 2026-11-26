@@ -76,24 +76,13 @@
   </dialog>
   <button class="btn investigation-activity" id="openInvestigationActivity" type="button" hidden>PR investigation activity...</button>
   <div class="toasts" id="toasts" aria-live="polite"></div>
-  <dialog id="investigationDialog" class="investigation-dialog" aria-labelledby="investigationTitle">
-    <header><h2 id="investigationTitle">Investigate PR</h2><button type="button" class="mini" id="investigationClose">Close</button></header>
-    <p id="investigationStatus" role="status" aria-live="polite"></p>
-    <p id="investigationSource" class="small"></p>
-    <div id="investigationTranscript" tabindex="0" aria-label="PR conversation"></div>
-    <p id="investigationError" class="error" role="alert"></p>
-    <form id="investigationForm">
-      <label for="investigationKind">Request</label>
-      <select id="investigationKind"><option value="question">Ask a Copilot question</option><option value="lens">Review with this lens (preview only)</option></select>
-      <label for="investigationQuestion">Question, follow-up, or concrete review lens</label>
-      <textarea id="investigationQuestion" rows="3" maxlength="4000" required placeholder="For example: Do these ARM changes work with ACI?"></textarea>
-      <div class="investigation-actions">
-        <button class="btn primary" id="investigationSend" type="submit">Send</button>
-        <button class="btn" id="investigationCancel" type="button" hidden>Cancel inspection</button>
-        <button class="btn" id="investigationReset" type="button">New conversation</button>
-      </div>
+  <dialog id="assistancePostDialog" class="assistance-post-dialog" aria-labelledby="assistancePostTitle">
+    <h2 id="assistancePostTitle">Post selected findings to Azure DevOps?</h2>
+    <div id="assistancePostPreview"></div>
+    <form method="dialog" class="investigation-actions">
+      <button class="btn" value="cancel" type="submit" autofocus>Keep private</button>
+      <button class="btn primary" value="post" type="submit">Confirm selected comments</button>
     </form>
-    <details><summary>Inspected source and unread areas</summary><div id="investigationEvidence" class="small"></div></details>
   </dialog>
   <div id="rowMenu" class="row-menu" role="menu" hidden><button type="button" role="menuitem" data-menu-hide>Hide this PR...</button></div>
 

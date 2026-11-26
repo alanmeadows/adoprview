@@ -29,11 +29,13 @@ internal sealed class ExplainContext : IDisposable
     readonly object _coverageGate = new();
     Exception? _toolFailure;
     int _fileReads;
+    int _investigationReads;
 
     public ExplainRevision Revision { get; }
     public IReadOnlyList<ExplainChange> Changes => _changes;
     public int DiffReads { get; private set; }
     public int ContextReads { get; private set; }
+    internal ExplainArm Arm { get; } = new();
 
     ExplainContext(AdoClient ado, PrView pr, string repoApi,
         ExplainRevision revision, List<ExplainChange> changes, bool capped, bool requireActive, Func<bool>? ignoreDrafts)
@@ -208,18 +210,29 @@ internal sealed class ExplainContext : IDisposable
             var kinds = change.Kind.Split(',').Select(s => s.Trim()).ToHashSet(StringComparer.OrdinalIgnoreCase);
             var before = kinds.Contains("add") ? "" : await ReadTextAsync(change.OriginalPath ?? change.Path, "before", ct);
             var after = kinds.Contains("delete") ? "" : await ReadTextAsync(change.Path, "after", ct);
+            Arm.ObserveDiff(change, before, after, "", "");
             if (before is null || after is null) return $"No complete text diff for {change.Path}. " + string.Join(" ", Coverage());
             var diff = new Differ().CreateLineDiffs(before, after, false);
             var output = new StringBuilder($"--- {change.OriginalPath ?? change.Path} @ {Revision.BaseCommit}\n+++ {change.Path} @ {Revision.SourceCommit}\n");
+            var inspectedBefore = new StringBuilder();
+            var inspectedAfter = new StringBuilder();
+            void Line(char prefix, string line)
+            {
+                output.Append(prefix).AppendLine(line);
+                if (output.Length > 24_000) return;
+                if (prefix != '+') inspectedBefore.AppendLine(line);
+                if (prefix != '-') inspectedAfter.AppendLine(line);
+            }
             foreach (var block in diff.DiffBlocks)
             {
                 output.AppendLine($"@@ before line {block.DeleteStartA + 1}, after line {block.InsertStartB + 1} @@");
-                for (var i = Math.Max(0, block.DeleteStartA - 3); i < block.DeleteStartA; i++) output.AppendLine(" " + diff.PiecesOld[i]);
-                for (var i = block.DeleteStartA; i < block.DeleteStartA + block.DeleteCountA; i++) output.AppendLine("-" + diff.PiecesOld[i]);
-                for (var i = block.InsertStartB; i < block.InsertStartB + block.InsertCountB; i++) output.AppendLine("+" + diff.PiecesNew[i]);
+                for (var i = Math.Max(0, block.DeleteStartA - 3); i < block.DeleteStartA; i++) Line(' ', diff.PiecesOld[i]);
+                for (var i = block.DeleteStartA; i < block.DeleteStartA + block.DeleteCountA; i++) Line('-', diff.PiecesOld[i]);
+                for (var i = block.InsertStartB; i < block.InsertStartB + block.InsertCountB; i++) Line('+', diff.PiecesNew[i]);
                 for (var i = block.InsertStartB + block.InsertCountB; i < Math.Min(diff.PiecesNew.Count, block.InsertStartB + block.InsertCountB + 3); i++)
-                    output.AppendLine(" " + diff.PiecesNew[i]);
+                    Line(' ', diff.PiecesNew[i]);
             }
+            Arm.ObserveDiff(change, before, after, inspectedBefore.ToString(), inspectedAfter.ToString());
             if (!diff.DiffBlocks.Any()) output.AppendLine("No textual change (possibly a rename or metadata-only change).");
             NoteEvidence($"Diff: {change.OriginalPath ?? change.Path} -> {change.Path}." +
                 (output.Length > 24_000 ? " Partial inspection; diff truncated after 24,000 characters." : ""));
@@ -240,14 +253,18 @@ internal sealed class ExplainContext : IDisposable
         finally { _reads.Release(); }
     }
 
-    public async Task<string> ReadFileAsync(string path, string side, int startLine, CancellationToken ct)
+    public Task<string> ReadFileAsync(string path, string side, int startLine, CancellationToken ct) =>
+        ReadFileWindowAsync(path, side, startLine, ct);
+
+    internal async Task<string> ReadFileWindowAsync(string path, string side, int startLine, CancellationToken ct,
+        Action<SourceWindow>? inspected = null)
     {
         ValidatePath(path);
         if (side is not ("before" or "after" or "target") || startLine < 1) throw new ArgumentException("Use before/after/target and a positive starting line.");
         await _reads.WaitAsync(ct);
         try
         {
-            var text = await ReadTextAsync(path, side, ct);
+            var text = await ReadTextAsync(path, side, ct, investigation: inspected is not null);
             if (text is null) return $"File omitted: {path}. " + string.Join(" ", Coverage());
             var lines = text.Replace("\r\n", "\n").Split('\n');
             if (startLine > lines.Length) throw new ArgumentException("Starting line is beyond the file.");
@@ -258,6 +275,12 @@ internal sealed class ExplainContext : IDisposable
             {
                 Omit(path, "context window truncated at 16,000 characters");
                 output = output[..16_000] + "\n[WINDOW TRUNCATED]";
+            }
+            else
+            {
+                var window = lines.Skip(startLine - 1).Take(120).ToArray();
+                Arm.ObserveFile(path, side, startLine, string.Join("\n", window));
+                inspected?.Invoke(new(path, side, startLine, window));
             }
             return $"{path} @ {SideCommit(side)}; {lines.Length} total lines; window starts at {startLine}\n{output}";
         }
@@ -270,14 +293,14 @@ internal sealed class ExplainContext : IDisposable
         finally { _reads.Release(); }
     }
 
-    public async Task<string> ListDirectoryAsync(string path, string side, CancellationToken ct)
+    public async Task<string> ListDirectoryAsync(string path, string side, CancellationToken ct, bool investigation = false)
     {
         ValidatePath(path);
         if (side is not ("before" or "after" or "target")) throw new ArgumentException("Use before, after or target.");
         await _reads.WaitAsync(ct);
         try
         {
-            if (++_fileReads > 60) return Omit(path, "60 file/directory-read budget exhausted");
+            if (!ConsumeRead(investigation)) return Omit(path, "60 file/directory-read budget exhausted");
             var commit = SideCommit(side);
             var url = $"{_repoApi}/items?scopePath={Uri.EscapeDataString(path)}&recursionLevel=OneLevel&versionDescriptor.versionType=commit&versionDescriptor.version={commit}&api-version=7.1";
             var response = await _ado.GetBoundedJsonAsync(url, 1_000_000, ct);
@@ -310,9 +333,16 @@ internal sealed class ExplainContext : IDisposable
     public string[] Evidence() { lock (_coverageGate) return _evidence.ToArray(); }
     string SideCommit(string side) => side == "before" ? Revision.BaseCommit : side == "target" ? Revision.TargetCommit : Revision.SourceCommit;
 
-    async Task<string?> ReadTextAsync(string path, string side, CancellationToken ct)
+    bool ConsumeRead(bool investigation)
     {
-        if (++_fileReads > 60) { Omit(path, "60 file/directory-read budget exhausted"); return null; }
+        if (!investigation) return ++_fileReads <= 60;
+        if (++_investigationReads <= 120) return true;
+        throw new InvalidOperationException("This conversation has reached its 120 pinned source-read limit. Start a new conversation.");
+    }
+
+    async Task<string?> ReadTextAsync(string path, string side, CancellationToken ct, bool investigation = false)
+    {
+        if (!ConsumeRead(investigation)) { Omit(path, "60 file/directory-read budget exhausted"); return null; }
         var commit = SideCommit(side);
         var url = $"{_repoApi}/items?path={Uri.EscapeDataString(ValidatePath(path))}&versionDescriptor.versionType=commit&versionDescriptor.version={commit}&includeContentMetadata=true&api-version=7.1";
         try
@@ -323,12 +353,17 @@ internal sealed class ExplainContext : IDisposable
             if (metadata["contentMetadata"]?["isBinary"]?.GetValue<bool>() == true ||
                 metadata["isFolder"]?.GetValue<bool>() == true || S(metadata["gitObjectType"]) is "tree" or "commit")
             { Omit(path, $"{side}: binary, folder or submodule; text not inspected"); return null; }
+            if (investigation && (S(metadata["gitObjectType"]) != "blob" || metadata["isSymLink"]?.GetValue<bool>() == true))
+            { Omit(path, $"{side}: not a regular tracked file; symlinks/submodules are not followed"); return null; }
             var content = await _ado.GetBoundedJsonAsync(url + "&includeContent=true", 512_000, ct);
             if (S(content["path"]) != path || S(content["commitId"]) != commit)
                 throw new InvalidDataException("ADO returned content for a different path or revision.");
             var text = content["content"]?.GetValue<string>();
             if (text is null || text.Length > MaxFileCharacters || text.Contains('\0'))
             { Omit(path, $"{side}: unavailable, binary or larger than {MaxFileCharacters:N0} characters"); return null; }
+            if (investigation && (content["isSymLink"]?.GetValue<bool>() == true || S(content["gitObjectType"]) != "blob" ||
+                Encoding.UTF8.GetByteCount(text) > 80_000))
+            { Omit(path, $"{side}: not a regular tracked file or exceeds 80,000 bytes; not read"); return null; }
             if (text.StartsWith("version https://git-lfs.github.com/spec/v1", StringComparison.Ordinal))
             { Omit(path, $"{side}: Git LFS pointer; binary payload not inspected"); return null; }
             return text;

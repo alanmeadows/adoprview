@@ -51,6 +51,7 @@ const S = {
   settings: null,
   snap: { prs: [] },
   expanded: new Set(),
+  runHistoryOpen: new Set(),
   activeKeys: new Set(),
   lane: null,
   laneRetained: new Set(),
@@ -403,6 +404,12 @@ function laneVisible(prs) {
 }
 
 function renderRows(whenIdle = false) {
+  const assistanceFocus = document.activeElement?.closest('.explanation') ? {
+    key: document.activeElement.closest('.explanation').dataset.explainKey,
+    role: document.activeElement.dataset.inv,
+    start: document.activeElement.selectionStart, end: document.activeElement.selectionEnd,
+  } : null;
+  for (const card of document.querySelectorAll('.explanation')) rememberAssistancePosition(card.dataset.explainKey);
   const focused = expansionControl(document.activeElement);
   const explainFocus = document.activeElement?.closest('.explanation') ? {
     key: document.activeElement.closest('.explanation').dataset.explainKey,
@@ -415,11 +422,19 @@ function renderRows(whenIdle = false) {
   renderRowsContent(whenIdle);
   renderExplanationShelf();
   restoreRunOutputs(selection);
-  for (const placeholder of document.querySelectorAll('video[data-video-media]')) {
-    const existing = players.get(placeholder.dataset.videoMedia);
-    if (existing && existing !== placeholder) placeholder.replaceWith(existing);
-  }
+  restoreVideoPlayers(players);
   restoreExpansionFocus(focused);
+  for (const card of document.querySelectorAll('.explanation')) {
+    const key = card.dataset.explainKey, d = assistanceDraft(key);
+    const position = d.positions.get(assistanceSelection(key)?.id || d.selected);
+    const output = card.querySelector('.assistance-content > .assistance-explanation > .explain-output, .assistance-content > .investigation-transcript');
+    if (output && position) { output.scrollTop = position.top; output.scrollLeft = position.left; }
+  }
+  if (assistanceFocus?.role) {
+    const next = assistanceCard(assistanceFocus.key)?.querySelector(`[data-inv="${assistanceFocus.role}"]`);
+    next?.focus({ preventScroll: true });
+    if (typeof assistanceFocus.start === 'number' && next?.setSelectionRange) next.setSelectionRange(assistanceFocus.start, assistanceFocus.end);
+  }
   if (explainFocus?.action === 'cancelExplanation' && !explainFocus.element.isConnected) {
     const card = [...document.querySelectorAll('.explanation')].find(c => c.dataset.explainKey === explainFocus.key);
     const cancel = card && $('[data-act="cancelExplanation"]', card);
@@ -451,7 +466,6 @@ function renderRowsContent(whenIdle = false) {
   S.runRelocations.clear();
   const vis = baseVisible();
   renderRunShelfContent();
-  renderVideoShelf();
   const rows = $('#rows');
   const empty = $('#empty');
   if (!S.snap.lastRefresh && !vis.length) {
@@ -537,9 +551,6 @@ const runsForPr = key => [...S.runs.values()].reverse().filter(r => r.key === ke
   .sort((a, b) => (Date.parse(b.startedAt) || 0) - (Date.parse(a.startedAt) || 0));
 // A live run, else an outstanding (cancelable) recovery run, else the newest run.
 const runForPr = key => runsForPr(key).find(runActive) || runsForPr(key).find(runCancelable) || runsForPr(key).at(0);
-// Live/uncertain or starting runs lead the expanded detail; finished runs follow the PR context.
-const runLeads = key => runCancelable(runForPr(key)) || isBusy(key, 'triage');
-
 const explanationActive = r => !!r && ['preparing', 'running', 'cancelling'].includes(r.status);
 const explanationLabel = r => r?.status === 'failed' || r?.status === 'cancelled' ? 'Retry Explain' : r ? 'Explain again' : 'Explain this PR';
 function canExplain(key) {
@@ -555,33 +566,36 @@ function explanationRevision(r) {
 function explanationBody(r) {
   if (!r?.output) return '';
   if (r.status !== 'completed') return `<pre class="explain-stream">${esc(r.output)}</pre>`;
-  const html = window.marked ? marked.parse(r.output, { gfm: true, breaks: true }) : esc(r.output);
+  const renderer = window.marked ? new marked.Renderer() : undefined;
+  if (renderer) {
+    renderer.code = ({ text, lang }) => {
+      const label = lang?.split(/\s/)[0].toLowerCase();
+      const title = label === 'bicep' ? 'Bicep' : label === 'diff' ? 'Diff (- removed, + added)' : 'Code';
+      const body = text.split('\n').map(line => {
+        const safe = esc(line);
+        return label === 'diff' && /^[+-]/.test(line) && !/^(\+\+\+|---)/.test(line)
+          ? (line[0] === '+' ? `<ins>${safe}</ins>` : `<del>${safe}</del>`) : safe;
+      }).join('\n');
+      return `<p><strong>${title}</strong></p><pre><code>${body}\n</code></pre>`;
+    };
+  }
+  const html = window.marked ? marked.parse(r.output, { gfm: true, breaks: true, renderer }) : esc(r.output);
   // Model output cannot load remote media, navigate links or inject interactive controls.
   return window.DOMPurify ? DOMPurify.sanitize(html, {
     ALLOWED_TAGS: ['p', 'br', 'strong', 'em', 'ul', 'ol', 'li', 'code', 'pre', 'h1', 'h2', 'h3', 'h4',
-      'table', 'thead', 'tbody', 'tr', 'th', 'td', 'blockquote', 'hr', 'del'],
+      'table', 'thead', 'tbody', 'tr', 'th', 'td', 'blockquote', 'hr', 'del', 'ins'],
     ALLOWED_ATTR: [],
   }) : esc(r.output);
 }
 
 function renderExplanation(key) {
-  const r = S.explanations.get(key), active = explanationActive(r);
+  const d = assistanceDraft(key), video = S.videos.get(key);
   return `<div class="card explanation" data-explain-key="${esc(key)}">
-    <h3><span class="grow">What does this PR do?</span>
-      <button class="mini" data-act="explainPr" ${active || isBusy(key, 'explainPr') || !canExplain(key) ? 'disabled' : ''}>${svg('spark')} ${explanationLabel(r)}</button>
-      <button class="mini" data-act="cancelExplanation" data-request-id="${esc(r?.requestId || '')}" ${active ? '' : 'hidden'} ${r?.status === 'cancelling' ? 'disabled' : ''}>${svg('x')} Cancel</button></h3>
-    <div class="body">
-      <p class="explain-status small${r?.status === 'failed' ? ' error' : ''}" role="status" aria-live="polite">${esc(r?.message || 'A plain-spoken, code-grounded investigation of what improves, architecture, API changes and meaningful risks.')}</p>
-      <p><button class="mini" data-act="askPr" ${canExplain(key) ? '' : 'disabled'}>Ask Copilot about this PR...</button>
-        <button class="mini" data-act="lensPr" ${canExplain(key) ? '' : 'disabled'}>Review with a lens...</button></p>
-      <div class="explain-output md" tabindex="0" aria-label="PR explanation" ${r?.output ? '' : 'hidden'}>${explanationBody(r)}</div>
-      <details class="explain-details">
-        <summary>Evidence and coverage<span class="explain-notices">${r?.coverage?.length ? ` · ${r.coverage.length} notices` : ''}</span></summary>
-        <p class="small">AI-generated; verify important details against the code. Read-only Copilot context; this does not start Fix PR or change ADO.</p>
-        <p class="explain-revision small">${esc(explanationRevision(r))}</p>
-        <div class="explain-evidence small">${(r?.evidence || []).map(x => `<p>${esc(x)}</p>`).join('')}</div>
-        <div class="explain-coverage small">${(r?.coverage || []).map(x => `<p>${esc(x)}</p>`).join('')}</div>
-      </details>
+    <h3><span class="grow">PR assistance</span><button class="mini" data-assistance-close aria-expanded="${!d.closed}">${d.closed ? 'Reopen assistance' : 'Close assistance'}</button></h3>
+    <div class="body assistance-body" ${d.closed ? 'hidden' : ''}>
+      <div class="assistance-content">${renderAssistanceContent(key)}</div>
+      <details class="assistance-video" ${video ? 'open' : ''}><summary>Alternate output: short video explainer, with cats${videoActive(video) ? ' · generating' : ''}</summary>
+        <p class="small">Separate video generation and voice pipeline; this does not automatically narrate the selected explanation. Its own source revision is shown below.</p>${renderVideo(key)}</details>
     </div></div>`;
 }
 
@@ -593,9 +607,19 @@ function updateExplanation(r) {
   const old = S.explanations.get(r.key);
   if (old && r.sequence <= old.sequence) return;
   S.explanations.set(r.key, r);
+  retainExplanation(r);
+  const d = assistanceDraft(r.key);
+  if (!old || old.requestId !== r.requestId) {
+    if (d.kind === 'explain') d.selected = `explain:${r.requestId}`;
+    renderInvestigation(r.key);
+  } else if (explanationActive(r) !== explanationActive(old)) {
+    renderInvestigation(r.key);
+  }
   // Streaming only mutates this panel, preserving neighboring action targets and focus.
   for (const card of document.querySelectorAll('.explanation')) {
     if (card.dataset.explainKey !== r.key) continue;
+    const result = $('.assistance-explanation', card);
+    if (!result || result.dataset.resultRequest !== r.requestId) continue;
     const active = explanationActive(r);
     const status = $('.explain-status', card);
     status.textContent = r.message;
@@ -607,16 +631,17 @@ function updateExplanation(r) {
     output.innerHTML = explanationBody(r);
     if (r.status === 'completed' && old?.status !== 'completed') output.scrollTop = 0;
     else if (bottom) output.scrollTop = output.scrollHeight;
-    $('.explain-coverage', card).innerHTML = r.coverage.map(x => `<p>${esc(x)}</p>`).join('');
-    $('.explain-evidence', card).innerHTML = (r.evidence || []).map(x => `<p>${esc(x)}</p>`).join('');
-    $('.explain-notices', card).textContent = r.coverage.length ? ` · ${r.coverage.length} notices` : '';
     const start = $('[data-act="explainPr"]', card);
-    start.disabled = active || isBusy(r.key, 'explainPr') || !canExplain(r.key);
-    start.innerHTML = `${svg('spark')} ${explanationLabel(r)}`;
+    if (start) {
+      start.disabled = active || isBusy(r.key, 'explainPr') || !canExplain(r.key);
+      start.innerHTML = `${svg('spark')} ${explanationLabel(r)}`;
+    }
     const cancel = $('[data-act="cancelExplanation"]', card);
-    cancel.hidden = !active;
-    cancel.disabled = r.status === 'cancelling';
-    cancel.dataset.requestId = r.requestId;
+    if (cancel) {
+      cancel.hidden = !active;
+      cancel.disabled = r.status === 'cancelling';
+      cancel.dataset.requestId = r.requestId;
+    }
   }
   renderExplanationShelf();
 }
@@ -627,14 +652,18 @@ function explanationIdentity(r) {
     if (p) S.explanationPrs.set(r.key, { id: p.id, repo: p.repo, title: p.title });
   }
   const p = S.explanationPrs.get(r.key) || r.revision;
-  return `Explain for ${p?.repo || r.key}${p?.id ? ` !${p.id}` : ''}${p?.title ? `: ${p.title}` : ''} outside the expanded view`;
+  return `Assistance for ${p?.repo || r.key}${p?.id ? ` !${p.id}` : ''}${p?.title ? `: ${p.title}` : ''} outside the expanded view`;
 }
 
 function renderExplanationShelf() {
   const shelf = $('#explanationShelf');
   if (!shelf) return;
+  const players = new Map([...document.querySelectorAll('video[data-video-media]')].map(v => [v.dataset.videoMedia, v]));
   const inline = new Set([...document.querySelectorAll('#rows .explanation')].map(c => c.dataset.explainKey));
-  const outside = [...S.explanations.values()].filter(r => explanationActive(r) && !inline.has(r.key));
+  const outside = [...new Map([
+    ...[...S.explanations.values()].filter(explanationActive),
+    ...[...S.investigations.values()].filter(r => investigationActive(r) || investigationKey === r.key && !assistanceDraft(r.key).closed),
+  ].map(r => [r.key, r])).values()].filter(r => !inline.has(r.key));
   const missing = new Set(outside.map(r => r.key));
   for (const entry of shelf.querySelectorAll('.explanation-only')) {
     if (missing.has(entry.dataset.key)) missing.delete(entry.dataset.key);
@@ -645,16 +674,23 @@ function renderExplanationShelf() {
     ${renderExplanation(r.key)}</div></div></div>`).join(''));
   for (const card of shelf.querySelectorAll('.explanation')) {
     const key = card.dataset.explainKey;
-    $('.explanation-identity', card.closest('.explanation-only')).textContent = explanationIdentity(S.explanations.get(key));
-    for (const action of ['explainPr', 'askPr', 'lensPr']) {
-      $('[data-act="' + action + '"]', card).disabled = !canExplain(key) ||
-        action === 'explainPr' && (explanationActive(S.explanations.get(key)) || isBusy(key, action));
-    }
+    $('.explanation-identity', card.closest('.explanation-only')).textContent = explanationIdentity(S.explanations.get(key) || S.investigations.get(key));
+    const start = $('[data-act="explainPr"]', card);
+    if (start) start.disabled = !canExplain(key) || explanationActive(S.explanations.get(key)) || isBusy(key, 'explainPr');
+  }
+  renderVideoShelf();
+  restoreVideoPlayers(players);
+}
+
+function restoreVideoPlayers(players) {
+  for (const placeholder of document.querySelectorAll('video[data-video-media]')) {
+    const existing = players.get(placeholder.dataset.videoMedia);
+    if (existing && existing !== placeholder) placeholder.replaceWith(existing);
   }
 }
 
 const videoActive = r => !!r && ['preparing', 'storyboarding', 'rendering', 'cancelling'].includes(r.status);
-const videoLabel = r => r?.status === 'failed' || r?.status === 'cancelled' ? 'Retry video' : r?.status === 'completed' ? 'Generate again' : 'TikTok This PR';
+const videoLabel = r => r?.status === 'failed' || r?.status === 'cancelled' ? 'Retry video' : r?.status === 'completed' ? 'Generate again' : 'Generate video';
 function canVideo(key) {
   const p = S.pendingSnapshot ? S.pendingSnapshot.prs.find(p => p.key === key) : findPr(key);
   return canExplain(key) && p?.isActive !== false;
@@ -673,13 +709,14 @@ function videoContent(r) {
 function renderVideo(key) {
   const r = S.videos.get(key), active = videoActive(r);
   return `<div class="card pr-video" data-video-key="${esc(key)}">
-    <h3><span class="grow">A short PR explainer, with cats</span>
+    <h3><span class="grow">Short PR video explainer, with cats</span>
       <button class="mini" data-act="tiktokPr" ${active || isBusy(key, 'tiktokPr') || !canVideo(key) ? 'disabled' : ''}>${svg('play')} ${videoLabel(r)}</button>
       <button class="mini" data-act="cancelVideo" data-request-id="${esc(r?.requestId || '')}" ${active ? '' : 'hidden'} ${r?.status === 'cancelling' ? 'disabled' : ''}>${svg('x')} Cancel</button></h3>
     <div class="body">
-      <p class="video-status small${r?.status === 'failed' ? ' error' : ''}" role="status" aria-live="polite">${esc(r?.message || 'Opus 5.5 reads pinned PR code; narration uses your selected Azure Speech resource. No PR changes; the video stays local.')}</p>
+      <p class="video-status small${r?.status === 'failed' ? ' error' : ''}" role="status" aria-live="polite" ${r ? '' : 'hidden'}>${esc(r?.message || '')}</p>
       <div class="video-content" aria-busy="${active}">${videoContent(r)}</div>
       <details class="explain-details"><summary>Source evidence and generation details</summary>
+        <p class="small">Opus 5.5 reads pinned PR code; narration uses your selected Azure Speech resource. No PR changes; the video stays local.</p>
         <p class="small">AI-generated; verify important details against the code. Bounded source inspection, not a local checkout or Fix run. Videos are not resumed automatically.</p>
         <p class="video-meta small">${esc([r?.model, r?.voice, r?.durationSeconds && `${Math.round(r.durationSeconds)} seconds`].filter(Boolean).join(' · '))}</p>
         <p class="video-revision small">${esc(explanationRevision(r))}</p>
@@ -703,6 +740,7 @@ function updateVideo(r) {
   for (const card of document.querySelectorAll('.pr-video')) {
     if (card.dataset.videoKey !== r.key) continue;
     $('.video-status', card).textContent = r.message;
+    $('.video-status', card).hidden = false;
     $('.video-status', card).classList.toggle('error', r.status === 'failed');
     $('.video-meta', card).textContent = [r.model, r.voice, r.durationSeconds && `${Math.round(r.durationSeconds)} seconds`].filter(Boolean).join(' · ');
     $('.video-revision', card).textContent = explanationRevision(r);
@@ -726,7 +764,15 @@ function updateVideo(r) {
 function renderVideoShelf() {
   const shelf = $('#videoShelf');
   if (!shelf) return;
-  const shown = new Set(laneVisible(baseVisible()).map(p => p.key));
+  const inline = new Map([...document.querySelectorAll('.pr-video')]
+    .filter(card => !shelf.contains(card)).map(card => [card.dataset.videoKey, card]));
+  for (const entry of shelf.querySelectorAll('.video-only')) {
+    const owner = inline.get(entry.dataset.key);
+    const player = entry.querySelector('video[data-video-media]');
+    const placeholder = owner?.querySelector('video[data-video-media]');
+    if (player && placeholder?.dataset.videoMedia === player.dataset.videoMedia) placeholder.replaceWith(player);
+  }
+  const shown = new Set(inline.keys());
   const outside = [...S.videos.values()].filter(r => !shown.has(r.key));
   const missing = new Set(outside.map(r => r.key));
   for (const entry of shelf.querySelectorAll('.video-only')) {
@@ -823,7 +869,12 @@ function rememberRunOutput(view) {
 function captureRunOutputs() {
   // Apply queued retention before capturing offsets or detaching selected nodes.
   for (const card of document.querySelectorAll('.copilot-run')) syncRunOutput(card);
-  for (const view of S.runOutputs.values()) rememberRunOutput(view);
+  for (const [id, view] of S.runOutputs) {
+    rememberRunOutput(view);
+    if (view.element.isConnected && (runOutputSelected(view.element) ||
+        view.element === document.activeElement || !view.following))
+      S.runHistoryOpen.add(id);
+  }
   const selection = window.getSelection();
   if (!selection || selection.isCollapsed !== false) return null;
   const anchor = selection.anchorNode;
@@ -932,17 +983,32 @@ function syncRunOutput(card) {
   }
 }
 
-const runCardTitle = earlier => earlier ? 'Earlier run · Copilot in WSL' : 'Fix PR · Copilot in WSL';
+const runCardTitle = (earlier, run) => `${earlier ? 'Earlier run' : 'Fix PR'} · ${run?.backend === 'legacy-wsl' || run?.backend !== 'windows-native' && run?.distro ? 'Legacy Copilot in WSL' : 'Copilot on Windows'}`;
 // One per PR (beside Fix PR, or atop shelf/ignored-draft runs) so card promotion never hides or duplicates it.
-const runScopeNotice = () => `<p class="small run-scope">Fix PR starts in a separate PR worktree with --yolo: tools, paths and URLs are allowed without confirmation for this run, not globally. This is not a filesystem sandbox. New runs are told to commit validated fixes and ordinary-push them only to this PR's captured source branch; that limit is a prompt instruction, not enforced. Merge/PR-update command denies and the prompt's approval/policy boundaries remain; earlier runs keep their original no-push scope. Sign-in is required beforehand; this panel is noninteractive. Exit 0 does not verify the PR fix.</p>`;
+let runInfoId = 0;
+const runScopeNotice = () => {
+  const id = `run-info-${++runInfoId}`;
+  return `<div class="small run-scope">
+    <p class="run-summary">By default, Fix PR asks Copilot on Windows to try to fix merge conflicts, failing checks and review feedback in a separate working copy. New runs are asked to validate, commit and push fixes back to this PR. Follow progress here, then review the changes and results.
+      <button type="button" class="mini run-info-button" aria-label="Fix PR permissions and limitations" aria-expanded="false" aria-controls="${id}" aria-describedby="${id}">i</button></p>
+    <p id="${id}" class="run-info-details" hidden>Fix PR starts in a separate PR worktree with --yolo: tools, paths and URLs are allowed without confirmation for this run, not globally. This is not a filesystem sandbox. New runs are told to commit validated fixes and ordinary-push them only to this PR's captured source branch; that limit is a prompt instruction, not enforced. Merge/PR-update command denies and the prompt's no-approval/policy-bypass boundaries remain. Legacy WSL runs keep their recorded environment and original permission/publish scope, never silently restart on Windows. Sign-in is required beforehand; this panel is noninteractive. Exit 0 does not verify the PR fix or publication. Inspect the run's output and verify the results.</p>
+  </div>`;
+};
+function setRunInfo(scope, open) {
+  $('.run-info-button', scope).setAttribute('aria-expanded', String(open));
+  $('.run-info-details', scope).hidden = !open;
+}
 function renderRunCard(key, r = runForPr(key), earlier = false) {
   return `<div class="card copilot-run${earlier ? ' run-earlier' : ''}" data-run-key="${esc(key)}" data-run-id="${esc(r?.runId || '')}">
-    <h3><span class="grow">${runCardTitle(earlier)}</span>
+    <h3><span class="grow">${runCardTitle(earlier, r)}</span>
       <button class="mini" data-act="cancelRun" data-run-id="${esc(r?.runId || '')}" ${runCancelable(r) ? '' : 'hidden'}>${svg('x')} Cancel run</button></h3>
     <div class="body">
-      <p class="run-status" role="status">${esc(r ? runSummary(r) : 'Not started. Use Fix PR to run the rich prompt, or Copy prompt to review it first.')}</p>
-      <p class="run-worktree small">${esc(runWorktreeText(r))}</p>
-      <pre class="run-output" tabindex="0" aria-label="Copilot stdout and stderr" ${r || isBusy(key, 'triage') ? '' : 'hidden'}>${esc(r?.output || '')}</pre>
+      <p class="run-status" role="status">${esc(r ? runSummary(r) : 'Not started. Choose Fix PR to begin, or Copy prompt to review the instructions first.')}</p>
+      <details class="run-history" data-run-id="${esc(r?.runId || '')}" ${!earlier || S.runHistoryOpen.has(r?.runId) ? 'open' : ''}>
+        <summary>Show earlier run output</summary>
+        <p class="run-worktree small">${esc(runWorktreeText(r))}</p>
+        <pre class="run-output" tabindex="0" aria-label="Copilot stdout and stderr" ${r || isBusy(key, 'triage') ? '' : 'hidden'}>${esc(r?.output || '')}</pre>
+      </details>
     </div></div>`;
 }
 
@@ -1062,8 +1128,13 @@ function reorderRunCards(key, runCards) {
   const main = runCards.find(el => !el.classList.contains('run-earlier'));
   const promoted = runCards.find(el => el.dataset.runId === latestId);
   if (!main || !promoted || main === promoted) return;
-  main.classList.add('run-earlier'); $('h3 .grow', main).textContent = runCardTitle(true);
-  promoted.classList.remove('run-earlier'); $('h3 .grow', promoted).textContent = runCardTitle(false);
+  main.classList.add('run-earlier'); $('h3 .grow', main).textContent = runCardTitle(true, S.runs.get(main.dataset.runId));
+  promoted.classList.remove('run-earlier'); $('h3 .grow', promoted).textContent = runCardTitle(false, S.runs.get(promoted.dataset.runId));
+  if (runOutputSelected($('.run-output', main)) || main.contains(document.activeElement) ||
+      S.runOutputs.get(main.dataset.runId)?.following === false)
+    S.runHistoryOpen.add(main.dataset.runId);
+  $('.run-history', main).open = S.runHistoryOpen.has(main.dataset.runId);
+  $('.run-history', promoted).open = true;
   main.before(promoted);
   let previous = promoted;
   for (const run of runsForPr(key).filter(run => run.runId !== latestId)) {
@@ -1083,43 +1154,26 @@ function selectionBlocksMove(elements) {
   return elements.some(el => range.intersectsNode(el));
 }
 
-// Move the existing run group (same nodes, reading and selection) when its leading/trailing placement or main run changes.
+// The Fix home never moves; only a newly preferred run is promoted within it.
 function relocateRunGroup(key) {
   const detail = [...document.querySelectorAll('#rows > .pr')].find(el => el.dataset.key === key)?.querySelector(':scope > .detail[data-run-lead]');
   if (!detail) return relocateShelfRuns(key);
-  const p = S.snap.prs.find(x => x.key === key), lead = runLeads(key);
   const cards = detail ? [...detail.querySelectorAll('.copilot-run')] : [];
   const latestId = runForPr(key)?.runId;
   const reorder = cards.some(el => el.dataset.runId === latestId) && cards.find(el => !el.classList.contains('run-earlier'))?.dataset.runId !== latestId;
-  if (!detail || !p || (detail.dataset.runLead === String(+lead) && !reorder)) { S.runRelocations.delete(key); return; }
+  if (!reorder) { S.runRelocations.delete(key); return; }
   if (!cards.length) { S.runRelocations.delete(key); renderRows(true); return; }
-  // Only the run cards move. Defer while rows are in use or a non-output text selection touches a moving card;
-  // selections elsewhere (failed logs, Explain, other PRs) are left attached.
-  if (rowsInUse() || crossRunOutputSelection() || selectionBlocksMove([...cards, ...detail.querySelectorAll('.lead-blockers')])) {
+  if (rowsInUse() || crossRunOutputSelection() || selectionBlocksMove(cards)) {
     S.runRelocations.add(key); renderStatus(); return;
   }
   S.runRelocations.delete(key);
   const outputSelection = captureRunOutputs();
   reorderRunCards(key, cards);
-  if (detail.dataset.runLead !== String(+lead)) {
-    const ordered = [...detail.querySelectorAll('.copilot-run')];
-    detail.querySelector('.lead-blockers')?.remove();
-    let leading = detail.firstElementChild.classList.contains('full') ? detail.firstElementChild : null;
-    if (lead) {
-      if (!leading) { leading = document.createElement('div'); leading.className = 'full stack'; detail.prepend(leading); }
-      leading.insertAdjacentHTML('beforeend', leadBlockersCard(p));
-      leading.append(...ordered);
-    } else {
-      detail.lastElementChild.append(...ordered);
-      if (leading && !leading.children.length) leading.remove();
-    }
-  }
   for (const card of cards) {
     const view = S.runOutputs.get(card.dataset.runId);
     if (view) { view.element.scrollTop = view.top; view.element.scrollLeft = view.left; view.top = view.element.scrollTop; }
   }
   restoreRunOutputSelection(outputSelection);
-  detail.dataset.runLead = String(+lead);
   renderStatus();
 }
 
@@ -1144,19 +1198,6 @@ function relocateShelfRuns(key) {
 
 const humanText = a => ({ reviews: 'Human reviewer approval needed (+1)', pop: 'Proof of Presence — tap your security key', autocomplete: 'Auto-complete not set', publish: 'Draft — publish when ready' }[a] || a);
 
-// A leading run must not bury blockers that no leading card above already conveys (e.g. conflicts, required reviews).
-function leadBlockersCard(p) {
-  // Only a current approval offer conveys the required review; a cached outcome alone does not.
-  const approvalCard = !!p.approval;
-  // Exclude only reasons a leading card already shows: each failed-gate card conveys its "Build failed" blocker.
-  const shown = new Set((p.failedBuilds || []).map(fb => `Build failed: ${fb.name}`));
-  const reasons = [
-    ...(p.blockers || []).filter(x => !shown.has(x)).map(x => ['fail', x]),
-    ...(p.humanActions || []).filter(a => a !== 'reviews' || !approvalCard).map(a => ['human', humanText(a)]),
-  ];
-  return reasons.length ? `<div class="card lead-blockers"><h3>Blocking</h3><div class="body"><ul class="list blockers">${reasons.map(([c, t]) => `<li><span class="dot ${c}"></span><span class="k">${esc(t)}</span></li>`).join('')}</ul></div></div>` : '';
-}
-
 function syncCopilotButton(key) {
   for (const button of document.querySelectorAll('[data-act="triage"]')) {
     if (button.closest('.pr')?.dataset.key !== key) continue;
@@ -1168,7 +1209,7 @@ function syncCopilotButton(key) {
     button.innerHTML = svg(active || busy ? 'refresh' : 'spark') + (expanded ? ` ${cancelable ? 'Show run' : 'Fix PR'}` : '');
     button.title = cancelable ? runForPr(key)?.status === 'needs-attention'
       ? 'Copilot task may still be active; show status and cancellation controls'
-      : 'Show the active inline Copilot run for this PR' : 'Fix PR with Copilot in an isolated WSL worktree; output stays inline';
+      : 'Show the active inline Copilot run for this PR' : 'Fix PR with Copilot in an isolated Windows worktree; output stays inline';
     button.setAttribute('aria-label', button.title);
     if (active || busy) button.setAttribute('aria-busy', 'true');
     else button.removeAttribute('aria-busy');
@@ -1325,7 +1366,7 @@ function actionButtons(p) {
   else if (p.gates?.pop?.state === 'ok') out.pop = b('pop', 'key', '', 'done', 'Proof of Presence satisfied', 'disabled');
   if (p.autoCompleteBy) out.auto = b('cancelAuto', 'check', 'Auto', 'auto-set', autoCompleteTitle(p), 'aria-pressed="true"');
   else out.auto = b('autocomplete', 'zap', 'Auto', human.includes('autocomplete') ? hot : '', autoCompleteTitle(p), 'aria-pressed="false"');
-  out.fix = b('triage', 'spark', '', 'copilot', runCancelable(runForPr(p.key)) ? 'Show the inline Copilot run for this PR' : 'Fix PR with Copilot in an isolated WSL worktree; output stays inline');
+  out.fix = b('triage', 'spark', '', 'copilot', runCancelable(runForPr(p.key)) ? 'Show the inline Copilot run for this PR' : 'Fix PR with Copilot in an isolated Windows worktree; output stays inline');
   out.open = b('open', 'ext', '', '', 'Open in Azure DevOps');
   return ['approval', 'publish', 'pop', 'auto', 'fix', 'open'].map(slot => `<span class="action-slot" data-slot="${slot}">${out[slot] || ''}</span>`).join('');
 }
@@ -1369,10 +1410,7 @@ function renderDetail(p) {
   const left = [];
   const right = [];
   const full = [];
-  // Blockers and actionable runs lead; results, idle tools and finished runs follow the PR context.
   const runGroup = renderRunCard(p.key) + earlierRunCards(p.key);
-  const lead = runLeads(p.key);
-  const trailing = [renderExplanation(p.key), renderVideo(p.key), ...(lead ? [] : [runGroup])];
 
   if (p.approval || S.approvals.has(p.key)) {
     const outcome = S.approvals.get(p.key);
@@ -1392,7 +1430,7 @@ function renderDetail(p) {
       </div></div>`);
   }
 
-  if (p.error) full.push(`<div class="card failed"><h3>Load error</h3><div class="body">${esc(p.error)}</div></div>`);
+  const loadError = p.error ? `<div class="card failed"><h3>Load error</h3><div class="body">${esc(p.error)}</div></div>` : '';
 
   // Failed gates with log tails
   for (const fb of p.failedBuilds || []) {
@@ -1418,11 +1456,6 @@ function renderDetail(p) {
       ${fb.evaluationId ? `<button class="mini" data-act="requeue" data-eval="${esc(fb.evaluationId)}">${svg('play')} Re-queue</button>` : ''}
       <button class="mini" data-act="url" data-url="${esc(fb.url)}">${svg('ext')} Open logs</button></h3>${tasks}</div>`);
   }
-  if (lead) {
-    const blockers = leadBlockersCard(p);
-    if (blockers) full.push(blockers);
-    full.push(runGroup);
-  }
 
   left.push(`<div class="card"><h3>Description</h3><div class="body md clamp">${md(p.description)}</div></div>`);
 
@@ -1445,10 +1478,13 @@ function renderDetail(p) {
     ...(p.waiting || []).map((x) => ['pending', x]),
   ];
   const fixActive = runActive(runForPr(p.key)), fixBusy = isBusy(p.key, 'triage');
-  right.push(`<div class="card"><h3>Status <span class="grow"></span>
+  const status = `<div class="card pr-status"><h3>Status</h3>
+    <div class="body"><ul class="list blockers">${items.length ? items.map(([c, t]) => `<li><span class="dot ${c}"></span><span class="k">${esc(t)}</span></li>`).join('') : '<li><span class="dot ok"></span><span class="k">All gates satisfied</span></li>'}</ul></div></div>`;
+  const fixHome = `<section class="full stack fix-home" aria-label="Fix PR">
+    <div class="fix-toolbar"><strong>Fix with Copilot</strong>
       <button class="mini ${fixActive ? 'running' : ''} ${fixBusy ? 'busy' : ''}" data-act="triage" ${fixBusy ? 'disabled' : ''} ${fixActive || fixBusy ? 'aria-busy="true"' : ''}>${svg(fixActive || fixBusy ? 'refresh' : 'spark')} ${runCancelable(runForPr(p.key)) ? 'Show run' : 'Fix PR'}</button>
-      <button class="mini" data-act="copyPrompt">${svg('copy')} Copy prompt</button></h3>
-    <div class="body"><ul class="list blockers">${items.length ? items.map(([c, t]) => `<li><span class="dot ${c}"></span><span class="k">${esc(t)}</span></li>`).join('') : '<li><span class="dot ok"></span><span class="k">All gates satisfied</span></li>'}</ul>${runScopeNotice()}</div></div>`);
+      <button class="mini" data-act="copyPrompt">${svg('copy')} Copy prompt</button></div>
+    ${runScopeNotice()}${runGroup}</section>`;
 
   const ac = autoCompleteDescription(p);
   right.push(`<div class="card"><h3>Merge <span class="grow"></span>
@@ -1484,15 +1520,23 @@ function renderDetail(p) {
       <p data-review-vote-outcome role="status" class="${outcome?.kind === 'error' ? 'error' : ''}" ${outcome ? '' : 'hidden'}>${esc(outcome?.message || '')}</p>
       </div></div>`);
   }
-  const revs = (p.reviewers || []).slice().sort((a, b) => (b.isRequired - a.isRequired) || (a.vote - b.vote));
+  const voteOrder = [10, 5, -10, -5, 0];
+  const rank = vote => { const index = voteOrder.indexOf(vote); return index < 0 ? voteOrder.length : index; };
+  const revs = (p.reviewers || []).slice().sort((a, b) => (rank(a.vote) - rank(b.vote)) || (b.isRequired - a.isRequired));
   if (revs.length) {
     const vl = { 10: 'Approved', 5: 'Approved w/ suggestions', 0: 'No vote', '-5': 'Waiting for author', '-10': 'Rejected' };
-    right.push(`<div class="card"><h3>Reviewers <span class="cnt">${revs.length}</span></h3><div class="body"><ul class="list">${revs.map((r) => `
+    const outstanding = [[-10, 'rejected'], [-5, 'waiting for author'], [0, 'no vote']]
+      .map(([vote, label]) => { const count = revs.filter(r => r.vote === vote).length; return count ? `${count} ${label}` : ''; }).filter(Boolean);
+    right.push(`<div class="card reviewers"><h3>Reviewers <span class="cnt">${revs.length}</span></h3><div class="body">
+      ${outstanding.length ? `<p class="reviewer-summary">${esc(outstanding.join(' · '))}</p>` : ''}
+      <ul class="list">${revs.map((r) => `
       <li>${avatar(r.name)}<span class="k">${esc(r.name)}${r.id?.toLowerCase() === p.reviewVote?.reviewerId?.toLowerCase() ? ' (you)' : ''} ${r.isRequired ? '<span class="badge req">required</span>' : ''}${r.isContainer ? ' <span class="badge">group</span>' : ''}</span>
       <span class="vote v${r.vote}">${vl[r.vote] ?? r.vote}</span></li>`).join('')}</ul></div></div>`);
   }
 
-  return `<div class="detail" data-run-lead="${+lead}">${full.length ? `<div class="full stack">${full.join('')}</div>` : ''}<div class="stack">${left.join('')}</div><div class="stack">${right.join('')}</div><div class="full stack">${trailing.join('')}</div></div>`;
+  return `<div class="detail" data-run-lead="1"><div class="full stack">${loadError}${status}
+    <section class="stack ai-assistance" aria-label="PR assistance">${renderExplanation(p.key)}</section></div>
+    ${fixHome}${full.length ? `<div class="full stack">${full.join('')}</div>` : ''}<div class="stack">${left.join('')}</div><div class="stack">${right.join('')}</div></div>`;
 }
 
 function formatLog(text, showTs) {
@@ -1756,7 +1800,7 @@ async function onAction(act, el, key) {
       S.explanationPrs.set(key, { id: p.id, repo: p.repo, title: p.title });
       S.busy.add(`${key}:${act}`);
       for (const card of document.querySelectorAll('.explanation')) {
-        if (card.dataset.explainKey === key) $('[data-act="explainPr"]', card).disabled = true;
+        if (card.dataset.explainKey === key && $('[data-act="explainPr"]', card)) $('[data-act="explainPr"]', card).disabled = true;
       }
       try { updateExplanation(await rpc('explainPr', { key })); }
       catch (e) { toast(e.message || String(e), 'error'); }
@@ -1764,7 +1808,7 @@ async function onAction(act, el, key) {
         S.busy.delete(`${key}:${act}`);
         const state = S.explanations.get(key);
         for (const card of document.querySelectorAll('.explanation')) {
-          if (card.dataset.explainKey === key) $('[data-act="explainPr"]', card).disabled = explanationActive(state) || !canExplain(key);
+          if (card.dataset.explainKey === key && $('[data-act="explainPr"]', card)) $('[data-act="explainPr"]', card).disabled = explanationActive(state) || !canExplain(key);
         }
       }
       break;
@@ -1966,8 +2010,8 @@ async function loadApprovalSettings() {
   if (S.drawer) renderDrawer();
 }
 
-const drawerFieldKey = el => el.id || `wsl:${el.dataset.wslRepo}`;
-const drawerFields = () => [...$('#drawerBody').querySelectorAll('input[id], select[id], textarea[id], input[data-wsl-repo]')];
+const drawerFieldKey = el => el.id || `native:${el.dataset.nativeRepo}`;
+const drawerFields = () => [...$('#drawerBody').querySelectorAll('input[id], select[id], textarea[id], input[data-native-repo]')];
 
 function clearSubmittedDrawerInput(id, value, epoch) {
   const current = $('#' + id);
@@ -2057,12 +2101,12 @@ function renderDrawer() {
       <label class="check"><input type="checkbox" id="transitionWorkItems" ${st.autoComplete.transitionWorkItems ? 'checked' : ''}/> Complete linked work items</label>
     </div>
     <div class="section">
-      <h4>Copilot in WSL</h4>
-      <p class="help">Fix PR creates an isolated worktree at the PR source commit and streams its run inline. The source checkout is not switched or edited by the launcher. WSL needs authenticated Copilot, Git and bgtask. Each deliberate run uses --yolo for tool/path/URL permissions without confirmation; global settings are unchanged. Worktree isolation is not a filesystem sandbox. Runs are told to commit validated fixes and ordinary-push them only to the PR's captured source branch (a prompt instruction, not enforced). Merge/PR-update command denies and the prompt's approval/policy boundaries remain.</p>
-      <div class="field"><label>WSL distribution (blank = default)</label><input id="wslDistro" type="text" value="${esc(st.wslDistro || '')}" placeholder="Default WSL distribution" /></div>
-      ${st.repos.map(r => `<div class="field wsl-repo"><label>${esc(r.repo)}<small>${esc(r.org)} / ${esc(r.project)}</small></label>
-        <input type="text" data-wsl-repo="${esc(repoKey(r))}" value="${esc(st.wslRepoDirectories?.[repoKey(r)] || '')}" placeholder="~/clones/${esc(r.repo)}" /></div>`).join('')}
-      <p class="help">Use an absolute Linux directory or ~/path. Blank tries ~/clones/&lt;repo&gt;. The directory and exact Azure DevOps remote are checked before any run. Failed/cancelled runs and generated changes are preserved at the displayed worktree path.</p>
+      <h4>Copilot on Windows</h4>
+      <p class="help">New Fix PR runs use Windows Copilot and Git in an isolated worktree at the captured PR source commit; no WSL or bgtask is needed. The source checkout is not switched or edited by the launcher. Each deliberate run uses --yolo for tool/path/URL permissions without confirmation; global settings are unchanged. Worktree isolation is not a filesystem sandbox. Runs are told to commit validated fixes and ordinary-push them only to the PR's captured source branch (a prompt instruction, not enforced). Merge/PR-update command denies and the prompt's approval/policy boundaries remain.</p>
+      ${st.repos.map(r => `<div class="field native-repo"><label>${esc(r.repo)}<small>${esc(r.org)} / ${esc(r.project)}</small></label>
+        <input type="text" data-native-repo="${esc(repoKey(r))}" value="${esc(st.nativeRepoDirectories?.[repoKey(r)] || '')}" placeholder="C:\\repos\\${esc(r.repo)}" /></div>`).join('')}
+      <p class="help">Choose an existing absolute Windows Git checkout for each Fix repository. There is no ~/clones or WSL fallback. Native directory, tools, authentication and the exact ADO remote are checked before launch. Ask/focused review read pinned ADO source directly and do not need these mappings.</p>
+      <p class="help">Legacy WSL Fix runs remain on their recorded host with their original work and scope. Their WSL setup is retained in settings for migration/history, not required for new work. Use each run's exact Cancel control; unavailable legacy tools leave an explicit recovery warning, never a new native restart.</p>
     </div>
     <div class="section">
       <h4>Copilot triage instructions</h4>
@@ -2225,8 +2269,7 @@ async function onDrawerAction(act, el) {
           additionalTriageInstructions: typeof storedAdditionalInstructions === 'string' &&
             additionalInstructions === storedAdditionalInstructions.replace(/\r\n?/g, '\n')
             ? storedAdditionalInstructions : additionalInstructions,
-          wslDistro: $('#wslDistro').value.trim(),
-          wslRepoDirectories: Object.fromEntries([...document.querySelectorAll('[data-wsl-repo]')].map(e => [e.dataset.wslRepo, e.value.trim()]).filter(([, value]) => value)),
+          nativeRepoDirectories: Object.fromEntries([...document.querySelectorAll('[data-native-repo]')].map(e => [e.dataset.nativeRepo, e.value.trim()]).filter(([, value]) => value)),
         }, true);
         toast('Settings saved');
         break;
@@ -2277,6 +2320,24 @@ function wire() {
     message.hidden = false;
   }, true);
   document.addEventListener('contextmenu', openRowMenu);
+  document.addEventListener('toggle', e => {
+    if (!e.target.matches?.('.run-history') || !e.target.closest('.run-earlier')) return;
+    const id = e.target.dataset.runId;
+    if (e.target.open) S.runHistoryOpen.add(id);
+    else S.runHistoryOpen.delete(id);
+  }, true);
+  for (const type of ['pointerover', 'focusin', 'pointerout', 'focusout']) {
+    document.addEventListener(type, e => {
+      const scope = e.target.closest('.run-scope');
+      if (!scope) return;
+      if (type === 'pointerover' && e.pointerType === 'touch') return;
+      if (type === 'pointerover' || type === 'focusin') {
+        if (e.target.closest('.run-info-button, .run-info-details')) setRunInfo(scope, true);
+      } else if (!scope.contains(e.relatedTarget) && !scope.dataset.pinned &&
+        !scope.matches(':hover') && !scope.contains(document.activeElement))
+        setRunInfo(scope, false);
+    });
+  }
   $('main').addEventListener('scroll', queueIdCues, { capture: true, passive: true });
   window.addEventListener('resize', queueIdCues);
   const rowRegions = [rows, $('#runShelf'), $('#explanationShelf')];
@@ -2306,6 +2367,19 @@ function wire() {
     requestAnimationFrame(flushRowUpdates);
   });
   document.addEventListener('click', (e) => {
+    const info = e.target.closest('.run-info-button');
+    for (const scope of document.querySelectorAll('.run-scope')) {
+      if (scope.contains(e.target)) continue;
+      delete scope.dataset.pinned;
+      setRunInfo(scope, false);
+    }
+    if (info) {
+      const scope = info.closest('.run-scope'), pinned = !scope.dataset.pinned;
+      if (pinned) scope.dataset.pinned = 'true';
+      else delete scope.dataset.pinned;
+      setRunInfo(scope, pinned);
+      return;
+    }
     if (e.target.closest('[data-menu-hide]')) {
       e.preventDefault();
       const selected = S.rowMenu;
@@ -2347,6 +2421,17 @@ function wire() {
     if (e.target.id === 'theme') changeTheme(e.target);
   });
   document.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape') {
+      const open = [...document.querySelectorAll('.run-scope')].filter(scope => !$('.run-info-details', scope).hidden);
+      if (open.length) {
+        e.preventDefault();
+        for (const scope of open) {
+          delete scope.dataset.pinned;
+          setRunInfo(scope, false);
+        }
+        return;
+      }
+    }
     if (S.drawer) {
       if (e.key === 'Escape') { e.preventDefault(); closeDrawer(); }
       else if (e.key === 'Tab') {
@@ -2404,6 +2489,7 @@ async function boot() {
   if (S.settings.theme != null && !AppTheme.supported.includes(S.settings.theme))
     toast('The saved theme is not supported by this version. Showing Light Mode without changing your preference.', 'info');
   for (const run of init.runs || []) updateCopilotRun(run);
+  for (const artifact of init.explanationArtifacts || []) retainExplanation(artifact);
   for (const explanation of init.explanations || []) updateExplanation(explanation);
   for (const investigation of init.investigations || []) updateInvestigation(investigation);
   for (const video of init.videos || []) updateVideo(video);

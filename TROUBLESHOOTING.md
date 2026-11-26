@@ -1,7 +1,7 @@
 # Troubleshooting ADO PR View
 
 This guide is for people using ADO PR View and for a Copilot or other coding
-agent helping them. It covers what each feature needs on Windows and WSL, safe
+agent helping them. It covers what each feature needs on Windows, legacy WSL recovery, safe
 checks, where the app writes logs, and how to file a useful bug report.
 
 Rules for anyone (person or agent) following this guide:
@@ -40,7 +40,7 @@ These sign-ins are separate and are **not** used by Explain:
 |---|---|---|
 | VS Code GitHub Copilot extension | VS Code's own account storage | VS Code only |
 | `copilot login` or `/login` in Windows PowerShell or Windows Terminal | Copilot CLI's folder (`%USERPROFILE%\.copilot`) and Windows Credential Manager | The `copilot` command on Windows, not Explain |
-| `copilot login` inside WSL (including a Windows Terminal tab opened on Ubuntu or another distro) | That Linux user's home in that distro | **Fix PR** only |
+| `copilot login` inside WSL (including a Windows Terminal tab opened on Ubuntu or another distro) | That Linux user's home in that distro | **Legacy WSL Fix recovery** only |
 | `gh auth login` inside WSL | That Linux user's home in that distro | Not Explain |
 | **`gh auth login` in Windows PowerShell** | GitHub CLI for Windows | **Explain, questions, lens reviews, TikTok** |
 
@@ -109,42 +109,109 @@ with a message in the row; it does not stop the dashboard.
 |---|---|---|---|
 | Viewing PRs, merge re-checks, Auto, re-queue | WebView2 runtime; Azure CLI (`az`) unless a PAT variable is set; .NET 10 Desktop Runtime only for framework-dependent builds (release downloads are self-contained) | Nothing | `az login` in Windows, or `AZURE_DEVOPS_EXT_PAT` / `AZURE_DEVOPS_PAT` set before the app starts |
 | **Explain this PR** | The full app package (bundled runtime), GitHub CLI `gh` on the app's PATH | Nothing | Windows `gh auth login` with Copilot access |
-| **Ask Copilot** / **Review with a lens** | Same as Explain | `wsl.exe`, a distro with `git`, `python3` and `flock` (util-linux), and a checkout of the PR's repository (Settings → Copilot in WSL, default `~/clones/<repo>`) whose remote matches the PR's ADO repository | Windows `gh` for Copilot; your existing WSL Git credentials for fetching |
+| **Ask** / **Focused review** | Same as Explain, plus the dashboard's ADO source Read access. Full files/directories are read at pinned commits, with no local checkout mapping. | Nothing | Windows `gh` for Copilot; existing dashboard ADO sign-in for source |
 | **TikTok This PR** | Same as Explain, plus Windows `az`, H.264/AAC encoders (Windows N needs the Media Feature Pack) | Nothing | Windows `gh` with access to the `claude-opus-5.5` model; `az login` with Speech access (**Cognitive Services Speech User**) |
-| **Fix PR** | `wsl.exe` | A distro with `git`, an authenticated `copilot` CLI, `bgtask` (on PATH or `~/go/bin/bgtask`), `flock`, `setsid`, `python3`; optional `~/.config/bash/environment` | `copilot` sign-in **inside that WSL distro**. Windows sign-ins are not used. |
+| **New Fix PR** | Git for Windows, a compatible full Windows Copilot CLI, PowerShell, and an existing absolute local Windows Git checkout root mapped in Settings | Nothing | Chosen Windows CLI's own `copilot login` in the default Windows user profile; Windows Git credential helper separately |
+| **Legacy WSL Fix recovery** | `wsl.exe` for the exact recorded environment | Recorded distro/user, `git`, authenticated `copilot`, the recorded `bgtask`, `flock`, `setsid`, `python3` and existing shell environment | Captured WSL Copilot sign-in. Windows sign-ins do not repair this old run. |
 | **PoP** | WebView2 runtime | Nothing | Your normal organization sign-in in the PoP pane; human only |
 | Approval provider (**+1**) | A locally installed provider assembly configured in settings | Depends on the provider | Owned by the provider |
 | Update checks | Internet access to `api.github.com` and `github.com` | Nothing | None |
 
 Notes:
 
-- ADO PR View does not install `bgtask`; Fix's preflight error names it when it
-  is missing.
-- The WSL distro is the one chosen in **Settings → Copilot in WSL**; blank means
-  the WSL default. Check it with `wsl.exe --list --verbose`.
-- Installing or signing in to the Windows `copilot` CLI does not change the WSL
-  one, and the reverse.
+- New Windows work needs neither Windows nor WSL `bgtask`. It is retained only
+  for legacy WSL Fix records, never installed by the app.
+- Windows checkout settings apply only to new Fix work. Old WSL runs keep their
+  captured distro/user, paths, registry and original permission/publish scope.
+- Installing or signing in to a different Copilot host does not migrate an
+  existing run or authorize replaying its prompt.
 
-### Safe checks for the WSL features
+### New Windows Fix: check dependencies in order
 
-Run these in Windows PowerShell; replace `<distro>` with the configured distro
-(or omit `-d <distro>` for the default). They print versions and paths only.
+1. **Checkout:** in Settings > Copilot on Windows, select the repository's actual
+   local Windows Git root, not a WSL path, UNC/device path, reparse link or
+   same-named unrelated folder. No `~/clones` fallback exists.
+2. **Git:** run `where.exe git` in Windows. If missing, install Git for Windows
+   with your normal approved method, fully exit the dashboard from the tray and
+   reopen it to pick up PATH. Fetch authentication belongs to Windows Git,
+   independently of Copilot.
+3. **Full CLI:** install Windows Copilot using an approved official method, for
+   example `winget install GitHub.Copilot`, or the appropriate executable from
+   [GitHub's installation guide](https://docs.github.com/en/copilot/how-tos/copilot-cli/set-up-copilot-cli/install-copilot-cli).
+   The bundled `copilot-runtime.exe` is an SDK stdio wrapper, not a full prompt
+   CLI. Official npm installs (`npm install -g @github/copilot`, Node 22+ for
+   installation) resolve to their verified packaged native executable without
+   running `copilot.cmd`. Arbitrary shell shims are not executed.
+4. **Flags:** `copilot --no-auto-update --help` must advertise
+   `--no-auto-update`, `--no-ask-user`, `--stream`, `--no-color`, `--deny-tool`,
+   `--yolo`, `--session-id` and `--resume`. An incompatible executable is an
+   explicit setup failure before model work.
+5. **Sign-in:** use the chosen Windows CLI's own `copilot login` outside the
+   dashboard. Help/version proves compatibility, not authentication or model
+   entitlement. This host is not Explain's private runtime; WSL login does not
+   authenticate it. Custom-home/token/proxy environment overrides are not
+   copied, seeded or decrypted. Never start a real Fix task to test sign-in.
+
+A wrong remote or changed captured source revision blocks preparation without
+editing Git configuration or the main checkout. Refresh a moved PR; do not
+force-fetch, reset, stash or delete somebody's existing work to make setup pass.
+
+Native Fix uses an out-of-process owned Windows Job supervisor with exact run,
+nonce and session receipts. Dashboard close/reopen keeps the same run and
+replays its private log; exact Cancel waits for descendants to stop. If a
+restrictive launch host prohibits detached job breakaway, Windows launch fails
+explicitly rather than tying task lifetime to that host or falling back to WSL.
+An ordinary installed app launch and a restricted automation host are different
+contexts. Native worktrees are always retained; there is no automatic crash
+replay or clean-worktree deletion. Inspect retained work before a deliberate
+new run, which is not a resume of those edits.
+The separate supervisor uses an immutable, versioned deployment outside the app
+installation directory. Active versions are retained through dashboard upgrades;
+do not delete them, kill supervisors or erase receipts to unblock setup.
+
+### Safe checks for legacy WSL Fix recovery
+
+First, in Windows PowerShell:
 
 ```powershell
 wsl.exe --list --verbose
-wsl.exe -d <distro> -- bash -lc 'command -v git python3 copilot bgtask flock setsid'
-wsl.exe -d <distro> -- bash -lc 'git -C ~/clones/<repo> remote -v'
 ```
 
-The Fix runner is not a login shell: it sources `~/.config/bash/environment`
-(and `BASH_ENV`) when present, then tries nvm's default and
-`~/.local/bin/copilot`. If a tool is found only in a login shell, add its
-location to that environment file yourself; the app never edits it.
-`git remote -v` prints remote URLs, which can include organization and
-repository names; do not paste them publicly.
+If the **recorded** distro is absent or Stopped, stop diagnostics: legacy
+liveness is unconfirmed. Do not run `wsl -d ...` just to inspect it; this starts
+the distro. Starting it requires a deliberate user recovery decision.
 
-Check WSL Copilot sign-in by running `copilot` interactively in that distro.
-Do not test it by starting Fix PR.
+Only in the recorded already-running distro and user, using the captured
+HOME/COPILOT_HOME/XDG_CONFIG_HOME/BGTASK_STATE_DIR and executable, read:
+
+```text
+"/captured/path/bgtask" --version
+"/captured/path/bgtask" --help
+"/captured/path/bgtask" status "<exact-recorded-task-name>" --json
+"/captured/path/bgtask" logs "<exact-recorded-task-name>" --tail 50
+```
+
+These are templates for the existing recorded environment, not commands for a
+new default Linux login shell. Keep output local: task metadata and logs can
+contain command lines, source, paths or environment overrides. Missing/dead
+status is not proof that descendants stopped; the app also verifies ownership,
+task identity, process group and execution lock. Never use `stop --all`, delete
+state, switch task registries or restart a prompt to resolve task-not-found.
+
+Legacy prerequisites include Linux Git, authenticated Copilot CLI, `bgtask`,
+`flock`/`setsid` (util-linux), Python 3 and `timeout`. The existing runner uses
+`~/.config/bash/environment` and its selected `BASH_ENV`, not `.bashrc`; do not
+replace these files. Version/help proves executable compatibility, not sign-in.
+Do not test authentication by starting Fix or resuming real work.
+
+The verified legacy runner is [philsphicas/bgtask v0.2.1](https://github.com/philsphicas/bgtask/releases/tag/v0.2.1).
+If installation is separately authorized, upstream's tagged source command is
+`go install github.com/philsphicas/bgtask/cmd/bgtask@v0.2.1` (Go 1.25 or newer).
+Check `go env GOBIN`/`go env GOPATH` to find its actual output; `~/go/bin` is not
+universal. Upstream also supplies Linux amd64/arm64 binaries. Never overwrite
+an executable used by a recorded runner or silently change its captured path.
+Installing a missing tool alone does not establish old task ownership or safe
+resume. Preserve the old worktree, logs and Windows `CopilotRuns` records.
 
 ## Where the app writes things
 
@@ -156,9 +223,11 @@ All under `%LOCALAPPDATA%\AdoPrView` unless noted.
 | `Explain\runtime\logs\process-*.log` | The bundled Copilot runtime's own log for Explain. Errors only. | Review first; may contain local paths. |
 | `Investigations\runtime\logs`, `Videos\runtime\logs` | Same, for questions/lens reviews and TikTok. | Review first. |
 | `CopilotRuns` | Fix PR recovery records and lock files on Windows. Not logs. | No: names your repositories and branches. |
+| `CopilotRuns\native\<run-id>\stdout.log`, `stderr.log`, ownership/receipt files and worktree | New Windows Fix supervision, private CLI history and retained work. A private prompt file may remain if interrupted cleanup cannot be verified. | **No**, not without careful redaction: may contain source, prompt text, private paths and remote/account details. |
+| `CopilotRuns\supervisors\<content-hash>` | Immutable self-contained native supervisor versions. Active versions survive upgrades and are never automatically overwritten/pruned. | Not useful for ordinary reports; retain them for recovery. |
 | In the WSL distro: `~/.local/state/ado-prview/runs/<run-id>/prepare.stderr` | Fix PR preparation errors. The Fix card shows this as **Private preparation log** and the `bgtask` output as **Supervised log**. | **No**, not without careful redaction: may contain remote URLs, authentication details and code. |
 | `Videos\completed`, `Videos\jobs` | Finished MP4s and private storyboards/narration. | No: derived from private code. |
-| `settings.json` | Your repositories, watched authors, WSL mappings. | No: names your organization and repositories. |
+| `settings.json` | Your repositories, watched authors, Windows checkout mappings and retained legacy WSL settings. | No: names your organization and repositories. |
 | `WebView2`, `PoPWebView2` | Browser profiles, including sign-in cookies. | **Never.** |
 | `Updates` | Downloaded update installers. | Not useful for bug reports. |
 
@@ -183,11 +252,12 @@ Get-ChildItem "$InstallDir\runtimes\win-x64\native" | Select-Object Name, Length
 
 The version looks like `0.1.4+<commit>`. The `native` folder must contain
 non-empty `copilot-runtime.exe`, `runtime.node` and `copilot_runtime.dll` (use
-`win-arm64` on Arm). If any is missing, Explain says so; reinstall the full
+the matching process architecture, including x64 under Arm emulation). If any is missing, Explain says so; reinstall the full
 release rather than copying single files.
 
-Other version checks: `az version`, `gh --version`, and for Fix,
-`wsl.exe -d <distro> -- bash -lc 'copilot --version'`.
+Other version checks: `az version`, `gh --version`, and for new Fix,
+`copilot --no-auto-update --version` in Windows. For legacy WSL, use only its
+recorded executable in the already-running recorded environment as above.
 
 ## Comparing the app's environment with your terminal
 

@@ -28,6 +28,8 @@ Screenshots use the default Light Mode with synthetic PR data.
   also has **Check for updates**. **Upgrade** closes the app, runs the
   verified release installer and reopens it; running Copilot tasks keep going
   and reconnect, and your settings in `%LOCALAPPDATA%\AdoPrView` are preserved.
+  Native Fix uses a separate, versioned supervisor outside the installation
+  directory so upgrades do not replace its active executable/runtime.
   Portable/ZIP or self-built copies get a link to the release page instead.
 - **Set it up with an agent:** give [INSTALL.md](INSTALL.md) to a CLI coding
   agent. It has a copyable kickoff prompt. The agent finds your existing Azure
@@ -63,10 +65,11 @@ merge preview is current or complete, or that every policy is known or green.
 
 ![A blocked PR expanded with an inline Copilot run panel showing synthetic demo output and a Cancel run button](docs/images/copilot-fix-inline.png)
 
-The sparkle button on a row starts Copilot CLI in WSL to fix that PR in its own
+The sparkle button on a row starts Copilot CLI on Windows to fix that PR in its own
 isolated worktree. Its output streams into the PR's expanded row, where you can
 follow or cancel it. The output in this picture is synthetic demo data. Fix is
-optional and needs WSL with an authenticated Copilot CLI; it runs with broad
+optional and needs a mapped Windows Git checkout and authenticated Windows
+Copilot CLI; it runs with broad
 permissions and the worktree is not a sandbox. Read
 [Inline Copilot Fix](docs/usage.md#inline-copilot-fix) before using it.
 
@@ -75,7 +78,8 @@ permissions and the worktree is not a sandbox. Read
 Expanded PRs offer a plain-spoken, code-grounded deep explanation of what
 genuinely improves, architecture, API changes and meaningful risks.
 [PR questions and lens reviews](docs/usage.md#pr-questions-and-lens-reviews)
-open a follow-up conversation backed by a pinned isolated WSL Git worktree.
+open a follow-up conversation backed by authenticated, pinned Azure DevOps
+full-source readers. No WSL or local checkout is needed for Ask/focused review.
 Lens findings are private previews: only findings you select and confirm are
 posted to ADO, with exact outcomes and confirmed comment links.
 
@@ -107,9 +111,10 @@ extra model deployment is needed.
 The agent does the configuration. You may still need to:
 
 - complete any sign-in, MFA, SSO or consent prompt it cannot do for you;
-- answer a question about which repositories, watched authors or WSL checkout
+- answer a question about which repositories, watched authors or Windows Fix checkout
   to use, only if it cannot work that out;
-- sign in to Copilot CLI in WSL, only if you want inline Copilot Fix;
+- sign in to Windows Copilot CLI, only if you want inline Copilot Fix;
+- keep legacy WSL runs' original environment for recovery; new work needs no WSL;
 - sign in to the Windows GitHub CLI (`gh auth login`) with a Copilot-enabled
   account, only if you want Explain, PR questions or TikTok This PR;
 - do the actual reviewing, approving, Proof of Presence and other PR decisions.

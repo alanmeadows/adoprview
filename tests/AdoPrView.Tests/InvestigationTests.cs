@@ -24,6 +24,527 @@ static class InvestigationTests
 
     public static async Task Run(Func<string, Func<Task>, Task> test)
     {
+        await test("Investigation native default reads full pinned source and directory beyond diffs without WSL configuration", async () =>
+        {
+            using var f = new ExplainTests.Fixture();
+            f.Store.Current.WslDistro = "Not installed";
+            f.Store.Current.WslRepoDirectories[f.Store.Current.Repos.Single().Key] = "/missing/legacy/checkout";
+            await using var source = await f.Service.GetInvestigationSourceAsync(f.Pr.Key, default);
+            Check(source is AdoInvestigationSource && !source.Location.Contains("worktree", StringComparison.OrdinalIgnoreCase),
+                "New investigation still requires a WSL/local worktree");
+            var before = await source.ReadFileAsync("/RetryPolicy.cs", "before", 1, default);
+            var after = await source.ReadFileAsync("/RetryPolicy.cs", "after", 1, default);
+            var target = await source.ReadFileAsync("/RetryPolicy.cs", "target", 1, default);
+            var broader = await source.ReadFileAsync("/README.md", "after", 1, default);
+            var directory = await source.ListDirectoryAsync("/", "after", default);
+            Check(before.Contains("FromSeconds(2)") && after.Contains("Math.Pow") && target.Contains(ExplainTests.Fixture.Target) &&
+                broader.Contains("internal integration-test harness") && directory.Contains("/README.md"),
+                "Native source lost base/source/target or broader architectural context");
+            source.ValidateFinding(new("0", "Trigger", "Meaningful consequence", "/RetryPolicy.cs", 5,
+                "        return TimeSpan.FromSeconds(Math.Min(300, 2 * Math.Pow(2, attempt)));"));
+            await Throws<InvalidDataException>(() => Task.Run(() =>
+                source.ValidateFinding(new("0", "Trigger", "Consequence", "/README.md", 1, "# Retry"))));
+            await Throws<InvalidDataException>(() => Task.Run(() =>
+                source.ValidateFinding(new("0", "Trigger", "Consequence", "/RetryPolicy.cs", 5, "        return TimeSpan.FromSeconds(2);"))));
+            await source.Context.ReadChangeAsync(0, default);
+            InvestigationModel.RequireInspection(source);
+            await source.VerifyAsync(default);
+            Check(f.Urls.Where(u => u.Contains("/items?")).All(u => u.Contains("versionDescriptor.versionType=commit")) &&
+                InvestigationModel.Names.Contains("read_source_file") && !InvestigationModel.Names.Contains("read_worktree_file"),
+                "Native review tool contract retained unpinned content or misleading filesystem tools");
+        });
+        await test("Investigation native default completes selected-only lens preview using actual API evidence and preserves target freshness", async () =>
+        {
+            using var f = new ExplainTests.Fixture();
+            var writes = 0;
+            var finding = new LensFinding("0", "Concrete failure", "Synthetic triggering input and consequence.",
+                "/RetryPolicy.cs", 1, "public static class RetryPolicy");
+            await using var service = new InvestigationService(f.Service.GetInvestigationSourceAsync,
+                (key, revision, _, _, _, selected, _, _) =>
+                {
+                    writes++;
+                    Check(key == f.Pr.Key && revision.SourceCommit == ExplainTests.Fixture.Source && selected.SequenceEqual([finding]),
+                        "Native posting target or selection changed");
+                    return Task.FromResult(new[] { new CommentOutcome("0", "posted", "Synthetic confirmed target", null) });
+                }, new Model(async (source, _, _, _, ct) =>
+                {
+                    Check(source.Location.StartsWith("Azure DevOps:", StringComparison.Ordinal), "Production capture did not use authenticated native source");
+                    await source.Context.ReadChangeAsync(0, ct);
+                    await source.ReadFileAsync("/RetryPolicy.cs", "after", 1, ct);
+                    source.ValidateFinding(finding);
+                    InvestigationModel.RequireInspection(source);
+                    return new("Synthetic private preview.", [finding]);
+                }));
+            var start = service.Ask(f.Pr.Key, "", "lens", "Check a concrete synthetic contract.");
+            var done = await Finish(service);
+            Check(done.Status == "completed" && writes == 0 && done.Evidence.Any(e => e.StartsWith("Source after:")),
+                "Native generation failed or implicitly posted findings: " + done.Message);
+            f.TargetHead = ExplainTests.Fixture.Base;
+            done = await service.PostAsync(f.Pr.Key, start.ConversationId, start.RequestId, ["0"], true);
+            Check(done.Status == "failed" && writes == 0, "Native source freshness no longer protects posting");
+        });
+        await test("Investigation native source blocks failed auth wrong revision and scope without accepting evidence", async () =>
+        {
+            foreach (var reason in new[] { "auth", "revision", "network", "directory" })
+            {
+                using var f = new ExplainTests.Fixture();
+                await using var source = await InvestigationSource.CreateAsync(await f.Capture(), f.Pr, f.Store.Current, default);
+                if (reason == "auth") f.DenyFiles = true;
+                if (reason == "revision") f.WrongItem = true;
+                if (reason == "network") f.NetworkFailure = true;
+                if (reason == "directory")
+                    f.AdditionalResponse = request => request.RequestUri!.AbsolutePath.EndsWith("/items")
+                        ? Json(new { value = new[] { new { path = "/outside/secret.cs", commitId = ExplainTests.Fixture.Source } } }) : null;
+                await Throws<Exception>(() => reason == "directory" ? source.ListDirectoryAsync("/within", "after", default) :
+                    source.ReadFileAsync("/RetryPolicy.cs", "after", 1, default));
+                Check(!source.Evidence.Any(e => e.StartsWith("Source ")), "Failed native source read became inspected evidence");
+                await Throws<InvalidOperationException>(() => source.VerifyAsync(default));
+            }
+        });
+        await test("Investigation native source omissions never validate symlink binary LFS oversized or partial quote evidence", async () =>
+        {
+            foreach (var reason in new[] { "symlink", "submodule", "binary", "lfs", "bytes", "window" })
+            {
+                using var f = new ExplainTests.Fixture();
+                f.AdditionalResponse = request =>
+                {
+                    var uri = request.RequestUri!;
+                    if (!uri.AbsolutePath.EndsWith("/items")) return null;
+                    var query = uri.Query.TrimStart('?').Split('&').Select(s => s.Split('=', 2))
+                        .ToDictionary(p => p[0], p => Uri.UnescapeDataString(p[1]));
+                    return Json(new { path = "/RetryPolicy.cs", commitId = query["versionDescriptor.version"],
+                        gitObjectType = reason == "submodule" ? "commit" : "blob", isSymLink = reason == "symlink",
+                        contentMetadata = new { isBinary = reason == "binary" },
+                        content = !query.ContainsKey("includeContent") ? null : reason switch
+                        {
+                            "lfs" => "version https://git-lfs.github.com/spec/v1\noid sha256:synthetic",
+                            "bytes" => new string('\u00e9', 40001),
+                            "window" => new string('x', 16001),
+                            _ => "public static class RetryPolicy",
+                        } });
+                };
+                await using var source = await InvestigationSource.CreateAsync(await f.Capture(), f.Pr, f.Store.Current, default);
+                var output = await source.ReadFileAsync("/RetryPolicy.cs", "after", 1, default);
+                Check(output.Contains("omitted", StringComparison.OrdinalIgnoreCase) || output.Contains("TRUNCATED"),
+                    "Native source omission was hidden: " + reason);
+                Check(!source.Evidence.Any(e => e.StartsWith("Source after:")), "Omitted or partial native content became exact finding proof");
+                await Throws<InvalidDataException>(() => Task.Run(() =>
+                    source.ValidateFinding(new("0", "Failure", "Consequence", "/RetryPolicy.cs", 1, "public static class RetryPolicy"))));
+                await source.VerifyAsync(default);
+            }
+        });
+        await test("Investigation native read budget and invalid paths fail explicitly before accepting further content", async () =>
+        {
+            using var f = new ExplainTests.Fixture();
+            await using var source = await InvestigationSource.CreateAsync(await f.Capture(), f.Pr, f.Store.Current, default);
+            var calls = f.Urls.Count;
+            await Throws<ArgumentException>(() => source.ReadFileAsync("/../secret", "after", 1, default));
+            await Throws<ArgumentException>(() => source.ReadFileAsync("/RetryPolicy.cs", "main", 1, default));
+            Check(f.Urls.Count == calls, "Invalid source arguments reached ADO");
+            for (var i = 0; i < 120; i++) await source.ListDirectoryAsync("/", "after", default);
+            calls = f.Urls.Count;
+            await Throws<InvalidOperationException>(() => source.ListDirectoryAsync("/", "after", default));
+            Check(f.Urls.Count == calls, "Native read budget issued another source request");
+            await Throws<InvalidOperationException>(() => source.VerifyAsync(default));
+        });
+        await test("Investigation explicit explanation section preserves full ARM host risks attribution and pinned selection without truncating the displayed artifact", async () =>
+        {
+            using var f = new ExplainTests.Fixture();
+            const string before = "resource account 'Microsoft.Storage/storageAccounts@2023-05-01' = {\n  properties: {\n    allowBlobPublicAccess: true\n  }\n}";
+            const string after = "resource account 'Microsoft.Storage/storageAccounts@2023-05-01' = {\n  properties: {\n    allowBlobPublicAccess: false\n  }\n}";
+            ExplainTests.ArmFixture(f, "/deploy.bicep", before, after);
+            await using var explain = new ExplainService((_, ct) => f.Capture(ct), new ExplanationModel(async (context, ct) =>
+            {
+                await context.ReadChangeAsync(0, ct);
+                context.Arm.Record(0, "source", before, "source", after, "Disables anonymous access.",
+                    "Anonymous consumers may fail; no deployment was run.", "allowBlobPublicAccess changes from true to false.");
+                return "Unselected preamble.\n\n## Huge unrelated details\n" + new string('<', 20000) +
+                    "\n\n## Focused question\nSmall useful explanation paragraph.\n\n```markdown\n## Fake fenced section\nkeep this code intact\n```\n" +
+                    "\n~~~text\n# Another fake fenced section\n~~~\n\n## Other context\nHistorical detail.";
+            }));
+            var ready = explain.Start(f.Pr.Key);
+            await CompleteExplanation(explain);
+            var whole = explain.Artifacts.Single();
+            var metadata = whole.ExplanationSections!;
+            var focused = metadata.Single(s => s.Title == "Focused question");
+            var arm = metadata.Single(s => s.Title == "Azure Resource Manager changes");
+            Check(whole.Status == "completed" && metadata.All(s => !s.Title.Contains("Fake", StringComparison.OrdinalIgnoreCase)) &&
+                metadata.All(s => s.Title is not ("Before" or "After" or "/deploy.bicep")) && focused.IncludesArm,
+                "Fenced headings or ARM child fragments became selectable sections");
+            var selections = new List<int?>();
+            await using var service = new InvestigationService(async (_, ct) => new Source(await f.Capture(ct)),
+                (_, _, _, _, _, _, _, _) => throw new Exception("Unexpected write"),
+                new ContextModel((_, _, contexts, _, _, _, _) =>
+                {
+                    var attached = contexts.Single();
+                    selections.Add(attached.SectionIndex);
+                    Check(attached.Output.Contains(before) && attached.Output.Contains(after) && attached.Output.Contains("#### Changed lines") &&
+                        attached.Output.Contains("Exact source excerpt") && attached.Output.Contains("**Risks and uncertainty:** Anonymous consumers may fail; no deployment was run."),
+                        "Selected paragraph lost cohesive ARM Before/After, diff, attribution or risks");
+                    Check(attached.Coverage.SequenceEqual(whole.Coverage) && attached.Evidence.SequenceEqual(whole.Evidence!) &&
+                        attached.Receipt.Contains("complete host ARM section"), "Section attachment lost original coverage/evidence/receipt");
+                    return Task.FromResult(new InvestigationAnswer("Grounded section answer.", []));
+                }), explain.Resolve, resolveExplanationSection: explain.Resolve);
+            await Throws<InvalidOperationException>(() => Task.FromResult(service.Ask(f.Pr.Key, "", "question", "Whole?", ready.RequestId)));
+            foreach (var invalid in new[] { -1, 999 })
+                await Throws<InvalidOperationException>(() => Task.FromResult(service.Ask(f.Pr.Key, "", "question", "Invalid section?", ready.RequestId, invalid)));
+            await Throws<ArgumentException>(() => Task.FromResult(service.Ask(f.Pr.Key, "", "question", "Missing request?", explanationSectionIndex: focused.Index)));
+            var start = service.Ask(f.Pr.Key, "", "question", "Use this paragraph explicitly.", ready.RequestId, focused.Index);
+            var done = await Finish(service);
+            var package = done.ExplanationContexts.Single();
+            Check(done.Status == "completed" && package.SectionTitle == focused.Title && package.Output.Contains("Small useful explanation paragraph.") &&
+                !package.Output.Contains(new string('<', 1000)) &&
+                package.IncludedSectionIndices!.Contains(arm.Index) && package.OmittedSectionTitles!.Contains("Huge unrelated details") &&
+                package.OmittedSectionTitles.Contains("Preamble before the first heading") &&
+                done.Turns.Single().ExplanationSectionIndex == focused.Index, "Explicit section package/omissions/turn identity were not accepted exactly");
+            service.Ask(f.Pr.Key, start.ConversationId, "question", "Continue with the same package.");
+            done = await Finish(service);
+            Check(done.Turns.All(t => t.ExplanationSectionIndex == focused.Index) && selections.SequenceEqual([focused.Index, focused.Index]),
+                "Follow-up silently changed or dropped the pinned section");
+            await Throws<InvalidOperationException>(() => Task.FromResult(service.Ask(f.Pr.Key, start.ConversationId, "question", "Swap section?", ready.RequestId, arm.Index)));
+            await Throws<InvalidOperationException>(() => Task.FromResult(service.Ask(f.Pr.Key, start.ConversationId, "question", "Swap to entire?", ready.RequestId)));
+            Check(selections.Count == 2 && explain.Artifacts.Single().Output == whole.Output, "Changing attachment silently replaced context or rewrote the displayed artifact");
+            var reset = await service.ResetAsync(f.Pr.Key, start.ConversationId);
+            service.Ask(f.Pr.Key, reset.ConversationId, "question", "Now use the ARM host explicitly.", ready.RequestId, arm.Index);
+            done = await Finish(service);
+            Check(done.Status == "completed" && done.Turns.Single().ExplanationSectionIndex == arm.Index, "New conversation could not explicitly change selection");
+        });
+        await test("Investigation explicit section still blocks when preserving the full ARM host exceeds escaped replay budget", async () =>
+        {
+            using var f = new ExplainTests.Fixture();
+            var before = "resource account 'Microsoft.Storage/storageAccounts@2023-05-01' = {\n  name: '" + new string('<', 9000) +
+                "'\n  properties: {\n    allowBlobPublicAccess: true\n  }\n}";
+            var after = before.Replace("allowBlobPublicAccess: true", "allowBlobPublicAccess: false");
+            ExplainTests.ArmFixture(f, "/deploy.bicep", before, after);
+            await using var explain = new ExplainService((_, ct) => f.Capture(ct), new ExplanationModel(async (context, ct) =>
+            {
+                await context.ReadChangeAsync(0, ct);
+                context.Arm.Record(0, "source", before, "source", after, "Disables anonymous access.", "Consumers may fail.", "Access changes.");
+                return "## Small paragraph\nA small meaningful request context.";
+            }));
+            var ready = explain.Start(f.Pr.Key);
+            await CompleteExplanation(explain);
+            var state = explain.Artifacts.Single();
+            var selected = state.ExplanationSections!.Single(s => s.Title == "Small paragraph");
+            var package = explain.Resolve(f.Pr.Key, ready.RequestId, selected.Index);
+            Check(state.Output.Length <= 64000 && package.Output.Contains(before) && package.Output.Contains(after) &&
+                InvestigationModel.SerializeReplay([], [package], "question", "Compare?", ready.RequestId).Length > 100000,
+                "Fixture did not require a whole oversized ARM host inside the chosen package");
+            await using var service = new InvestigationService(async (_, ct) => new Source(await f.Capture(ct)),
+                (_, _, _, _, _, _, _, _) => throw new Exception("Unexpected write"),
+                new ContextModel((_, _, _, _, _, _, _) => throw new Exception("Oversized selected package reached model")),
+                explain.Resolve, resolveExplanationSection: explain.Resolve);
+            await Throws<InvalidOperationException>(() => Task.FromResult(service.Ask(f.Pr.Key, "", "question", "Compare?", ready.RequestId, selected.Index)));
+            Check(service.States.Length == 0, "Oversized selected package accepted a phantom conversation or truncated ARM");
+        });
+        await test("Explain section metadata excludes fenced fake headings and refuses unclosed or unsectioned documents", async () =>
+        {
+            using var f = new ExplainTests.Fixture();
+            var output = "## Real section\n```markdown\n## Fake inside longer fence\n````\n# Real following section\n~~~text\n## Fake tilde heading\n~~~\n";
+            await using var explain = new ExplainService((_, ct) => f.Capture(ct), new ExplanationModel((_, _) => Task.FromResult(output)));
+            explain.Start(f.Pr.Key);
+            await CompleteExplanation(explain);
+            var state = explain.Artifacts.Single();
+            Check(state.ExplanationSections!.Select(s => s.Title).SequenceEqual(["Real section", "Real following section"]), "Fenced headings became selectable");
+            output = "## Opening section\n```markdown\n## Not safely terminated";
+            explain.Start(f.Pr.Key);
+            await CompleteExplanation(explain);
+            var unfinished = explain.Artifacts.Last();
+            Check(unfinished.ExplanationSections!.Length == 0, "Unclosed code fence exposed an unsafe section");
+            await Throws<InvalidOperationException>(() => Task.FromResult(explain.Resolve(f.Pr.Key, unfinished.RequestId, 0)));
+            output = new string('<', 30000);
+            explain.Start(f.Pr.Key);
+            await CompleteExplanation(explain);
+            var unsectioned = explain.Artifacts.Last();
+            Check(unsectioned.ExplanationSections!.Length == 0, "Unsectioned text gained a fabricated selector");
+            await Throws<InvalidOperationException>(() => Task.FromResult(explain.Resolve(f.Pr.Key, unsectioned.RequestId, 0)));
+        });
+        await test("Investigation reference PR URL resolves authenticated pinned evidence replays follow-ups and never changes posting target", async () =>
+        {
+            using var f = new ExplainTests.Fixture();
+            var target = new Source(await f.Capture());
+            ConfigureReference(f);
+            var url = $"https://dev.azure.com/offline/{f.Pr.ProjectId}/_git/{f.Pr.RepoId}/pullrequest/456";
+            var models = 0;
+            var writes = 0;
+            var finding = new LensFinding("0", "Reference compatibility failure", "Concrete comparison.", "/RetryPolicy.cs", 1, "public");
+            await using var service = new InvestigationService((_, _) => Task.FromResult<IInvestigationSource>(target),
+                (key, revision, _, _, _, selected, _, _) =>
+                {
+                    writes++;
+                    Check(key == f.Pr.Key && revision.Id == 123 && selected.Single() with { OutgoingComment = null } == finding, "Reference replaced the posting target");
+                    return Task.FromResult(new[] { new CommentOutcome("0", "posted", "Confirmed target comment", null) });
+                }, new Model(async (source, history, kind, question, ct) =>
+                {
+                    models++;
+                    Check(source.Context.Revision.Id == 123 && source.References.Single().Context.Revision.Id == 456, "Pinned target/reference identities mixed");
+                    var reference = source.References.Single();
+                    Check(reference.Snapshot().Output.Contains("ReferenceOnFailure") && reference.Snapshot().Revision.Title.Contains("Reference contract") &&
+                        reference.Snapshot().Evidence.Any(e => e.StartsWith("Diff: ")), "URL was not actually read into attributable evidence");
+                    Check((await reference.Context.ReadFileAsync("/RetryPolicy.cs", "after", 1, ct)).Contains("ReferenceOnFailure"),
+                        "Bounded reference source inspection was unavailable");
+                    Check(InvestigationModel.ReferenceTools(source.References, ct).Select(t => t.Name).SequenceEqual(InvestigationModel.ReferenceNames),
+                        "Reference tools did not expose their exact restricted read-only inventory");
+                    return new("Compared pinned target and reference source.", kind == "lens" ? [finding] : []);
+                }), captureReference: f.Service.GetReferencePrContextAsync);
+            var start = service.Ask(f.Pr.Key, "", "lens", "Aligned with PR " + url);
+            var done = await Finish(service);
+            Check(done.Status == "completed" && done.ReferencePrContexts.Single().Url == url &&
+                done.Turns.Single().ReferencePrUrls!.SequenceEqual([url]), "Resolved reference state/turn association was not available: " + done.Message);
+            done = await service.PostAsync(f.Pr.Key, start.ConversationId, start.RequestId, ["0"], true);
+            Check(writes == 1 && done.Status == "completed", "Reference review lost exact target posting");
+            service.Ask(f.Pr.Key, start.ConversationId, "question", "Why does that comparison matter?");
+            done = await Finish(service);
+            Check(models == 2 && done.ReferencePrContexts.Single().Revision.Id == 456 &&
+                done.Turns.All(t => t.ReferencePrUrls!.SequenceEqual([url])), "Follow-up lost pinned reference evidence/turn association");
+            await Throws<InvalidOperationException>(() => service.PostAsync(f.Pr.Key, start.ConversationId, start.RequestId, ["0"], true));
+            Check(writes == 1, "Historical reference lens remained postable after another Ask");
+            f.TargetHead = new string('d', 40);
+            service.Ask(f.Pr.Key, start.ConversationId, "question", "Still aligned?");
+            done = await Finish(service);
+            Check(done.Status == "failed" && models == 2, "Changed target/reference source reached the model");
+        });
+        foreach (var status in new[] { HttpStatusCode.Forbidden, HttpStatusCode.NotFound })
+        await test("Investigation reference PR denied or missing is explicit and never reaches model " + status, async () =>
+        {
+            using var f = new ExplainTests.Fixture();
+            var target = new Source(await f.Capture());
+            f.AdditionalResponse = request => request.RequestUri!.AbsolutePath.EndsWith("/repositories/" + f.Pr.RepoId)
+                ? new HttpResponseMessage(status) { Content = new StringContent("""{"message":"synthetic denied reference"}""") } : null;
+            await using var service = new InvestigationService((_, _) => Task.FromResult<IInvestigationSource>(target),
+                (_, _, _, _, _, _, _, _) => throw new Exception("Unexpected write"),
+                new Model((_, _, _, _, _) => throw new Exception("Unread reference reached model")), captureReference: f.Service.GetReferencePrContextAsync);
+            service.Ask(f.Pr.Key, "", "question", $"Aligned with PR https://dev.azure.com/offline/{f.Pr.ProjectId}/_git/{f.Pr.RepoId}/pullrequest/456");
+            var done = await Finish(service);
+            Check(done.Status == "failed" && done.Message.Contains(status == HttpStatusCode.Forbidden ? "access denied" : "not found") &&
+                done.Turns.Length == 0 && done.ReferencePrContexts.Length == 0, "Unread reference was accepted without a precise error");
+        });
+        await test("Investigation reference PR rejects unsupported hosts and oversized evidence without model calls", async () =>
+        {
+            using var f = new ExplainTests.Fixture();
+            var target = new Source(await f.Capture());
+            ConfigureReference(f, oversized: true);
+            var captures = 0;
+            await using var service = new InvestigationService((_, _) => Task.FromResult<IInvestigationSource>(target),
+                (_, _, _, _, _, _, _, _) => throw new Exception("Unexpected write"),
+                new Model((_, _, _, _, _) => throw new Exception("Oversized reference reached model")),
+                captureReference: async (url, ct) => { captures++; return await f.Service.GetReferencePrContextAsync(url, ct); });
+            foreach (var url in new[] { "https://example.invalid/policy", "https://dev.azure.com.evil.invalid/o/p/_git/r/pullrequest/1",
+                "https://user:secret@dev.azure.com/o/p/_git/r/pullrequest/1", "http://dev.azure.com/o/p/_git/r/pullrequest/1",
+                "https://dev.azure.com/o/p/_git/r/pullrequest/1?redirect=https://evil.invalid", "https://dev.azure.com/o/p/_git/r/pullrequest/0" })
+                await Throws<ArgumentException>(() => Task.FromResult(service.Ask(f.Pr.Key, "", "lens", "Aligned with " + url)));
+            Check(captures == 0 && service.States.Length == 0, "Unsupported host/URL escaped reference validation");
+            service.Ask(f.Pr.Key, "", "lens", $"Aligned with https://dev.azure.com/offline/{f.Pr.ProjectId}/_git/{f.Pr.RepoId}/pullrequest/456");
+            var done = await Finish(service);
+            Check(done.Status == "failed" && done.Message.Contains("size limit") && done.ReferencePrContexts.Length == 0,
+                "Oversized reference diff was silently truncated");
+            Check(ReferencePrContext.Canonical("https://sample.visualstudio.com/DefaultCollection/Project/_git/Repo/pullrequest/5") ==
+                "https://dev.azure.com/sample/Project/_git/Repo/pullrequest/5", "Standard legacy ADO URL was not canonicalized");
+        });
+        foreach (var sourceMoves in new[] { true, false })
+        await test($"Investigation reference PR rechecks distinct reference source and target branches before follow-up and posting (source={sourceMoves})", async () =>
+        {
+            using var f = new ExplainTests.Fixture();
+            var target = new Source(await f.Capture());
+            var moved = false;
+            ConfigureReference(f, drift: () => moved ? sourceMoves ? "source" : "target" : "");
+            var calls = 0;
+            var writes = 0;
+            await using var service = new InvestigationService((_, _) => Task.FromResult<IInvestigationSource>(target),
+                (_, _, _, _, _, _, _, _) => { writes++; throw new Exception("Stale reference reached posting"); },
+                new Model((_, _, _, _, _) =>
+                { calls++; return Task.FromResult(new InvestigationAnswer("Preview", [new("0", "Meaningful", "Consequence", "/RetryPolicy.cs", 1, "public")])); }),
+                captureReference: f.Service.GetReferencePrContextAsync);
+            var start = service.Ask(f.Pr.Key, "", "lens", $"Aligned with PR https://dev.azure.com/offline/{f.Pr.ProjectId}/_git/{f.Pr.RepoId}/pullrequest/456");
+            Check((await Finish(service)).Status == "completed", "Initial reference preview did not complete");
+            moved = true;
+            var blocked = await service.PostAsync(f.Pr.Key, start.ConversationId, start.RequestId, ["0"], true);
+            Check(blocked.Status == "failed" && writes == 0, "Reference branch drift reached a write");
+            service.Ask(f.Pr.Key, start.ConversationId, "question", "Still aligned?");
+            blocked = await Finish(service);
+            Check(blocked.Status == "failed" && calls == 1 && blocked.Turns.Length == 1 && blocked.ReferencePrContexts.Single().Revision.Id == 456,
+                "Reference drift reached a follow-up or silently rebased the prior reference");
+        });
+        await test("Investigation reference PR drift during generation accepts neither answer nor reference context", async () =>
+        {
+            using var f = new ExplainTests.Fixture();
+            var target = new Source(await f.Capture());
+            var moved = false;
+            ConfigureReference(f, drift: () => moved ? "source" : "");
+            await using var service = new InvestigationService((_, _) => Task.FromResult<IInvestigationSource>(target),
+                (_, _, _, _, _, _, _, _) => throw new Exception("Unexpected write"),
+                new Model((_, _, _, _, _) => { moved = true; return Task.FromResult(new InvestigationAnswer("Unverified answer", [])); }),
+                captureReference: f.Service.GetReferencePrContextAsync);
+            service.Ask(f.Pr.Key, "", "question", $"Aligned with PR https://dev.azure.com/offline/{f.Pr.ProjectId}/_git/{f.Pr.RepoId}/pullrequest/456");
+            var done = await Finish(service);
+            Check(done.Status == "failed" && done.Turns.Length == 0 && done.ReferencePrContexts.Length == 0,
+                "Reference drift during generation became a verified answer");
+        });
+        await test("Investigation explanation bridge replays immutable E1 on initial and follow-up calls without synthetic turns", async () =>
+        {
+            using var f = new ExplainTests.Fixture();
+            var generation = 0;
+            await using var explain = new ExplainService((_, ct) => f.Capture(ct),
+                new ExplanationModel((_, _) => Task.FromResult($"Recognizable E{++generation}: safer is a claim to challenge.")));
+            var e1 = explain.Start(f.Pr.Key);
+            await CompleteExplanation(explain);
+            var observed = new List<string>();
+            await using var service = new InvestigationService(async (_, ct) => new Source(await f.Capture(ct)),
+                (_, _, _, _, _, _, _, _) => throw new Exception("Unexpected write"),
+                new ContextModel((_, turns, contexts, selected, _, question, _) =>
+                {
+                    Check(turns.Length == observed.Count, "Explanation import manufactured a completed turn");
+                    observed.Add(InvestigationModel.SerializeReplay(turns, contexts, "question", question, selected));
+                    return Task.FromResult(new InvestigationAnswer("Grounded challenge to E1.", []));
+                }), explain.Resolve);
+            var first = service.Ask(f.Pr.Key, "", "question", "Why safer?", e1.RequestId);
+            var done = await Finish(service);
+            Check(done.Turns.Single().ExplanationRequestId == e1.RequestId && done.ExplanationContexts.Single().Output.Contains("Recognizable E1"),
+                "Accepted answer lost its exact explanation identity/content");
+            var e2 = explain.Start(f.Pr.Key);
+            await CompleteExplanation(explain);
+            Check(explain.Resolve(f.Pr.Key, e1.RequestId).Output.Contains("Recognizable E1"), "Rerun relabelled E1");
+            var publicCopy = explain.Artifacts;
+            publicCopy[0].Coverage[0] = "external mutation";
+            Check(!explain.Resolve(f.Pr.Key, e1.RequestId).Coverage.Contains("external mutation"), "Completed artifact was externally mutable");
+            service.Ask(f.Pr.Key, first.ConversationId, "question", "Challenge that claim again.");
+            done = await Finish(service);
+            Check(observed.Count == 2 && observed.All(s => s.Contains("Recognizable E1")) && !observed[1].Contains("Recognizable E2") &&
+                done.Turns.All(t => t.ExplanationRequestId == e1.RequestId), "Follow-up silently used newest Explain or dropped E1");
+            service.Ask(f.Pr.Key, first.ConversationId, "question", "Compare with E2.", e2.RequestId);
+            done = await Finish(service);
+            Check(done.ExplanationContexts.Length == 2 && done.Turns.Last().ExplanationRequestId == e2.RequestId &&
+                done.Turns.Last().ExplanationRequestIds!.SequenceEqual([e1.RequestId, e2.RequestId]) &&
+                done.Turns[0].ExplanationRequestIds!.SequenceEqual([e1.RequestId]) &&
+                observed.Last().Contains("Recognizable E1") && observed.Last().Contains("Recognizable E2"), "New explicit E2 silently replaced E1 or relabelled old turn associations");
+            for (var i = 0; i < 12; i++) { explain.Start(f.Pr.Key); await CompleteExplanation(explain); }
+            Check(explain.Artifacts.Length == 12, "Completed artifact registry was not bounded");
+            await Throws<InvalidOperationException>(() => Task.FromResult(explain.Resolve(f.Pr.Key, e1.RequestId)));
+            service.Ask(f.Pr.Key, first.ConversationId, "question", "Return to pinned E1.", e1.RequestId);
+            done = await Finish(service);
+            Check(done.Status == "completed" && observed.Last().Contains("Recognizable E1") &&
+                done.Turns.Last().ExplanationRequestId == e1.RequestId, "Registry expiry evicted an already attached server context");
+        });
+        await test("Investigation explanation bridge rejects missing unfinished cancelled failed and cross-PR contexts before model", async () =>
+        {
+            using var f = new ExplainTests.Fixture();
+            var entered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            await using var explain = new ExplainService((_, ct) => f.Capture(ct), new ExplanationModel(async (_, ct) =>
+            { entered.TrySetResult(); await Task.Delay(Timeout.Infinite, ct); return "unreachable"; }));
+            var running = explain.Start(f.Pr.Key);
+            await entered.Task.WaitAsync(TimeSpan.FromSeconds(5));
+            var calls = 0;
+            await using var service = new InvestigationService(async (_, ct) => new Source(await f.Capture(ct)),
+                (_, _, _, _, _, _, _, _) => throw new Exception("Unexpected write"),
+                new ContextModel((_, _, _, _, _, _, _) => { calls++; return Task.FromResult(new InvestigationAnswer("Unexpected", [])); }), explain.Resolve);
+            foreach (var id in new[] { "missing", running.RequestId })
+                await Throws<InvalidOperationException>(() => Task.FromResult(service.Ask(f.Pr.Key, "", "question", "Attach?", id)));
+            await explain.CancelAsync(f.Pr.Key, running.RequestId);
+            await Throws<InvalidOperationException>(() => Task.FromResult(service.Ask(f.Pr.Key, "", "question", "Cancelled?", running.RequestId)));
+            await using var failed = new ExplainService((_, ct) => f.Capture(ct), new ExplanationModel((_, _) => throw new InvalidOperationException("offline failure")));
+            var failure = failed.Start(f.Pr.Key);
+            await CompleteExplanation(failed);
+            await Throws<InvalidOperationException>(() => Task.FromResult(failed.Resolve(f.Pr.Key, failure.RequestId)));
+            await using var completed = new ExplainService((_, ct) => f.Capture(ct), new ExplanationModel((_, _) => Task.FromResult("Finished E1")));
+            var ready = completed.Start(f.Pr.Key);
+            await CompleteExplanation(completed);
+            await Throws<InvalidOperationException>(() => Task.FromResult(completed.Resolve("different-pr", ready.RequestId)));
+            Check(calls == 0 && service.States.Length == 0 && explain.Artifacts.Length == 0 && failed.Artifacts.Length == 0,
+                "Invalid attachment reached model or cancellation accepted a completed artifact");
+        });
+        await test("Investigation explanation bridge checks every captured revision identity field and source freshness before model", async () =>
+        {
+            using var f = new ExplainTests.Fixture();
+            await using var explain = new ExplainService((_, ct) => f.Capture(ct), new ExplanationModel((_, _) => Task.FromResult("Pinned E1")));
+            var ready = explain.Start(f.Pr.Key);
+            await CompleteExplanation(explain);
+            var attachment = explain.Resolve(f.Pr.Key, ready.RequestId);
+            var r = attachment.Revision;
+            foreach (var revision in new[] { r with { Id = r.Id + 1 }, r with { Title = "changed" }, r with { Repo = "changed" },
+                r with { SourceCommit = "changed" }, r with { BaseCommit = "changed" }, r with { Iteration = r.Iteration + 1 },
+                r with { TargetCommit = "changed" }, r with { SourceRef = "changed" }, r with { TargetRef = "changed" } })
+            {
+                await using var service = new InvestigationService(async (_, ct) => new Source(await f.Capture(ct)),
+                    (_, _, _, _, _, _, _, _) => throw new Exception("Unexpected write"),
+                    new ContextModel((_, _, _, _, _, _, _) => throw new Exception("Mismatched revision reached model")),
+                    (_, _) => attachment with { Revision = revision });
+                service.Ask(f.Pr.Key, "", "question", "Same key is not enough?", ready.RequestId);
+                var done = await Finish(service);
+                Check(done.Status == "failed" && done.Message.Contains("revisions changed") && done.Turns.Length == 0 &&
+                    done.ExplanationContexts.Length == 0, "Revision mismatch accepted an attachment");
+            }
+            var source = new Source(await f.Capture());
+            f.MovedSource = true;
+            await using var stale = new InvestigationService((_, _) => Task.FromResult<IInvestigationSource>(source),
+                (_, _, _, _, _, _, _, _) => throw new Exception("Unexpected write"),
+                new ContextModel((_, _, _, _, _, _, _) => throw new Exception("Stale source reached model")), explain.Resolve);
+            stale.Ask(f.Pr.Key, "", "question", "Still current?", ready.RequestId);
+            Check((await Finish(stale)).Status == "failed", "Changed live source was accepted");
+        });
+        await test("Investigation explanation bridge accounts for whole 64k output JSON escaping incoming question answer and twelve-turn budgets", async () =>
+        {
+            using var f = new ExplainTests.Fixture();
+            var character = 'e';
+            await using var explain = new ExplainService((_, ct) => f.Capture(ct), new ExplanationModel((_, _) => Task.FromResult(new string(character, 64000))));
+            var ready = explain.Start(f.Pr.Key);
+            await CompleteExplanation(explain);
+            var calls = 0;
+            await using var service = new InvestigationService(async (_, ct) => new Source(await f.Capture(ct)),
+                (_, _, _, _, _, _, _, _) => throw new Exception("Unexpected write"),
+                new ContextModel((_, _, contexts, _, _, _, _) =>
+                { calls++; Check(contexts.Single().Output.Length == 64000, "Whole Explain was truncated"); return Task.FromResult(new InvestigationAnswer(new string('a', 32000), [])); }), explain.Resolve);
+            var first = service.Ask(f.Pr.Key, "", "question", "Full context?", ready.RequestId);
+            var done = await Finish(service);
+            Check(done.Status == "completed" && done.Turns.Length == 1, "Bounded 64k Explain plus max answer did not fit");
+            await Throws<InvalidOperationException>(() => Task.FromResult(service.Ask(f.Pr.Key, first.ConversationId, "question", new string('<', 4000))));
+            Check(calls == 1, "Incoming escaped question exceeded budget before the model");
+            service.Ask(f.Pr.Key, first.ConversationId, "question", "Small follow-up.");
+            done = await Finish(service);
+            Check(done.Status == "failed" && done.Message.Contains("context limit") && done.Turns.Length == 1 &&
+                done.ExplanationContexts.Single().Output.Length == 64000, "Oversized answer silently lost prior whole context or was accepted");
+            character = '<';
+            var large = explain.Start(f.Pr.Key);
+            await CompleteExplanation(explain);
+            var escapedAttachment = explain.Resolve(f.Pr.Key, large.RequestId);
+            var overhead = InvestigationModel.SerializeReplay([], [escapedAttachment with { Output = "" }], "question", "Escaped?", large.RequestId).Length;
+            var ordinarySize = InvestigationModel.SerializeReplay([], [escapedAttachment with { Output = new string('e', 64000) }], "question", "Escaped?", large.RequestId).Length;
+            var escapedSize = InvestigationModel.SerializeReplay([], [escapedAttachment], "question", "Escaped?", large.RequestId).Length;
+            Check(ordinarySize == overhead + 64000 && escapedSize == overhead + 384000, "Escaping characterization did not use the actual replay encoder");
+            Console.WriteLine($"Fresh Explain replay sample: metadata/request overhead={overhead}; 64k ordinary ASCII={ordinarySize}; 64k '<'={escapedSize}; " +
+                $"maximum '<' characters before request-only overflow={(100000 - overhead) / 6}; " +
+                $"64k mixed ASCII maximum '<' before request-only overflow={(100000 - overhead - 64000) / 5}.");
+            await using var escaped = new InvestigationService(async (_, ct) => new Source(await f.Capture(ct)),
+                (_, _, _, _, _, _, _, _) => throw new Exception("Unexpected write"),
+                new ContextModel((_, _, _, _, _, _, _) => throw new Exception("Escaped oversize reached model")),
+                explain.Resolve);
+            await Throws<InvalidOperationException>(() => Task.FromResult(escaped.Ask(f.Pr.Key, "", "question", "Escaped?", large.RequestId)));
+            Check(escaped.States.Length == 0, "Oversized attachment reserved a phantom conversation");
+            await using var small = new InvestigationService(async (_, ct) => new Source(await f.Capture(ct)),
+                (_, _, _, _, _, _, _, _) => throw new Exception("Unexpected write"),
+                new Model((_, _, _, _, _) => Task.FromResult(new InvestigationAnswer("Bounded.", []))));
+            var start = small.Ask(f.Pr.Key, "", "question", "Turn 1");
+            await Finish(small);
+            for (var i = 2; i <= 12; i++) { small.Ask(f.Pr.Key, start.ConversationId, "question", "Turn " + i); await Finish(small); }
+            await Throws<InvalidOperationException>(() => Task.FromResult(small.Ask(f.Pr.Key, start.ConversationId, "question", "Turn 13")));
+            Check(small.States.Single().Turns.Length == 12, "Twelve-turn budget truncated history");
+        });
+        await test("Investigation cancellation does not accept pending explanation context or invalidate prior lens identity", async () =>
+        {
+            using var f = new ExplainTests.Fixture();
+            await using var explain = new ExplainService((_, ct) => f.Capture(ct), new ExplanationModel((_, _) => Task.FromResult("E1")));
+            var ready = explain.Start(f.Pr.Key);
+            await CompleteExplanation(explain);
+            var entered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            await using var service = new InvestigationService(async (_, ct) => new Source(await f.Capture(ct)),
+                (_, _, _, _, _, _, _, _) => throw new Exception("Unexpected write"),
+                new ContextModel(async (_, _, _, _, _, _, ct) =>
+                { entered.TrySetResult(); await Task.Delay(Timeout.Infinite, ct); return new("unreachable", []); }), explain.Resolve);
+            var start = service.Ask(f.Pr.Key, "", "question", "Cancel imported E1?", ready.RequestId);
+            await entered.Task.WaitAsync(TimeSpan.FromSeconds(5));
+            var cancelled = await service.CancelAsync(f.Pr.Key, start.ConversationId, start.RequestId);
+            Check(cancelled.Status == "cancelled" && cancelled.Turns.Length == 0 && cancelled.ExplanationContexts.Length == 0,
+                "Cancelled answer imported context as an accepted turn");
+        });
         await test("Investigation retains follow-up history, isolates PR identities and refuses stale conversation IDs", async () =>
         {
             using var f = new ExplainTests.Fixture();
@@ -74,11 +595,15 @@ static class InvestigationTests
                 service.Ask(f.Pr.Key, start.ConversationId, "lens", "Synthetic follow-up lens");
                 done = await Finish(service);
             }
-            Check(done.Turns.Sum(turn => turn.Answer.Length + turn.Question.Length) < 100000 &&
-                JsonSerializer.Serialize(done.Turns, Bridge.Json).Length > 100000, "Fixture did not exceed the serialized history budget");
+            Check(postOutcomes ? JsonSerializer.Serialize(done.Turns, Bridge.Json).Length > 100000 :
+                done.Status == "failed" && done.Turns.Length == 1 && done.Message.Contains("context limit"),
+                "Oversized response/outcomes were not bounded explicitly");
             var before = requests;
-            await Throws<InvalidOperationException>(() => Task.FromResult(service.Ask(f.Pr.Key, start.ConversationId, "question", "Too much history")));
-            Check(requests == before, "Oversized history reached the model");
+            if (postOutcomes)
+            {
+                await Throws<InvalidOperationException>(() => Task.FromResult(service.Ask(f.Pr.Key, start.ConversationId, "question", "Too much history")));
+                Check(requests == before, "Oversized history reached the model");
+            }
         });
         await test("Investigation cancellation fences turn IDs, keeps prior turns, and source setup failures are explicit", async () =>
         {
@@ -134,12 +659,15 @@ static class InvestigationTests
                 {
                     calls++;
                     Check(lens == "Does this work with the caller?", "Posted comment lost the concrete review lens");
-                    Check(selected.Length == 1 && selected[0] == finding, "Unselected findings posted");
+                    Check(selected.Length == 1 && selected[0] with { OutgoingComment = null } == finding, "Unselected findings posted");
                     return Task.FromResult(new[] { new CommentOutcome("0", "posted", "confirmed", "https://dev.azure.com/offline/thread") });
                 }, new Model((_, _, _, _, _) => Task.FromResult(new InvestigationAnswer("Scoped preview.", [finding, finding with { Id = "1" }]))));
             var start = service.Ask(f.Pr.Key, "", "lens", "Does this work with the caller?");
             var done = await Finish(service);
             Check(calls == 0 && done.Turns[0].Findings.Length == 2, "Lens generation wrote to ADO");
+            Check(done.Turns[0].Findings[0].OutgoingComment == PrService.LensCommentContent(source.Context.Revision,
+                start.ConversationId, start.RequestId, "Does this work with the caller?", finding),
+                "Confirmation preview differs from the full host-formatted outgoing comment");
             await Throws<ArgumentException>(() => service.PostAsync(f.Pr.Key, start.ConversationId, start.RequestId, ["0"], false));
             await Throws<ArgumentException>(() => service.PostAsync(f.Pr.Key, start.ConversationId, start.RequestId, [], true));
             await Throws<InvalidOperationException>(() => service.PostAsync(f.Pr.Key, start.ConversationId, "stale", ["0"], true));
@@ -338,6 +866,10 @@ static class InvestigationTests
                 posts++;
                 var thread = JsonNode.Parse(request.Content!.ReadAsStringAsync().GetAwaiter().GetResult())!;
                 var content = thread["comments"]![0]!["content"]!.GetValue<string>();
+                Check(content == PrService.LensCommentContent(context.Revision, "conversation", "turn",
+                    "[label](https://example.invalid/target)", new LensFinding((posts - 1).ToString(), "Failure",
+                    "![hidden](https://example.invalid/image) <img src='https://example.invalid/html'>", "/RetryPolicy.cs", 2, "{")),
+                    "Actual outgoing text differs from the server preview formatter");
                 Check(content.Contains(@"\!\[hidden\]\(https://example\.invalid/image\)") &&
                     content.Contains(@"\[label\]\(https://example\.invalid/target\)") && content.Contains("&lt;img"),
                     "Comment published Markdown/HTML absent from literal preview");
@@ -404,8 +936,70 @@ static class InvestigationTests
 
     sealed class Model(Func<IInvestigationSource, InvestigationTurn[], string, string, CancellationToken, Task<InvestigationAnswer>> run) : IInvestigationModel
     {
-        public Task<InvestigationAnswer> AskAsync(IInvestigationSource source, InvestigationTurn[] history, string kind, string question, CancellationToken ct) => run(source, history, kind, question, ct);
+        public Task<InvestigationAnswer> AskAsync(IInvestigationSource source, InvestigationTurn[] history, string kind, string question, CancellationToken ct,
+            ExplanationAttachment[]? explanationContexts = null, string? explanationRequestId = null) => run(source, history, kind, question, ct);
         public ValueTask DisposeAsync() => ValueTask.CompletedTask;
+    }
+
+    static void ConfigureReference(ExplainTests.Fixture f, bool oversized = false, Func<string>? drift = null)
+    {
+        f.AdditionalResponse = request =>
+        {
+            Check(request.Method == HttpMethod.Get, "Reference attempted a mutation");
+            var path = request.RequestUri!.AbsolutePath;
+            if (path.EndsWith("/repositories/" + f.Pr.RepoId))
+                return Json(new { id = f.Pr.RepoId, name = f.Pr.Repo, project = new { id = f.Pr.ProjectId, name = f.Pr.Project } });
+            if (path.EndsWith("/pullrequests/456"))
+                return Json(new { pullRequestId = 456, title = "Reference contract distinct from target", status = "active",
+                    sourceRefName = "refs/heads/reference", targetRefName = "refs/heads/reference-target",
+                    repository = new { id = f.Pr.RepoId, project = new { id = f.Pr.ProjectId } },
+                    lastMergeSourceCommit = new { commitId = ExplainTests.Fixture.Source } });
+            if (path.EndsWith("/refs"))
+            {
+                var filter = request.RequestUri.Query.TrimStart('?').Split('&').Single(p => p.StartsWith("filter="))["filter=".Length..];
+                var name = "refs/" + Uri.UnescapeDataString(filter);
+                if (name is "refs/heads/reference" or "refs/heads/reference-target")
+                {
+                    var source = name == "refs/heads/reference";
+                    var moved = drift?.Invoke() == (source ? "source" : "target");
+                    return Json(new { value = new[] { new { name, objectId = moved ? new string('d', 40) :
+                        source ? ExplainTests.Fixture.Source : ExplainTests.Fixture.Target } } });
+                }
+            }
+            if (path.Contains("/pullrequests/456/") && path.EndsWith("/changes"))
+                return Json(new { changeEntries = new[] { new { item = new { path = "/RetryPolicy.cs" }, changeType = "edit" } }, nextSkip = 0 });
+            if (path.EndsWith("/items") && request.RequestUri.Query.Contains("includeContent"))
+            {
+                var query = request.RequestUri.Query.TrimStart('?').Split('&').Select(s => s.Split('=', 2))
+                    .ToDictionary(p => p[0], p => Uri.UnescapeDataString(p[1]));
+                var commit = query["versionDescriptor.version"];
+                return Json(new { path = "/RetryPolicy.cs", commitId = commit, gitObjectType = "blob",
+                    contentMetadata = new { isBinary = false },
+                    content = oversized ? new string('x', 80001) : commit == ExplainTests.Fixture.Base ? "ReferenceBefore();" : "ReferenceOnFailure();" });
+            }
+            return null;
+        };
+    }
+
+    sealed class ContextModel(Func<IInvestigationSource, InvestigationTurn[], ExplanationAttachment[], string?, string, string, CancellationToken, Task<InvestigationAnswer>> run) : IInvestigationModel
+    {
+        public Task<InvestigationAnswer> AskAsync(IInvestigationSource source, InvestigationTurn[] history, string kind, string question, CancellationToken ct,
+            ExplanationAttachment[]? explanationContexts = null, string? explanationRequestId = null) =>
+            run(source, history, explanationContexts ?? [], explanationRequestId, kind, question, ct);
+        public ValueTask DisposeAsync() => ValueTask.CompletedTask;
+    }
+
+    sealed class ExplanationModel(Func<ExplainContext, CancellationToken, Task<string>> run) : IExplainModel
+    {
+        public Task<string> ExplainAsync(ExplainContext context, Action<string> stream, CancellationToken ct) => run(context, ct);
+        public ValueTask DisposeAsync() => ValueTask.CompletedTask;
+    }
+
+    static async Task CompleteExplanation(ExplainService service)
+    {
+        var until = DateTime.UtcNow.AddSeconds(5);
+        while (service.States.Any(s => ExplainService.Active(s.Status)) && DateTime.UtcNow < until) await Task.Delay(10);
+        Check(!service.States.Any(s => ExplainService.Active(s.Status)), "Explanation did not finish");
     }
 
     sealed class Source(ExplainContext context) : IInvestigationSource

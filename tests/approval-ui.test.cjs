@@ -6,6 +6,7 @@ const vm = require('node:vm');
 
 const source = fs.readFileSync(path.join(__dirname, '..', 'src', 'AdoPrView', 'wwwroot', 'app.js'), 'utf8');
 const themeSource = fs.readFileSync(path.join(__dirname, '..', 'src', 'AdoPrView', 'wwwroot', 'theme.js'), 'utf8');
+const investigationSource = fs.readFileSync(path.join(__dirname, '..', 'src', 'AdoPrView', 'wwwroot', 'investigation.js'), 'utf8');
 
 function setup(search = '?mock=1', native = false) {
   const elements = new Map();
@@ -38,7 +39,8 @@ function setup(search = '?mock=1', native = false) {
   });
   vm.runInContext(themeSource, context);
   context.AppTheme = window.AppTheme;
-  vm.runInContext(source + '\nglobalThis.hooks = { S, onHostMessage, onAction, actionButtons, renderDetail, setSnapshot, flushRowUpdates, renderHeader, renderRows, undoHide, baseVisible, updateCopilotRun, renderRunShelf, runForPr, runActive, onDrawerAction, loadApprovalSettings, renderDrawer, renderExplanation, updateExplanation, explanationBody, renderVideo, updateVideo, videoContent, openSpeechSetup, onSpeechAction, closeSpeechSetup, changeTheme, applySavedTheme, loadLog, logKey };', context);
+  vm.runInContext(investigationSource, context);
+  vm.runInContext(source.replace(/^boot\(\)\.catch.*$/m, '') + '\nglobalThis.hooks = { S, onHostMessage, onAction, actionButtons, renderDetail, setSnapshot, flushRowUpdates, renderHeader, renderRows, undoHide, baseVisible, updateCopilotRun, renderRunShelf, runForPr, runActive, onDrawerAction, loadApprovalSettings, renderDrawer, renderExplanation, updateExplanation, explanationBody, renderVideo, updateVideo, videoContent, openSpeechSetup, onSpeechAction, closeSpeechSetup, changeTheme, applySavedTheme, loadLog, logKey };', context);
   const { hooks } = context;
   const pr = {
     key: 'repo:123', id: 123, repo: 'sample-service', title: 'Offline PR',
@@ -50,6 +52,34 @@ function setup(search = '?mock=1', native = false) {
   hooks.S.snap = { prs: [pr], lastRefresh: new Date().toISOString(), approvalProvider: { name: 'Sample approval' } };
   return { hooks, pr, window, elements, dialogs, document, context, element, sent };
 }
+
+test('expanded AI tools precede full diagnostics, Fix has one stable home, and approvals lead without hiding outstanding votes', () => {
+  const { hooks, pr } = setup();
+  pr.failedBuilds = [{ name: 'Failed synthetic build', tasks: [] }];
+  pr.reviewers = [
+    { name: 'Required no vote', vote: 0, isRequired: true },
+    { name: 'Optional approved', vote: 10, isRequired: false },
+    { name: 'Required rejected', vote: -10, isRequired: true },
+    { name: 'Required approved group', vote: 10, isRequired: true, isContainer: true },
+    { name: 'Suggestions', vote: 5, isRequired: false },
+    { name: 'Waiting', vote: -5, isRequired: false },
+    { name: 'Second optional approved', vote: 10, isRequired: false },
+  ];
+  for (const status of [null, 'running', 'completed', 'needs-attention']) {
+    hooks.S.runs.clear();
+    if (status) hooks.S.runs.set('one-run', { ...pr, runId: 'one-run', status, output: 'Synthetic output', mayBeRunning: status === 'running' });
+    const html = hooks.renderDetail(pr);
+    const order = ['Status</h3>', 'PR assistance</span>', 'Alternate output: short video', 'class="full stack fix-home"', 'Failed synthetic build', '>Description</h3>'];
+    assert.ok(order.every((text, i) => html.includes(text) && (!i || html.indexOf(text) > html.indexOf(order[i - 1]))), status);
+    assert.equal((html.match(/data-act="triage"/g) || []).length, 1);
+    assert.equal((html.match(/class="small run-scope"/g) || []).length, 1);
+    const reviewers = html.slice(html.indexOf('class="card reviewers"'));
+    const names = ['Required approved group', 'Optional approved', 'Second optional approved', 'Suggestions', 'Required rejected', 'Waiting', 'Required no vote'];
+    assert.ok(names.every((name, i) => !i || reviewers.indexOf(name) > reviewers.indexOf(names[i - 1])));
+    assert.match(reviewers, /1 rejected · 1 waiting for author · 1 no vote/);
+    assert.doesNotMatch(reviewers, /merge blockers/i);
+  }
+});
 
 test('native Fix delivery is acknowledged even when rendering rejects data; only native sequenced events get acknowledgements', () => {
   const { hooks, sent } = setup('', true);
@@ -130,6 +160,54 @@ test('Fix drawer saves additional instructions independently without changing ca
   assert.equal(calls[0].settings.additionalTriageInstructions, '  UPDATED\r\nfinal\n');
   assert.equal(calls[0].settings.futureSetting, 'KEEP');
   assert.equal(hooks.S.runs.get(existing.runId), existing);
+});
+
+test('new Windows Fix settings save native checkouts while preserving legacy setup and label each actual run host', async () => {
+  const { hooks, pr, window, elements, document } = setup();
+  hooks.S.settings.repos = [{ org: 'contoso', project: 'Sample', repo: 'sample-service' }];
+  hooks.S.settings.wslDistro = 'Legacy-Ubuntu';
+  hooks.S.settings.wslRepoDirectories = { 'contoso/sample/sample-service': '/legacy/source' };
+  hooks.S.settings.nativeRepoDirectories = { 'contoso/sample/sample-service': 'C:\\repos\\sample-service' };
+  hooks.renderDrawer();
+  const drawer = elements.get('#drawerBody').innerHTML;
+  assert.match(drawer, /Copilot on Windows/);
+  assert.match(drawer, /data-native-repo="contoso\/sample\/sample-service"/);
+  assert.match(drawer, /C:\\repos\\sample-service/);
+  assert.match(drawer, /Ask\/focused review read pinned ADO source directly/);
+  assert.doesNotMatch(drawer, /id="wslDistro"|data-wsl-repo|placeholder="~\/clones/);
+  for (const id of ['refreshSeconds', 'mergeCheckMinutes', 'triageInstructions', 'additionalTriageInstructions',
+    'mergeStrategy', 'notifications', 'sound', 'deleteSourceBranch', 'transitionWorkItems'])
+    elements.set('#' + id, { value: '', checked: false });
+  document.querySelectorAll = selector => selector === '[data-native-repo]'
+    ? [{ dataset: { nativeRepo: 'contoso/sample/sample-service' }, value: ' C:\\other\\checkout ' }] : [];
+  let saved;
+  window.MockHost.rpc = async (method, params) => {
+    assert.equal(method, 'saveSettings'); saved = params.settings; return params.settings;
+  };
+  await hooks.onDrawerAction('save', {});
+  assert.equal(saved.nativeRepoDirectories['contoso/sample/sample-service'], 'C:\\other\\checkout');
+  assert.equal(saved.wslDistro, 'Legacy-Ubuntu');
+  assert.equal(saved.wslRepoDirectories['contoso/sample/sample-service'], '/legacy/source');
+  const native = { key: pr.key, runId: 'native', status: 'running', backend: 'windows-native', output: 'native log' };
+  hooks.S.runs.set(native.runId, native);
+  assert.match(hooks.renderDetail(pr), /Fix PR · Copilot on Windows/);
+  assert.doesNotMatch(hooks.renderDetail(pr), /Legacy Copilot in WSL/);
+  hooks.S.runs.clear();
+  const legacy = { key: pr.key, runId: 'legacy', status: 'running', backend: 'legacy-wsl',
+    distro: 'Legacy-Ubuntu', output: 'retained legacy log' };
+  hooks.S.runs.set(legacy.runId, legacy);
+  assert.match(hooks.renderDetail(pr), /Fix PR · Legacy Copilot in WSL/);
+  assert.match(hooks.renderDetail(pr), /retained legacy log/);
+  assert.equal(hooks.S.runs.get(legacy.runId), legacy);
+});
+
+test('Ask and focused review advertise authenticated native source without mandatory checkout or Linux tools', () => {
+  const { hooks, pr } = setup();
+  const html = hooks.renderDetail(pr);
+  assert.match(html, /Fix is a separate code-changing run/);
+  assert.doesNotMatch(html, /mapped WSL Git\/Python|separate WSL code-changing/);
+  const source = fs.readFileSync(path.join(__dirname, '..', 'src', 'AdoPrView', 'wwwroot', 'investigation.js'), 'utf8');
+  assert.match(source, /No WSL or local checkout is needed/);
 });
 
 test('first video requires explicit Azure setup and missing az stays an actionable setup error without starting generation', async () => {
@@ -247,10 +325,14 @@ test('TikTok rejects unsafe media URLs, ignores stale events and escapes the loc
 
 test('video shelf follows the selected lane and keeps lane-retained jobs in their rows', () => {
   for (const [lane, retained] of [['blocked', false], ['waiting', false], ['blocked', true]]) {
-    const { hooks, pr, elements } = setup();
+    const { hooks, pr, elements, document } = setup();
     hooks.S.lane = lane;
     hooks.S.expanded.add(pr.key);
     if (retained) hooks.S.laneRetained.add(pr.key);
+    document.querySelector('#videoShelf').contains = () => false;
+    document.querySelectorAll = selector => selector === '.pr-video' &&
+      elements.get('#rows')?.innerHTML.includes(`data-video-key="${pr.key}"`)
+      ? [{ dataset: { videoKey: pr.key } }] : [];
     hooks.S.videos.set(pr.key, { key: pr.key, requestId: 'lane-job', sequence: 1,
       status: 'rendering', message: 'Rendering', evidence: [], coverage: [] });
     hooks.renderRows();
@@ -414,6 +496,7 @@ test('Explain streams only into the captured panel and ignores stale request/seq
   const { hooks, pr, document, element, elements } = setup();
   const nodes = Object.fromEntries(['.explain-status', '.explain-revision', '.explain-output', '.explain-coverage', '.explain-evidence', '.explain-notices',
     '[data-act="explainPr"]', '[data-act="cancelExplanation"]'].map(s => [s, element()]));
+  nodes['.assistance-explanation'] = { dataset: { resultRequest: 'one' } };
   const card = { dataset: { explainKey: pr.key }, querySelector: s => nodes[s] };
   document.querySelectorAll = s => s === '.explanation' ? [card] : [];
   const sentinel = { innerHTML: 'neighbor stays put' };
@@ -425,6 +508,7 @@ test('Explain streams only into the captured panel and ignores stale request/seq
   assert.equal(nodes['[data-act="cancelExplanation"]'].dataset.requestId, 'one');
   assert.equal(nodes['[data-act="explainPr"]'].disabled, true);
   assert.equal(sentinel.innerHTML, 'neighbor stays put');
+  nodes['.assistance-explanation'].dataset.resultRequest = 'new';
   hooks.updateExplanation({ ...state, requestId: 'new', sequence: 8, status: 'completed', output: 'finished' });
   hooks.updateExplanation({ ...state, sequence: 6, output: 'late old response' });
   assert.equal(hooks.S.explanations.get(pr.key).output, 'finished');
@@ -482,7 +566,7 @@ test('Explain cancellation needs the exact active request, not current PR member
 test('Explain sanitizes completed Markdown without remote media/links/controls and labels partial errors', () => {
   const { hooks, pr, window, context } = setup();
   let options;
-  context.marked = window.marked = { parse: text => text };
+  context.marked = window.marked = { parse: text => text, Renderer: class {} };
   context.DOMPurify = window.DOMPurify = { sanitize: (_, config) => { options = config; return '<p>safe</p>'; } };
   assert.equal(hooks.explanationBody({ output: '<img src="https://evil.invalid/">', status: 'completed' }), '<p>safe</p>');
   for (const tag of ['a', 'img', 'script', 'iframe', 'input', 'button', 'style', 'svg'])

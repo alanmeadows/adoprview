@@ -10,6 +10,43 @@ static class SettingsTests
 
     public static async Task Run(Func<string, Func<Task>, Task> test)
     {
+        await test("settings Windows checkout mappings validate native paths and preserve legacy WSL and future fields", () => InDir(dir =>
+        {
+            var path = Path.Combine(dir, "settings.json");
+            File.WriteAllText(path, """{"wslDistro":"Legacy-Ubuntu","wslRepoDirectories":{"org/project/repo":"/legacy/source"},"futureTop":"KEEP"}""");
+            var store = new SettingsStore(path);
+            using var http = new HttpClient();
+            var prs = new PrService(new AdoClient(http, _ => Task.FromResult(new AuthenticationHeaderValue("Bearer", "offline"))), store);
+            string? reply = null;
+            var bridge = new Bridge(prs, store, text => { reply = text; return Task.CompletedTask; }, _ => { });
+            var form = JsonSerializer.SerializeToNode(store.Current, Bridge.Json)!.AsObject();
+            void Save() => bridge.HandleAsync(new JsonObject { ["id"] = 1, ["method"] = "saveSettings",
+                ["params"] = new JsonObject { ["settings"] = form.DeepClone() } }.ToJsonString()).GetAwaiter().GetResult();
+            foreach (var invalid in new[] { "relative\\repo", "/home/legacy", "C:repo", "C:\\repos\\bad\npath" })
+            {
+                form["nativeRepoDirectories"] = new JsonObject { ["ORG/PROJECT/REPO"] = invalid };
+                var original = File.ReadAllText(path);
+                Save();
+                Check(reply?.Contains("\"error\"") == true && reply.Contains("absolute Windows") && File.ReadAllText(path) == original,
+                    "Invalid native mapping was saved or lacked actionable feedback: " + invalid);
+            }
+            form["nativeRepoDirectories"] = null;
+            Save();
+            Check(reply?.Contains("\"error\"") == true && reply.Contains("not null"), "Null native mappings were silently discarded");
+            form["nativeRepoDirectories"] = new JsonObject { ["ORG/PROJECT/REPO"] = "\\\\server\\share\\repo" };
+            Save();
+            Check(reply?.Contains("\"error\"") == true && reply.Contains("local drive"), "Unsupported UNC checkout was saved without platform feedback");
+            form["nativeRepoDirectories"] = new JsonObject { ["ORG/PROJECT/REPO"] = "  C:\\repos\\native repo  " };
+            Save();
+            var reloaded = new SettingsStore(path);
+            Check(reply?.Contains("\"error\"") == false && reloaded.Current.NativeRepoDirectories["org/project/repo"] == "C:\\repos\\native repo" &&
+                reloaded.Current.WslDistro == "Legacy-Ubuntu" && reloaded.Current.WslRepoDirectories["org/project/repo"] == "/legacy/source" &&
+                reloaded.Current.Extra!["futureTop"].GetString() == "KEEP", "Native settings erased legacy mappings or unrelated data");
+            form.Remove("nativeRepoDirectories");
+            Save();
+            Check(new SettingsStore(path).Current.NativeRepoDirectories["org/project/repo"] == "C:\\repos\\native repo",
+                "Older settings clients erased Windows mappings");
+        }));
         await test("settings additional Fix instructions round-trip independently and older clients preserve them", () => InDir(dir =>
         {
             var path = Path.Combine(dir, "settings.json");

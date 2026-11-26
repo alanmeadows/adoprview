@@ -26,7 +26,7 @@ calls used see [DESIGN.md](DESIGN.md); for building and tests see
 - Auth: Windows `az login` (the app uses `az account get-access-token`), or set
   `AZURE_DEVOPS_EXT_PAT` / `AZURE_DEVOPS_PAT`.
 - Settings (repos, watched authors, hidden PRs, polling, auto-complete options,
-  Copilot/WSL mappings) live in the gear drawer and persist to
+  Windows Fix checkout mappings and retained legacy WSL settings) live in the gear drawer and persist to
   `%LOCALAPPDATA%\AdoPrView\settings.json`. A new install starts with no
   repositories. An unreadable or invalid settings file is reported at startup and
   left unchanged; it is never replaced with defaults. Fields the app does not
@@ -229,26 +229,29 @@ their normal undo behavior.
 Click a row to expand it, or Tab to its title and press Enter or Space. Gate-detail
 controls and retained-run headings support the same keyboard activation without
 requiring a Fix or approval action. The details show the PR description and unresolved
-threads, a **Status** card listing what remains (with **Fix PR** and **Copy
-prompt**), a **Merge** card (merge status, merge re-check, branches,
+threads, a compact **Status** summary listing what remains, a **Merge** card
+(merge status, merge re-check, branches,
 auto-complete, review bot, author, created), the policies and the reviewers with
 their votes. Build policies have **Re-queue** and a link to the build.
 
-Expanded details lead with what needs action: approval, load errors and failed
-gates come first. A Fix run that is live, recovering, possibly still running or
-needs attention comes next, with its status, **Cancel run** and output; any
-merge conflict or required review not already shown above it is listed first in
-a short **Blocking** card. The run group moves behind the PR context when the
-run finishes (after you stop interacting with the rows). The
-description and Status/Merge cards follow. Explain, the video card and finished
-or not-started Fix runs come after that context; their launchers and readable
-output stay visible. The Status card shows the Fix PR execution scope (`--yolo`,
+Expanded details lead with load errors and a compact Status summary, followed by
+**PR assistance** for Explain, questions and focused private reviews, with video
+as an alternate output. A stable **Fix with Copilot** area follows: **Fix PR** and
+**Copy prompt** stay beside the run's status, **Cancel run** and output.
+Completion or recovery does not move this area behind other cards.
+Full approval-provider and failed-gate logs follow these primary tools, then the
+Description, threads, Merge, Policies, Your ADO review and Reviewers cards.
+Reviewers show Approved, Approved with suggestions, Rejected, Waiting for author,
+then No vote, with required reviewers first within each vote. A text summary
+keeps outstanding votes visible; it is not a replacement for policy or merge status.
+The Fix area shows the execution scope (`--yolo`,
 worktree, push limits) once per PR beside **Fix PR**. Retained runs below the
 table and ignored drafts with runs show it once above their run cards. While a
 run is live, **Show run** scrolls to that run, below the column header, and
 focuses its output.
 
-In a narrow window the table scrolls sideways. Once a row's PR title column is
+In a narrow window expanded details and their action buttons fit the available
+width independently of the table, which still scrolls sideways. Once a row's PR title column is
 out of view, a small `!id · repo` cue (long repository names are shortened with …) appears at the top-left of each row so you
 can still tell rows apart. It is display-only and does not take clicks or
 keyboard focus.
@@ -357,7 +360,12 @@ PR selection do not reset the authoritative state or move neighboring rows.
 
 ## Explain this PR
 
-Expand a PR and choose **Explain this PR** in **What does this PR do?** Copilot
+Expand a PR and choose **Explain this PR** in **PR assistance**, near the top
+after the compact Status summary and before full diagnostic logs. **Explain**,
+**Ask**, and **Focused review** are explicit intents in this one workspace;
+video is under **Alternate output**. Generation is deliberate, not automatic.
+The author-written Description
+remains separate from the AI explanation. Copilot
 reads the actual changes and surrounding code, then streams a plain-spoken,
 technically deep explanation: what genuinely improves, concrete before/after
 behavior, architectural/data-flow changes, externally meaningful API or schema
@@ -371,6 +379,28 @@ paths, revision identifiers and omissions separately, collapsed by default.
 Drafts are supported. This is separate from
 **Fix PR**: it does not start WSL, edit files, approve, publish or update ADO.
 
+For Azure Resource Manager changes, Explain asks Copilot to identify deployment-facing
+Bicep, ARM templates and resource/API contract changes, not ARM CPU changes or arbitrary
+JSON/Go edits. A host-rendered **Azure Resource Manager changes** section includes
+**Before** and **After** Bicep, a focused `-`/`+` changed-lines block, improvement and
+risks/uncertainty. Exact Bicep excerpts are checked against the inspected revision
+and the diff or same-file source windows actually delivered to the model.
+Truncated or unchanged source outside those windows cannot ground examples until
+the model requests the relevant source window;
+derived examples are labeled **illustrative**, with resource types, API versions,
+properties and literal values checked against that side's evidence. Neither means a
+deployment was validated. Added/deleted files explicitly mark the missing side.
+When a resource has no counterpart, or the available evidence cannot support Bicep,
+the example says **unavailable** and why rather than inventing a template.
+
+Detected Bicep/template changes cannot finish without recorded examples or explicit
+limitations; one bounded model follow-up requests missing records, otherwise Explain
+fails visibly. Semantic ARM API detection and the benefit/risk assessment still depend
+on the model's inspection and judgment. Unread/omitted changes can hide ARM changes;
+the coverage notes remain authoritative. Non-ARM explanations need no ARM section.
+Fenced code preserves indentation, labels Bicep, and highlights diff additions/removals
+with both signs and theme colors. Retained in-memory output uses the same renderer.
+
 Explain uses the Copilot runtime bundled with the app (native Windows Copilot SDK)
 and its supported default model. That runtime keeps a private Copilot home, so a
 standalone `copilot login` (Windows or WSL) and VS Code's Copilot sign-in are not
@@ -380,7 +410,10 @@ app from the tray and reopen it after installing `gh`. Your ADO token is never
 used for Copilot. Missing sign-in, model/access failures and ADO errors appear
 inline; see [TROUBLESHOOTING.md](../TROUBLESHOOTING.md#explain-says-copilot-is-not-signed-in). One explanation runs at a time; **Cancel** stops it.
 Partial or failed responses are labeled and must not be treated as completed.
-Results stay in memory until the app exits; **Explain again** starts a fresh session.
+Results stay in memory until the app exits; **Explain again** starts a fresh session
+and a distinct result. **Working result** returns to a retained explanation or
+answer without generating it again. Completed explanations retain their exact
+request and source identity, rather than replacing the meaning of earlier answers.
 After a failure or cancellation, choose **Retry Explain** to start over.
 
 If the PR leaves the snapshot, is filtered or hidden, or its row is collapsed,
@@ -411,38 +444,48 @@ forks and repository paths containing traversal, backslashes, control characters
 
 ## PR questions and lens reviews
 
-The expanded Explain card also offers **Ask Copilot about this PR...** and
-**Review with a lens...**. Both open a conversation popup. Ask follow-ups in
-ordinary English, or choose a concrete review goal such as "Do these ARM changes
+Choose **Ask about this explanation** on a completed Explain result to discuss
+that exact answer. The composer remains in the same PR assistance workspace and
+shows the attached explanation's identity and revision. The server resolves this
+reference to its completed output, evidence and coverage, verifies compatible
+pinned source, and includes it as untrusted context in subsequent model turns.
+It does not infer shared context from a PR key or silently substitute the latest
+explanation. Missing, cancelled, incomplete or incompatible source attachments
+fail explicitly. **View attached context** shows what the follow-up refers to.
+
+**Ask** can also start directly, without an explanation. **Focused review** changes
+the composer to **Review focus** and a separate reference input; **Generate private
+findings** never posts comments. Keep both inputs within the combined 4,000-character
+limit. Ask follow-ups in ordinary English, or choose a concrete review goal such as "Do these ARM changes
 work with ACI?" A lens review is read-only and scoped to meaningful bugs or
 compatibility failures supported by inspected code. It does not request stylistic
 polish, unrelated best practices, speculative problems or a general security audit.
 An empty result explicitly says no findings were established in the inspected
 scope; it does not certify the PR as bug-free.
 
-Questions and lens reviews require WSL, Git, Python 3 and the existing per-repo
-WSL checkout mapping in Settings (otherwise `~/clones/<repo>`). The configured
-checkout must have a remote matching the PR's exact organization/project/repository
-and existing Git authentication. No extra tokens or keys are requested.
-The same validated user environment is loaded for each source operation, without
-Fix's WSL Copilot/NVM initialization; questions do not require a WSL Copilot CLI.
-The app fetches the source and target refs into unique private refs and creates
-a detached **no-checkout Git worktree under the Git common metadata directory**.
-It never switches or edits your primary working files. The popup identifies this
-worktree honestly: source tools read its pinned Git objects, not a populated
-filesystem checkout. This avoids executing checkout filters, hooks, submodules,
-skills, build steps or other PR-supplied commands. Symlinks are not followed.
-Local Git replacement objects are disabled so inspected content comes from the
-captured commit, not an unrelated local substitute. The Python reader uses
-isolated mode without site initialization, so working-directory modules,
-`PYTHONPATH`, user packages and site hooks cannot run before its pinned reads.
-Missing directories (including directories absent before a change) are reported
-as explicit omissions, not verified name listings or errors that block follow-ups.
-Copilot gets only bounded host-controlled source readers, not a shell or arbitrary
-filesystem access. Inference still uses the bundled native Windows Copilot
-SDK/default model and the same Windows GitHub CLI sign-in as Explain, separately
-from WSL Git authentication; it does not reuse Fix's broad-permission WSL model
-session.
+Questions and focused reviews run natively on Windows. They need no WSL, Git,
+Python or local checkout mapping. The app reuses its authenticated Azure DevOps
+readers to inspect full source files, callers, tests and directory names beyond
+the diff at the exact captured base, source and target commits. This is server
+source inspection, not an editable worktree. ADO repository Read permission and
+the dashboard's existing ADO sign-in are required; GitHub/Copilot sign-in does
+not grant ADO access.
+
+The model receives only bounded read-only tools, never a shell or arbitrary
+filesystem access. No checkout filters, hooks, submodules, skills or repository
+commands run. Symlinks, binary content, LFS payloads and files exceeding 80,000
+bytes are omitted. Each source window is at most 120 lines and 16,000 characters;
+partial windows are not accepted as exact finding evidence. Source file/directory
+tools share a 120-read conversation budget; the existing diff/context tools keep
+their separate bounds. Missing directories are explicit omissions, not verified
+name listings. Paths and returned commit identities are checked on every read.
+Providing a reference does not enable unrestricted commands or change the
+posting target.
+
+Inference uses the app's bundled Windows Copilot runtime and its default model,
+independently of Fix. Use **Windows GitHub CLI** `gh auth login` for github.com
+and `gh auth status` with a Copilot-enabled account. Standalone or WSL Copilot CLI
+sign-in is not this runtime's authentication. No tokens are copied between hosts.
 
 Follow-ups retain completed turns and the same PR/source identity. Source and
 target refs are rechecked before and after generation and before posting.
@@ -451,15 +494,61 @@ Changes block further answers or posting until **New conversation** captures fre
 revisions. Setup, cancellation and source failures are explicit, with no silent
 remote-only fallback. **PR investigation activity...** reopens an active job even
 after its row is filtered or removed, so its exact cancellation control stays
-reachable. Closing the popup does not cancel the job. The popup survives dashboard
-refreshes and keeps drafts/conversations separate for each PR.
+reachable. Closing **PR assistance** does not cancel the job; **Reopen assistance**
+restores its in-process draft and selected result. Results remain per PR across
+dashboard refreshes. Exact-request cancellation is available during preparation
+and generation, not after a posting request has been dispatched.
+
+Selecting an older review shows a historical result. Only the latest completed
+review is postable; a later completed question makes the old preview read-only
+for posting. Generate updated private findings rather than posting an old answer.
+**Ask/review without this explanation** explicitly clears the attachment; when
+the conversation already exists, it requires a new conversation so retained model
+history does not secretly carry the old explanation.
+
+### Comparing a reference PR
+
+Ask, for example, "Is retry ownership aligned with PR
+https://dev.azure.com/org/project/_git/repo/pullrequest/77?" or put that canonical
+URL in **Reference** for a focused review. The existing authenticated ADO client
+resolves the reference repository and PR even if it is not monitored here, captures
+its separate source/common-base/target revision, and reads its changed text.
+Reference PRs are not posting targets. The result's **Reference PR** disclosure
+names its URL, identity, pinned revisions, inspected diffs, evidence and omissions
+separately from the reviewed target. Additional bounded reference file/directory
+tools let Copilot investigate beyond the captured changes.
+
+Supported URLs are HTTPS canonical
+`dev.azure.com/{org}/{project}/_git/{repo}/pullrequest/{id}` and the corresponding
+`{org}.visualstudio.com` form, including legacy `/DefaultCollection/` paths.
+Legacy URLs are normalized. Supply the canonical PR URL without query strings,
+fragments or userinfo; arbitrary websites, redirects and other URL types are not
+a reference-reading capability. Access denied, missing PRs, unsupported URLs and
+oversized or unreadable reference changes fail explicitly before a comparison
+is accepted. No credentials are sent to a supplied arbitrary host.
+
+At most two reference PRs are retained per conversation. Each is limited to 20
+changed items and a 32,000-character serialized diff package (36,000 characters
+for its initial snapshot). Binary/LFS, folder, missing, truncated or oversized
+reference diffs are rejected rather than treated as inspected evidence. Reference
+file/directory reads retain Explain's bounds below. Reference source and target
+revisions are verified before/after generation and before posting; changes require
+a new conversation. A text quote is user-provided context, not proof that an
+external policy was independently retrieved. All reference/source text remains
+untrusted evidence rather than permission to execute commands or post comments.
 
 Lens findings show the affected path, line and exact inspected source quote.
 Finding bodies and the supplied lens are shown as literal text; comment publication
 escapes Markdown/HTML so image URLs, hidden link targets or markup cannot be posted
 without being visible in the confirmed preview.
 **Nothing is selected or posted automatically.** Select the findings you want,
-choose **Post selected findings...**, and confirm the exact count and PR.
+choose **Post selected findings to ADO...**, and inspect the exact selected
+complete outgoing comments, count, target PR and revision in the confirmation
+dialog. Each literal-text preview includes the full review focus/reference
+(including any supplied private rule quote or URL), revision metadata,
+attribution and reconciliation marker exactly as formatted by the host.
+**Keep private** or Escape cancels without writing and returns focus to the
+posting action; **Confirm selected comments** publishes that selection.
 The host rechecks PR identity and revisions, posts only that selection through
 ADO's thread API, and shows individual confirmed links and posted/failed/uncertain
 counts. Comments include the lens and captured commit IDs. A stable marker
@@ -468,12 +557,26 @@ An uncertain result stays uncertain until checked on ADO, not a fabricated succe
 ADO offers no atomic revision precondition on thread creation, so a change racing
 the final revision check can still make a posted comment refer to older pinned code.
 
-Conversations/results stay in memory until exit. A conversation allows 12 completed
-turns, up to 100,000 serialized prior conversation characters (including findings
-and posting outcomes), 4,000 characters per question,
+Conversations/results stay in memory until exit. Completed Explain registry entries
+are bounded to 12 per PR; already imported contexts remain in that conversation,
+while older unattached results can expire. A conversation allows 12 completed
+turns, up to 100,000 serialized replay characters (including attached explanations,
+reference PR packages, the incoming question, findings and posting outcomes),
+4,000 characters per question and a 32,000-character accepted answer,
 120 local source reads and eight preview findings per lens turn. Local text reads
 are limited to regular tracked files of 80,000 bytes and 120-line/16,000-character
 windows; binary/LFS content is omitted. Shared PR diff limits above still apply.
+If an entire explanation exceeds the serialized budget, **Context package**
+offers server-derived heading sections where available. Choosing one explicitly
+retains its full heading subtree plus the entire host-generated ARM block,
+including Before/After, differences, risks, attribution and original coverage.
+The full explanation remains readable; the accepted answer discloses its actual
+imported package and omitted sections. Estimates exclude JSON/history overhead:
+a selected package may still be too large. Fenced headings, incomplete fences
+and unsectioned text do not become arbitrary substring choices. Changing an
+already imported package requires **New conversation**; a fresh conversation
+cannot fix an explanation or required ARM block that exceeds the budget alone.
+Nothing is silently truncated or answered without the selected context.
 Oversized text windows are reported as omitted without invalidating later source
 reads; select another starting line or file for context.
 Inspected source and unread areas are shown separately. No tests are run by source
@@ -488,7 +591,9 @@ An interrupted app or refused cleanup can leave its worktree registered for insp
 
 ## TikTok This PR
 
-Expand an active, monitored PR and choose **TikTok This PR** beside Explain.
+Expand an active, monitored PR and open **Alternate output: short video explainer,
+with cats** inside PR assistance, then choose **Generate video**. It is a separate
+source/media/voice job, not an automatic narration of the selected explanation.
 Opus 5.5 inspects pinned diffs and full-file repository context, then creates a
 short landscape explainer with natural Azure Speech narration, captions,
 animated before/after or journey visuals, and real cats cast into the explanation.
@@ -559,11 +664,17 @@ The player can read only host-registered completed MP4s, not arbitrary local fil
 
 ## Inline Copilot Fix
 
-**Fix PR** (the sparkle button in each row, also in the expanded Status card)
-starts Copilot in WSL and displays stdout/stderr, status and the actual exit code
+**Fix PR** (the sparkle button in each row, also in the expanded **Fix with Copilot** area)
+starts the Windows Copilot CLI and displays stdout/stderr, status and the actual exit code
 **inline in that PR's expanded details**. It does not copy/paste, focus desktop
 Copilot or open a separate terminal. **Copy prompt** remains available as an
 alternative. Fix is optional: viewing PRs needs neither WSL nor Copilot.
+
+The Fix area briefly explains the default repair scope: merge conflicts,
+failing checks and review feedback. Hover over, focus, or click/tap the small
+**i** control for permissions and limitations; click again or press Escape to
+close it. New runs can be asked to validate, commit and push fixes; earlier runs
+keep their captured scope. Always inspect the output and verify the results.
 
 The generated Fix/Copy prompt is configurable in settings:
 
@@ -614,23 +725,30 @@ read back and compared with the intended body (only line endings/trailing
 newlines normalized). Success responses alone are not proof: one corrective
 retry is allowed; persistent mismatch/unreadability blocks completion/publication.
 
-In **Settings → Copilot in WSL**, select the distribution (blank uses the WSL
-default) and each repository's source directory. Blank directories try
-`~/clones/<repo>`. The app verifies the directory and its exact Azure DevOps
-organization/project/repository remote before launching. WSL needs Git,
-authenticated Copilot CLI and the managed task runner `bgtask`. The shared
-`~/.config/bash/environment` supplies PATH/BASH_ENV. The non-login runner keeps
-existing PATH resolution first, then tries nvm's default and executable
-`~/.local/bin/copilot` if Copilot is still missing. This PATH adjustment is
-inherited by runner children only; no shell configuration is edited.
-`bgtask` also supports the existing `~/go/bin/bgtask` fallback. Preflight errors
-identify the failed dependency or inspection stage and exit code without
-displaying environment values, remote URLs or raw tool errors.
+In **Settings → Copilot on Windows**, select each repository's existing absolute
+local Windows Git checkout root. There is no default `~/clones` directory, WSL
+mapping or Linux tool dependency for new runs. Install Git for Windows and the
+full [Windows Copilot CLI](https://docs.github.com/en/copilot/how-tos/copilot-cli/set-up-copilot-cli/install-copilot-cli)
+(for example `winget install GitHub.Copilot`) with native executables on the
+PATH the app started with. The bundled SDK stdio runtime used by Explain is not
+a prompt CLI. Official npm installs (`npm install -g @github/copilot`, Node 22+
+for installation) are supported by resolving the package's verified native
+executable directly; the launcher never executes arbitrary shell shims.
+
+Authenticate the chosen **Windows CLI** with its own `copilot login` in Windows,
+not a WSL terminal. This host uses the default Windows user profile, not
+Explain's private runtime home; token/custom-home/proxy environment overrides
+are not copied into it. Git fetch authentication is a separate Windows Git
+credential-helper requirement. No global shell/account configuration is changed.
+Missing native directory/executable, incompatible CLI flags, wrong repository
+remote and stale source revision produce explicit errors. Sign-in/entitlement
+failure must be corrected outside this noninteractive panel, never by copying
+tokens or starting real Fix work as a diagnostic.
 
 Inline-run compatibility checks advertised CLI option names, not exact help
 sentences. If a required option is absent, the error lists it. Check
-`copilot --help` in the configured WSL distribution; updating the Windows CLI
-does not change that installation.
+`copilot --no-auto-update --help` for the chosen Windows executable. A working
+help command does not establish sign-in or model entitlement.
 
 Each run gets a unique, isolated worktree/branch at the freshly verified PR source
 commit, not your current/default branch. Main-checkout files, index and branch
@@ -644,12 +762,16 @@ recognized authentication, network, path, conflict, dependency and unsupported
 Git/checkout errors. A changed source commit requires a fresh PR refresh, not a
 retry against an older commit. No existing worktree, branch or lock is removed to
 make setup succeed. A worktree is reported created only after Git creates it.
-When the app-owned run directory exists, its `prepare.stderr` retains the
-original command error with user-only permissions; its path appears in the run
-panel. **This private file may contain remote URLs or authentication details:
-review and redact it before sharing.** Raw Git errors never go into the dashboard
-or lifecycle log. Failed prelaunch records are not resumed.
+When the native run directory exists, its `stdout.log`/`stderr.log` hold
+private CLI output; paths appear in the run panel. **These files may contain
+source, remote URLs or authentication details: review and redact before
+sharing.** Raw Git preparation errors do not go into the dashboard or lifecycle
+log. Failed prelaunch records are not resumed.
 
+Short Fix output uses only the space it needs; longer output scrolls locally.
+Earlier runs retain their status and identity, with output collapsed under
+**Show earlier run output** until opened. Selected or paused output remains
+open when a new main run appears, and explicit history expansion survives rerenders.
 The Fix output panel starts at the latest text and follows new output while you
 are at the bottom. Scroll or select text to read earlier output without being
 pulled back; reaching the bottom resumes following once any text selection is
@@ -681,7 +803,7 @@ prompt's restrictions on merge, approval, auto-complete and policy bypass. Runs
 started by earlier versions keep their original `git push` deny, including when
 resumed; they are not resumed or published retrospectively.
 The worktree is an isolated starting directory, **not a filesystem sandbox**.
-Interactive sign-in is not available in this output panel: authenticate in WSL
+Interactive sign-in is not available in this output panel: authenticate with the chosen Windows CLI
 beforehand, or use Copy prompt with your own interactive workflow. Missing
 CLI/auth/configuration or denied tools are errors, not clipboard-success
 fallbacks. Exit 0 means the CLI exited normally, not that the PR has been verified
@@ -694,9 +816,9 @@ icon keeps spinning for that PR's active run, including while its details are
 collapsed or another PR is open. If output following disconnects, the app keeps
 monitoring the owned task rather than treating the lost output as process exit.
 Completion, failure or cancellation clears the indicator only after the actual
-task ends. For tracked runs, an exited supervisor alone is not enough: the app
-also verifies workspace ownership and a free execution lock before recording
-stopped proof or releasing the same-PR reservation. Unconfirmed liveness stays
+task ends. Native runs require their exact owned job and stopped-descendant
+receipt; an exited leader alone is not successful completion. Legacy runs also
+verify workspace ownership and a free execution lock. Unconfirmed liveness stays
 busy with a needs-attention message and exact-run cancellation controls.
 Reduced-motion mode keeps the same busy state
 and accessible labels without animation. If the PR leaves the active list entirely (completed,
@@ -709,7 +831,13 @@ If the dashboard browser is busy, right-click the native tray icon and select
 not wait for unrelated startup recovery. Cancellation signals the owned
 transport before durable IO; short status/stop/ownership probes have bounded
 response limits independent of transport cancellation callbacks. An explicit
-stop, including one arriving before CLI identity capture, escalates TERM to KILL only for the new
+Windows Stop targets the exact nonce-named owned job, waits for its descendants
+to exit, and retains work/logs. The supervisor assigns the CLI to a kill-on-close
+Windows Job before letting it execute, so descendants belong to that run.
+No process-name killing is used.
+
+**The following transport-control details apply only to legacy WSL runs.**
+Their Stop, including one arriving before CLI identity capture, escalates TERM to KILL only for the old
 runner's own CLI group, after verifying its captured parent/group/session and
 Linux start time; a missing or reused leader is refused. No process-name searches or global WSL
 termination are used. Already-running runners retain their original scripts.
@@ -720,7 +848,7 @@ During blocked or failed shutdown, exact-run controls stay available until
 other service teardown succeeds. A failed exit restores browser output delivery.
 Native Stop entries include the full run ID to distinguish retained runs for
 the same PR. Unreadable history without a PR identity is not an actionable target.
-New launches capture the Linux HOME, XDG config directory and any
+Legacy launches captured the Linux HOME, XDG config directory and any
 `BGTASK_STATE_DIR` override. Launch, status, Stop and log access use that same
 registry even if shell configuration changes. Exact-task control and ownership
 probes do not re-source environment files for these captured runs, so a blocked
@@ -761,7 +889,7 @@ also rejects deferred callbacks without resetting output accounting.
 
 Output uses a grow-on-demand tail buffer with the same retained-output limit,
 so empty or short saved histories do not each reserve the maximum buffer.
-Native delivery keeps at most one
+Browser delivery for both backends keeps at most one
 unacknowledged browser message plus the latest pending snapshot per run. A busy
 browser cannot accumulate an unlimited output/dispatcher queue. Updates
 retain the latest terminal/status update while acknowledgements are missing;
@@ -796,6 +924,34 @@ Records contain captured PR/workspace/task/session identity, task-registry paths
 pointers, not the prompt, output body or credentials. WSL ownership receipts and
 supervised logs remain in their existing run/task locations. Cross-instance
 reservations and run leases prevent duplicate launches, resumes and cleanup.
+
+### New Windows runs
+
+Each new run records `backend: windows-native`; older records without that
+field remain `legacy-wsl`. An out-of-process Windows supervisor owns the CLI
+and its descendants. Closing/exiting the dashboard detaches its follower, not
+the supervisor; reopening verifies the exact run/nonce/session receipt and
+replays its native log. Stop does not require today's CLI installation,
+Git remote or authentication to be the same: it controls the recorded job.
+
+If the app's launching host prohibits detached job breakaway, native launch
+fails explicitly with the Windows error and retains the prepared work. It
+never silently inherits a host lifetime that could kill work on dashboard
+exit, starts WSL, or claims detached execution. Ordinary Start Menu launch
+and a restrictive automation/job host are different environments.
+
+Native worktrees are **always retained**, including successful or cancelled
+runs. There is no automatic clean-worktree removal or crash replay on this
+backend. A lost supervisor's stopped job does not imply successful completion;
+history becomes needs-attention and keeps its saved session/work. A deliberate
+new Fix run is a new captured source/worktree, not a silent resume or replacement
+of old edits. Inspect retained work before choosing how to continue it.
+
+### Legacy WSL runs
+
+These records retain their original transport, environment, authority and
+cleanup/resume rules. Do not start a stopped distro merely to test recovery.
+Missing WSL/tools leave explicit needs-attention history, never a native restart.
 
 Closing the dashboard detaches its output follower instead of cancelling
 the supervised WSL job. Startup checks live bgtask identity/status and reattaches

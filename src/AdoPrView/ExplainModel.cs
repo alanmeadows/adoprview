@@ -18,6 +18,7 @@ internal interface IExplainModel : IAsyncDisposable
 internal sealed class ExplainModel : IExplainModel
 {
     internal static readonly string[] ToolNames = ["list_pr_changes", "read_pr_change", "read_pr_file", "list_pr_directory"];
+    const string ArmToolName = "explain_arm_change";
     readonly SemaphoreSlim _startup = new(1, 1);
     readonly string _home;
     CopilotClient? _client;
@@ -62,8 +63,7 @@ internal sealed class ExplainModel : IExplainModel
         };
     }
 
-    // The isolated runtime home has no Copilot CLI account list, so a standalone `copilot login`
-    // is not found; with token variables stripped, the runtime's `gh auth token` fallback is the working path.
+    // The private runtime home has no standalone CLI account; stripped token variables leave Windows gh authentication.
     internal static string NotSignedInMessage(string? path)
     {
         var gh = (path ?? "").Split(Path.PathSeparator, StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
@@ -98,13 +98,13 @@ internal sealed class ExplainModel : IExplainModel
         finally { _startup.Release(); }
     }
 
-    internal static SessionConfig RestrictedSession(string work, ICollection<AIFunctionDeclaration> tools) => new()
+    internal static SessionConfig RestrictedSession(string work, ICollection<AIFunctionDeclaration> tools, bool arm = false) => new()
     {
         ClientName = "adoprview-explain",
         WorkingDirectory = work,
         ConfigDirectory = work,
         Tools = tools,
-        AvailableTools = [.. ToolNames],
+        AvailableTools = arm ? [.. ToolNames, ArmToolName] : [.. ToolNames],
         Streaming = true,
         EnableConfigDiscovery = false,
         SkipCustomInstructions = true,
@@ -156,6 +156,20 @@ internal sealed class ExplainModel : IExplainModel
                 For a one-line go.mod update, explain what uses that module and whether it builds a product, test tool, utility or pipeline.
                 Never invent fixes, features, security benefits or runtime impact from dependency version numbers.
                 If context cannot establish role or impact, state that uncertainty briefly instead of guessing.
+                Determine whether the PR changes Azure Resource Manager deployment behavior, not ARM CPU architecture.
+                Inspect Bicep and ARM templates, and deployment-facing resource/API contracts (including Go, TypeSpec or OpenAPI)
+                when the actual changed behavior alters Bicep usage. A random JSON/Go edit or an unchanged ARM reference is not sufficient.
+                For every relevant change call explain_arm_change AFTER read_pr_change. The host renders its ARM section; do not duplicate it.
+                Supply focused Before and After Bicep, a description identifying exactly which lines/values differ,
+                and plain-language improvement and risks (compatibility, deployment behavior and uncertainty as relevant).
+                Each side's kind is source (exact contiguous Bicep excerpt), illustrative (Bicep derived from that side's ARM contract),
+                absent (only an added/deleted file), or unavailable (explain missing/truncated evidence or no safe Bicep representation).
+                Label new/deleted resources within existing files honestly; do not invent a counterpart: use unavailable with the reason.
+                Derive only known resource types, API versions, properties and values from inspected evidence. Never invent placeholders
+                that look like known deployment contracts. Illustrative examples are not source from the PR and are not validated deployments.
+                Read before/after full-file windows to recover missing diff context. If evidence still cannot support an example,
+                use unavailable with a specific limitation, not guessed Bicep. Assess only evidenced benefits/risks; state uncertainty.
+                Do not record ARM examples for non-ARM changes. Inspect all potentially relevant inventory pages; report unread coverage.
                 Explain what the code does, not whether the PR should be approved.
                 Fetch all change pages where feasible. Inspect the relevant diffs before making claims; never infer binary or omitted content.
                 For large PRs prioritize central behavior and explicitly identify uninspected changes and uncertainty.
@@ -169,7 +183,7 @@ internal sealed class ExplainModel : IExplainModel
         CopilotTool.DefineTool(handler, new CopilotToolOptions { SkipPermission = true },
             new AIFunctionFactoryOptions { Name = name, Description = description });
 
-    internal static AIFunctionDeclaration[] SourceTools(ExplainContext context, CancellationToken ct) =>
+    internal static AIFunctionDeclaration[] SourceTools(ExplainContext context, CancellationToken ct, bool arm = false) =>
         new AIFunctionDeclaration[]
         {
             Tool(([Description("Zero-based page, 50 changes per page.")] int page) => context.ListChanges(page),
@@ -183,17 +197,23 @@ internal sealed class ExplainModel : IExplainModel
             Tool((string path, [Description("before (common base), after (PR source), or target (captured target tip).")] string side) =>
                     context.ListDirectoryAsync(path, side, ct),
                 ToolNames[3], "List one directory level at a pinned commit to discover README files, components, module consumers and build/pipeline context. Start at / or the changed component. No URLs or repository/revision overrides."),
-        };
+        }.Concat(arm ? new AIFunctionDeclaration[]
+        {
+            Tool((int index, string beforeKind, string before, string afterKind, string after,
+                string improvement, string risks, string difference) =>
+                    context.Arm.Record(index, beforeKind, before, afterKind, after, improvement, risks, difference),
+                ArmToolName, "Record grounded ARM Before/After Bicep and assessment for a previously read change index. Kinds: source, illustrative, absent, unavailable. For unavailable, the corresponding text must explain why. Read-only synthesis; no deployment or ADO write."),
+        } : []).ToArray();
 
     public async Task<string> ExplainAsync(ExplainContext context, Action<string> delta, CancellationToken ct)
     {
         var client = await ClientAsync(ct);
         var work = Path.Combine(_home, "work", Guid.NewGuid().ToString("N"));
         Directory.CreateDirectory(work);
-        var tools = SourceTools(context, ct);
+        var tools = SourceTools(context, ct, arm: true);
         try
         {
-            await using var session = await client.CreateSessionAsync(RestrictedSession(work, tools), ct);
+            await using var session = await client.CreateSessionAsync(RestrictedSession(work, tools, arm: true), ct);
             using var outputLimit = CancellationTokenSource.CreateLinkedTokenSource(ct);
             var outputCharacters = 0;
             var overflow = false;
@@ -202,7 +222,7 @@ internal sealed class ExplainModel : IExplainModel
                 // Fail closed if runtime upgrades ever add ambient tools despite the explicit allowlist.
                 var catalog = await session.Rpc.Tools.GetCurrentMetadataAsync(ct);
                 var names = (catalog.Tools ?? []).Select(t => t.Name).Order(StringComparer.Ordinal).ToArray();
-                if (!names.SequenceEqual(ToolNames.Order(StringComparer.Ordinal)))
+                if (!names.SequenceEqual(ToolNames.Append(ArmToolName).Order(StringComparer.Ordinal)))
                     throw new InvalidOperationException("Copilot did not confirm the restricted read-only tool inventory. No PR content was sent.");
                 AssistantMessageEvent? response;
                 using (session.On<AssistantMessageDeltaEvent>(e =>
@@ -239,6 +259,17 @@ internal sealed class ExplainModel : IExplainModel
                     throw new InvalidOperationException("Copilot returned without inspecting repository context beyond the diff. Retry Explain.");
                 if (string.IsNullOrWhiteSpace(response?.Data.Content))
                     throw new InvalidOperationException("Copilot returned no explanation. Check your Copilot access/model availability and retry.");
+                try { context.Arm.Complete(response.Data.Content, context.Changes); }
+                catch (InvalidOperationException ex)
+                {
+                    response = await session.SendAndWaitAsync(new MessageOptions
+                    {
+                        Prompt = "The ARM output contract is incomplete: " + ex.Message +
+                            " Record grounded examples with explain_arm_change, then return your complete explanation without duplicating the host's ARM section.",
+                    }, TimeSpan.FromSeconds(45), outputLimit.Token);
+                    if (string.IsNullOrWhiteSpace(response?.Data.Content))
+                        throw new InvalidOperationException("Copilot returned no explanation after the ARM evidence follow-up.");
+                }
                 return response.Data.Content.Trim();
             }
             catch (Exception failure)
