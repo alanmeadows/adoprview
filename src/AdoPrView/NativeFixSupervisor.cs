@@ -223,13 +223,18 @@ internal static class NativeFixSupervisor
         catch (Exception ex)
         {
             // A suspended child that could not be assigned must not be leaked.
-            if (child.Process != IntPtr.Zero) TerminateProcess(child.Process, 1);
+            var childStopped = true;
+            if (child.Process != IntPtr.Zero)
+            {
+                TerminateProcess(child.Process, 1);
+                childStopped = WaitForSingleObject(child.Process, 10_000) == 0;
+            }
             if (job is not null && !job.IsInvalid) TerminateJobObject(job, 1);
             if (s is not null && receipt is not null)
             {
                 try
                 {
-                    var stopped = job is null || job.IsInvalid || ActiveProcesses(job) == 0;
+                    var stopped = childStopped && (job is null || job.IsInvalid || ActiveProcesses(job) == 0);
                     Write(FilePath(s, "receipt.json"), receipt with { ExitCode = 1, DescendantsStopped = stopped,
                         Error = ex is Win32Exception w ? $"Native process supervision failed (Windows error {w.NativeErrorCode})." :
                             "Native process supervision failed; inspect the retained run and its logs." });

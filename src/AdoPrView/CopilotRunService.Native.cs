@@ -24,7 +24,10 @@ public sealed partial class CopilotRunService
             var candidate = Path.Combine(directory.Trim('"'), name + ".exe");
             if (Path.IsPathFullyQualified(candidate) && File.Exists(candidate)) return Path.GetFullPath(candidate);
         }
-        throw new RunSetupException($"Native Windows {name}.exe was not found on PATH. Install/sign in with the Windows CLI or configure its absolute executable path; WSL and shell shims are not used for new Fix runs.");
+        var prerequisite = name == "git"
+            ? "Install Git for Windows and make git.exe available on PATH."
+            : "Install the full native Windows Copilot CLI and make copilot.exe available on PATH (or supply an absolute NativeCopilotPath). The bundled SDK runtime and npm shell shims are not prompt executables.";
+        throw new RunSetupException($"Native Windows {name}.exe was not found on PATH. {prerequisite} New Fix runs do not invoke WSL.");
     }
 
     internal static async Task<CopilotProcessResult> NativeCommandAsync(string executable, string directory,
