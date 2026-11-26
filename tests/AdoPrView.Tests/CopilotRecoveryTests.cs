@@ -502,7 +502,7 @@ static class CopilotRecoveryTests
                 var resumed = await Wait(second, run.RunId, s => s.IsActive && s.ResumeAttempts == 1);
                 var launch = f.Transport.Calls.Last(c => c.Operation == "launch");
                 Check(launch.Arguments[8] == (push ? "resume-push" : "resume") && resumed.Request.PushToSource == push &&
-                    resumed.PermissionNotice == (push ? CopilotRunService.PushNotice : CopilotRunService.HeadlessNotice) &&
+                    resumed.PermissionNotice == CopilotRunService.Notice(resumed.Request, "legacy-wsl") &&
                     f.Transport.Calls.Count(c => c.Operation == "stage-prompt") == 1,
                     "Resume changed the run's push authority or replayed a prompt");
             });

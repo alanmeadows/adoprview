@@ -55,6 +55,7 @@ static class CopilotRunTests
 
     public static async Task Run(Func<string, Func<Task>, Task> test)
     {
+        await NativeFixTests.Run(test);
         await test("Copilot native Stop notice retains returned warnings without inventing stop proof", () =>
         {
             var stopped = new CopilotRunState(new string('a', 32), Request(), "cancelled", "", 143, null,
@@ -610,7 +611,7 @@ static class CopilotRunTests
                 Check(launch.Arguments[5] == CopilotRunService.RunnerScript.Replace("\r\n", "\n") && launch.Arguments[8] == (push ? "start-push" : "start") &&
                     CopilotRunService.RunnerScript.Contains("--yolo") && CopilotRunService.RunnerScript.Contains("<&3"),
                     "Generated prompt bypassed the existing permission/stdin launch path or lost its push authority");
-                Check(service.Get(run.RunId)!.PermissionNotice == (push ? CopilotRunService.PushNotice : CopilotRunService.HeadlessNotice) &&
+                Check(service.Get(run.RunId)!.PermissionNotice == CopilotRunService.Notice(request, "legacy-wsl") &&
                     service.Get(run.RunId)!.Output.StartsWith(service.Get(run.RunId)!.PermissionNotice), "Visible permission notice misstates push authority");
                 fake.Finish(0);
                 await Wait(service, run.RunId, s => !s.IsActive);

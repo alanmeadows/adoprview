@@ -20,6 +20,7 @@ public sealed record CopilotRunRequest(
     public string? WslPath => Directory;
     public string? WslDistribution => Distro;
     public string? AdditionalInstructions { get; init; }
+    public string? NativeCopilotPath { get; init; }
 }
 
 public sealed record CopilotRunState(
@@ -34,7 +35,7 @@ public sealed record CopilotRunState(
     public string PrKey => Request.PrKey;
     public int PrId => Request.PrId;
     public bool IsActive => Status is "preparing" or "running" or "recovering" or "cancelling";
-    public string PermissionNotice => CopilotRunService.Notice(Request);
+    public string PermissionNotice => CopilotRunService.Notice(Request, Backend);
     public string Message => Error ?? (Status == "completed" ? "Copilot exited; inspect changes and validate the fix." : PermissionNotice);
     public string? Distro => Distribution;
     public string? SourceDirectory => SourcePath;
@@ -46,6 +47,7 @@ public sealed record CopilotRunState(
     public long Revision { get; init; }
     public bool MayBeRunning { get; init; }
     public string? PreparationLogPath { get; init; }
+    public string Backend { get; init; } = "legacy-wsl";
 }
 
 public sealed record CopilotProcessRequest(
@@ -69,7 +71,7 @@ public sealed partial class CopilotRunService : IAsyncDisposable
         "Each deliberate Fix PR run uses --yolo to allow tools, paths and URLs without confirmation; " +
         "global Copilot settings are unchanged. Work starts in the isolated PR worktree, but this is not a filesystem sandbox. " +
         "Existing push/merge command denies and the prompt's no-approval/policy-bypass boundaries remain. " +
-        "Authenticate in WSL first if needed. " +
+        "Authenticate with the native Windows Copilot CLI first if needed. " +
         "A zero exit code means the run ended, not that the PR fix was verified.";
     public const string PushNotice =
         "Inline Copilot is non-interactive: it cannot show permission or sign-in dialogs. " +
@@ -78,9 +80,14 @@ public sealed partial class CopilotRunService : IAsyncDisposable
         "This run may commit validated fixes and ordinary-push them to the PR's captured source branch; git push is not denied, " +
         "so that branch-only/no-force limit is a prompt instruction, not app-enforced. " +
         "Merge and PR-update command denies and the prompt's no-approval/policy-bypass boundaries remain. " +
-        "Authenticate in WSL first if needed. " +
+        "Authenticate with the native Windows Copilot CLI first if needed. " +
         "A zero exit code means the run ended, not that the PR fix was verified or published.";
-    public static string Notice(CopilotRunRequest request) => request.PushToSource ? PushNotice : HeadlessNotice;
+    public static string Notice(CopilotRunRequest request, string? backend = null)
+    {
+        var notice = request.PushToSource ? PushNotice : HeadlessNotice;
+        return backend == "legacy-wsl" ? notice.Replace("native Windows Copilot CLI",
+            "configured legacy WSL Copilot CLI", StringComparison.Ordinal) : notice;
+    }
 
     static string ShellQuote(string value) => "'" + value.Replace("'", "'\\''") + "'";
 
@@ -109,6 +116,7 @@ public sealed partial class CopilotRunService : IAsyncDisposable
     readonly object gate = new();
     readonly object notificationGate = new();
     readonly ICopilotRunTransport transport;
+    readonly bool nativeNewRuns;
     readonly DurableStore? store;
     readonly Dictionary<string, Entry> runs = new(StringComparer.Ordinal);
     readonly HashSet<string> activePrs = new(StringComparer.OrdinalIgnoreCase);
@@ -120,6 +128,7 @@ public sealed partial class CopilotRunService : IAsyncDisposable
     public CopilotRunService(ICopilotRunTransport? transport = null, string? stateDirectory = null)
     {
         this.transport = transport ?? new WslCopilotRunTransport();
+        nativeNewRuns = transport is null;
         if (stateDirectory is not null || transport is null)
             store = new DurableStore(stateDirectory ?? Path.Combine(SettingsStore.Dir, "CopilotRuns"));
         notifications = new Timer(_ => FlushNotifications(), null, 100, 100);
@@ -132,7 +141,7 @@ public sealed partial class CopilotRunService : IAsyncDisposable
 
     public CopilotRunState Start(CopilotRunRequest request)
     {
-        Validate(request);
+        Validate(request, nativeNewRuns);
         Entry entry;
         CopilotRunState initial;
         lock (gate)
@@ -141,8 +150,9 @@ public sealed partial class CopilotRunService : IAsyncDisposable
             if (activePrs.Contains(PrIdentity(request)))
                 throw new InvalidOperationException("A Copilot run for this PR is already active or its stop could not be confirmed.");
             var id = Guid.NewGuid().ToString("N");
-            entry = new(new(id, request, "preparing", Notice(request) + "\n", null, null,
-                null, null, null, "not-created", DateTimeOffset.UtcNow, null) { SessionId = Guid.NewGuid().ToString() });
+            entry = new(new(id, request, "preparing", Notice(request, nativeNewRuns ? "windows-native" : "legacy-wsl") + "\n", null, null,
+                null, null, null, "not-created", DateTimeOffset.UtcNow, null)
+                { SessionId = Guid.NewGuid().ToString(), Backend = nativeNewRuns ? "windows-native" : "legacy-wsl" });
             activePrs.Add(PrIdentity(request));
         }
         try
@@ -155,7 +165,7 @@ public sealed partial class CopilotRunService : IAsyncDisposable
                 initial = entry.State;
                 runs.Add(entry.State.RunId, entry);
                 // Schedule outside the caller's UI turn; even fake transports may complete synchronously.
-                entry.Completion = Task.Run(() => ExecuteAsync(entry));
+                entry.Completion = Task.Run(() => nativeNewRuns ? ExecuteNativeAsync(entry) : ExecuteAsync(entry));
             }
         }
         catch
@@ -225,6 +235,12 @@ public sealed partial class CopilotRunService : IAsyncDisposable
         Update(entry, s => s.IsActive ? s with { Status = "cancelling" } : s);
         if (store is not null) store.RequestCancel(runId);
         await entry.Completion.ConfigureAwait(false);
+        if (entry.State.Backend == "windows-native")
+        {
+            if (entry.State.MayBeRunning || entry.UncertainStop || entry.State.Status == "needs-attention")
+                await RetryNativeStopAsync(entry).ConfigureAwait(false);
+            return Get(runId);
+        }
         if (store is not null && !wasActive && (entry.State.Status == "needs-attention" || entry.State.MayBeRunning || entry.UncertainStop))
         {
             entry.DriverLease ??= store.TryLease(entry.State.RunId);
@@ -367,7 +383,7 @@ public sealed partial class CopilotRunService : IAsyncDisposable
     static string PrIdentity(CopilotRunRequest r) =>
         string.Join("\0", r.Organization, r.Project, r.Repository, r.PrId.ToString(System.Globalization.CultureInfo.InvariantCulture));
 
-    static void Validate(CopilotRunRequest r)
+    static void Validate(CopilotRunRequest r, bool native = false)
     {
         ArgumentNullException.ThrowIfNull(r);
         if (r.PrId <= 0 || string.IsNullOrWhiteSpace(r.PrKey) || string.IsNullOrWhiteSpace(r.Organization) ||
@@ -377,6 +393,16 @@ public sealed partial class CopilotRunService : IAsyncDisposable
         if (!Regex.IsMatch(r.SourceCommit ?? "", @"\A(?:[0-9a-fA-F]{40}|[0-9a-fA-F]{64})\z") ||
             !(r.SourceRef ?? "").StartsWith("refs/heads/", StringComparison.Ordinal))
             throw new InvalidOperationException("A fresh PR source branch ref and exact source commit are required before launching.");
+        if (native)
+        {
+            foreach (var value in new[] { r.PrKey, r.Organization, r.Project, r.Repository, r.SourceRef, r.Directory, r.NativeCopilotPath })
+                if (value is not null && (value.Contains('\0') || value.Any(c => c is '\r' or '\n')))
+                    throw new InvalidOperationException("PR identity and Windows paths cannot contain control characters.");
+            if (string.IsNullOrWhiteSpace(r.Directory) || !Path.IsPathFullyQualified(r.Directory) ||
+                r.Directory.StartsWith(@"\\", StringComparison.Ordinal))
+                throw new InvalidOperationException("Configure an absolute local Windows repository directory for this PR. WSL paths are only supported for legacy saved runs.");
+            return;
+        }
         foreach (var value in new[] { r.PrKey, r.Organization, r.Project, r.Repository, r.SourceRef, r.WslPath, r.WslDistribution })
             if (value is not null && (value.Contains('\0') || value.Any(c => c is '\r' or '\n')))
                 throw new InvalidOperationException("PR identity and WSL settings cannot contain control characters.");
@@ -925,6 +951,7 @@ public sealed partial class CopilotRunService : IAsyncDisposable
         public string TaskName => "ado-prview-" + State.RunId;
         public string? RunDirectory;
         public EnvironmentInfo? Environment;
+        public NativeFixSupervisor.Specification? Native;
         public bool TaskConfirmedStopped, UncertainStop, Dirty = true;
         public bool Detaching, LaunchIntent;
         public bool HistoryReplayStarted, HistoryReplayCompleted;
