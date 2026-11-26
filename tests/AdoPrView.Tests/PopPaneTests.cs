@@ -337,6 +337,41 @@ static class PopPaneTests
                         record.GetProperty("reason").GetString()!.Contains(";http-503;")) &&
                         records.Any(record => Event(record) == "pop-popup-initialization-completed"),
                         "Navigation outcome or popup initialization missing from trace");
+
+                    policyFailure = null;
+                    var inCallback = false;
+                    var warnings = 0;
+                    using var failedLog = new AppDiagnostics(Path.Combine(diagnosticDirectory, "write-failure"),
+                        ex => AdoPrView.Program.ReportDiagnosticFailure(ex, window.Dispatcher, message =>
+                        {
+                            Check(!inCallback, "Diagnostic warning opened inside the WebView callback");
+                            Check(!message.Contains("SECRET") && message.Contains("could not persist"), "Unsafe or missing failure notification");
+                            warnings++;
+                        }), maxBytes: 1);
+                    var previousLog = Path.Combine(failedLog.DirectoryPath, "events.previous.jsonl");
+                    File.Delete(previousLog);
+                    Directory.CreateDirectory(previousLog); // Force the next rotation to fail inside the actual callback.
+                    var writeFailed = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+                    void FailWrite(object? sender, object args)
+                    {
+                        inCallback = true;
+                        try
+                        {
+                            Check(!failedLog.Record("pop-website-close-requested"), "Blocked diagnostic write reported success");
+                            Check(warnings == 0, "Diagnostic warning was not deferred");
+                            writeFailed.TrySetResult();
+                        }
+                        finally { inCallback = false; }
+                    }
+                    core.WindowCloseRequested += FailWrite;
+                    await core.CallDevToolsProtocolMethodAsync("Page.resetNavigationHistory", "{}");
+                    await core.ExecuteScriptAsync("setTimeout(() => window.close(), 20);");
+                    await writeFailed.Task.WaitAsync(TimeSpan.FromSeconds(15));
+                    core.WindowCloseRequested -= FailWrite;
+                    await window.Dispatcher.InvokeAsync(() => { }, DispatcherPriority.ApplicationIdle);
+                    Check(warnings == 1 && !failedLog.Healthy && !failedLog.Record("another-write") &&
+                        closeRequests == 0 && window.IsVisible && dashboard.IsVisible,
+                        "Deferred diagnostic failure was repeated, hidden or closed the dashboard");
                 }
                 catch (Exception ex) { failure = ex; }
                 finally

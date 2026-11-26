@@ -518,6 +518,11 @@ returns its opener to a synthetic PR page, and closes. The dashboard must stay
 visible; this return must not infer a satisfied PoP policy. Trace assertions
 check deferred close/disposal ordering, stale-selection decisions, safe handled
 exception structure and omission of synthetic auth-query/fragment canaries.
+It also forces a diagnostic rotation write failure inside a real WebView
+website-close callback, exercises the production warning-dispatch helper with
+a synthetic notification sink, and verifies exactly one notification after
+the callback returns while the dashboard stays visible. Trace writes still
+flush synchronously; the modal failure warning is deferred to the UI dispatcher.
 
 The production PoP pane writes `pop-*` events into the same bounded
 `Diagnostics\<session>\events.jsonl` as the main window. Each record identifies
