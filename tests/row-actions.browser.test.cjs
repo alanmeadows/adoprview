@@ -68,7 +68,7 @@ test('Additional Fix fields are independently editable and restored in the real 
     await send('Page.navigate', { url: pathToFileURL(root).href + '?mock=1' });
     await evaluate(`new Promise((resolve,reject)=>{
       const deadline=Date.now()+10000;
-      const check=()=>window.__ready?resolve():Date.now()>deadline?reject(Error('UI did not boot')):setTimeout(check,20);check();
+      const check=()=>window.__ready?resolve():Date.now()>deadline?reject(Error('UI did not boot: '+document.querySelector('.boot-error')?.textContent)):setTimeout(check,20);check();
     })`);
     await evaluate(`
       S.snap.approvalProvider=null;
@@ -241,7 +241,7 @@ test('real row hit testing and action identity across refreshes', { timeout: 900
     await send('Page.navigate', { url: pathToFileURL(root).href + '?mock=1' });
     await evaluate(`new Promise((resolve,reject)=>{
       const deadline=Date.now()+10000;
-      const check=()=>window.__ready?resolve():Date.now()>deadline?reject(Error('UI did not boot')):setTimeout(check,20);check();
+      const check=()=>window.__ready?resolve():Date.now()>deadline?reject(Error('UI did not boot: '+document.querySelector('.boot-error')?.textContent)):setTimeout(check,20);check();
     })`);
     await evaluate(`
       window.baseline=structuredClone(S.snap);
@@ -437,17 +437,27 @@ test('real row hit testing and action identity across refreshes', { timeout: 900
           button.click();return button.disabled;
         })()`),true);
         assert.equal((await calls()).length,1);
+        assert.equal(await evaluate(`!!document.querySelector('[data-key="${key}"] .explain-waiting:not([hidden]) .video-spinner')`),true);
+        await evaluate(`window.explainWaiting=document.querySelector('[data-key="${key}"] .explain-waiting');
+          window.explainOutput=document.querySelector('[data-key="${key}"] .explain-output');
+          window.explainViewport=document.querySelector('main').scrollTop;`);
         await evaluate(`updateExplanation({...S.explanations.get('${key}'),sequence:++window.explainSequence,
           output:'Partial <script>window.explainInjected=true</script>',coverage:['Binary payload omitted'],
           evidence:['after: /README.md, lines 1-12.']});`);
         assert.equal(await evaluate(`window.originalFix===document.querySelector('[data-key="${key}"] .row [data-act="triage"]')`),true);
         assert.equal(await evaluate('window.explainInjected===true'),false);
+        assert.equal(await evaluate(`window.explainOutput===document.querySelector('[data-key="${key}"] .explain-output') &&
+          window.explainWaiting===document.querySelector('[data-key="${key}"] .explain-waiting') &&
+          window.explainOutput.hidden && window.explainOutput.textContent==='' &&
+          document.querySelector('main').scrollTop===window.explainViewport`),true);
         assert.equal(await evaluate(`document.querySelector('[data-key="${key}"] .explain-details').open`),false);
         await click(await point(key,'.detail [data-act="cancelExplanation"]')); await frame();
         const cancel=(await calls()).find(c=>c.method==='cancelExplanation');
         assert.equal(cancel.key,key);
         assert.equal(cancel.requestId,'offline-explain-1');
         assert.match(await evaluate(`document.querySelector('[data-key="${key}"] [data-act="explainPr"]').textContent`),/Retry Explain/);
+        assert.equal(await evaluate(`!document.querySelector('[data-key="${key}"] .explain-waiting:not([hidden])') &&
+          document.querySelector('[data-key="${key}"] .explain-output').textContent===''`),true);
         await click(await point(key,'.detail [data-act="explainPr"]')); await frame();
         await evaluate(`window.currentExplain=S.explanations.get('${key}');
           updateExplanation({...window.currentExplain,sequence:++window.explainSequence,status:'completed',
@@ -475,9 +485,41 @@ test('real row hit testing and action identity across refreshes', { timeout: 900
           status:'failed',message:'The PR revisions changed. Retry Explain.',output:'partial response'});`);
         assert.match(await evaluate(`document.querySelector('[data-key="${key}"] .explain-status').textContent`),/revisions changed/);
         assert.match(await evaluate(`document.querySelector('[data-key="${key}"] [data-act="explainPr"]').textContent`),/Retry Explain/);
+        assert.equal(await evaluate(`!document.querySelector('[data-key="${key}"] .explain-waiting:not([hidden])') &&
+          document.querySelector('[data-key="${key}"] .explain-output').hidden &&
+          !document.querySelector('[data-key="${key}"] .explanation').textContent.includes('partial response')`),true);
         assert.deepEqual((await calls()).map(c=>c.method),['explainPr','cancelExplanation','explainPr']);
       }
       await send('Emulation.setDeviceMetricsOverride', {width:1600,height:1000,deviceScaleFactor:1,mobile:false});
+    });
+
+    await t.test('Explain completed reading position selection and output identity survive updates and rerenders', async () => {
+      const key='sample-service-id:101';
+      await reset(true);
+      await evaluate(`S.expanded.add('${key}');renderRows();
+        updateExplanation({key:'${key}',requestId:'reading-final',sequence:++window.explainSequence,status:'completed',
+          message:'Ready',output:Array.from({length:80},(_,i)=>'Paragraph '+i+': completed prose.').join('\\n\\n'),
+          coverage:[],revision:{iteration:4,sourceCommit:'a'.repeat(40),baseCommit:'b'.repeat(40)}});
+        window.readingOutput=document.querySelector('[data-key="${key}"] .explain-output');
+        window.readingOutput.scrollTop=200;
+        window.readingNode=window.readingOutput.querySelector('p').firstChild;
+        window.getSelection().setBaseAndExtent(window.readingNode,0,window.readingNode,11);
+        window.readingSelection=window.getSelection().toString();
+        window.readingTop=window.readingOutput.scrollTop;
+        window.readingViewport=document.querySelector('main').scrollTop;`);
+      for (const mutation of [
+        `updateExplanation({...S.explanations.get('${key}'),sequence:++window.explainSequence,message:'Still ready'});`,
+        `renderInvestigation('${key}');`,
+        'renderRows();',
+      ]) {
+        await evaluate(mutation);
+        assert.equal(await evaluate(`window.readingOutput===document.querySelector('[data-key="${key}"] .explain-output') &&
+          window.readingOutput.scrollTop===window.readingTop &&
+          window.getSelection().toString()===window.readingSelection &&
+          window.getSelection().anchorNode===window.readingNode &&
+          document.querySelector('main').scrollTop===window.readingViewport`),true,mutation);
+      }
+      await evaluate(`window.getSelection().removeAllRanges();`);
     });
 
     await t.test('Explain ARM Bicep preserves indentation, safe labels and highlighted differences through retained output', async () => {
@@ -686,6 +728,8 @@ test('real row hit testing and action identity across refreshes', { timeout: 900
               message:'Restored synthetic preparation',output:'Restored partial output',coverage:[]});renderRows();
             window.restoredCancel=document.querySelector('#explanationShelf [data-act="cancelExplanation"]');
             window.restoredOutput=document.querySelector('#explanationShelf .explain-output');`);
+          assert.equal(await evaluate(`window.restoredOutput.hidden && window.restoredOutput.textContent==='' &&
+            !!document.querySelector('#explanationShelf .explain-waiting:not([hidden]) .video-spinner')`), true);
           assert.match(await evaluate("document.querySelector('.explanation-identity').textContent"), /sample-service-id:101/);
           await evaluate(`updateExplanation({...S.explanations.get('${key}'),sequence:2,status:'running',
             revision:{repo:'sample-service',id:101,iteration:4,sourceCommit:'a'.repeat(40),baseCommit:'b'.repeat(40)}});`);
@@ -702,7 +746,7 @@ test('real row hit testing and action identity across refreshes', { timeout: 900
           await measure('restored-identity');
         });
         await t.test('retained Explain focusout flushes the latest queued snapshot for Cancel and output', async () => {
-          for (const selector of ['[data-act="cancelExplanation"]', '.explain-output']) {
+          for (const selector of ['[data-act="cancelExplanation"]', '.explain-details summary']) {
             await setup();
             await evaluate(`setSnapshot({...S.snap,prs:S.snap.prs.filter(p=>p.key!=='${key}')});renderRows();
               document.querySelector('#search').focus();`);
@@ -751,7 +795,8 @@ test('real row hit testing and action identity across refreshes', { timeout: 900
             await evaluate('setSnapshot(window.returnSnap);renderRows();');
             await click(await point(key, '.row .title')); await frame();
             assert.equal(await evaluate(`document.querySelector('[data-explain-key="${key}"] .explain-output').textContent.trimEnd()`),
-              'Retained synthetic ' + status + ' output');
+              status === 'completed' ? 'Retained synthetic completed output' : '');
+            assert.equal(await evaluate(`document.querySelector('[data-explain-key="${key}"] .explain-output').hidden`), status !== 'completed');
             assert.equal(await evaluate(`document.querySelector('[data-explain-key="${key}"] [data-act="cancelExplanation"]').hidden`), true);
           }
           await measure('returned-terminal');

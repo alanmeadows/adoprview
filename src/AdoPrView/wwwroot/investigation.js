@@ -136,6 +136,7 @@ function renderAssistanceContent(key) {
       `<button type="button" class="mini" data-assistance-intent="${kind}" aria-pressed="${d.kind === kind}" ${busy ? 'disabled' : ''}>${label}</button>`).join('')}</div>
     <p class="small">Read-only understanding and private review. Results and drafts last while this app is running; they are not saved across app exit. Fix is a separate code-changing run.</p>
     ${options.length ? `<label class="small">Working result <select data-assistance-result data-inv="result">${options.map(o => `<option value="${esc(o.id)}" ${o.id === selected ? 'selected' : ''}>${esc(o.label)}</option>`).join('')}${d.selected && !result ? '<option selected value="">Selected result expired</option>' : ''}</select></label>` : ''}
+    ${isBusy(key, 'explainPr') && !activeExplain ? '<p class="explain-waiting small" role="status"><span class="video-spinner" aria-hidden="true"></span>Requesting explanation...</p>' : ''}
     ${activeExplain && result?.explanation?.requestId !== latestExplanation.requestId ? '<p class="small" role="status">A new explanation is running; the selected result remains unchanged.</p>' : ''}
     ${activeExplain && d.kind !== 'explain' ? `<p class="small" role="status">${esc(latestExplanation.message)} <button class="mini" data-act="cancelExplanation" data-request-id="${esc(latestExplanation.requestId)}" ${latestExplanation.status === 'cancelling' ? 'disabled' : ''}>Cancel Explain</button></p>` : ''}
     ${investigationActive(r) && d.kind === 'explain' ? `<p class="small" role="status">${esc(r.message)}
@@ -146,12 +147,13 @@ function renderAssistanceContent(key) {
     ${explanation ? `<div class="assistance-explanation" data-result-request="${esc(explanation.requestId)}">
       <p class="explain-status small${explanation.status === 'failed' ? ' error' : ''}" role="status">${esc(explanation.message)}</p>
       <p class="explain-revision small">${esc(explanationRevision(explanation))} · result ${esc(explanation.requestId.slice(0, 12))}</p>
-      <div class="explain-output md" tabindex="0" aria-label="PR explanation" ${explanation.output ? '' : 'hidden'}>${explanationBody(explanation)}</div>
+      <p class="explain-waiting small" role="status" ${explanationActive(explanation) ? '' : 'hidden'}><span class="video-spinner" aria-hidden="true"></span>Waiting for the completed explanation...</p>
+      <div class="explain-output md" data-explanation-result="${explanation.status === 'completed' ? esc(explanation.requestId) : ''}" tabindex="0" aria-label="PR explanation" ${explanation.status === 'completed' && explanation.output ? '' : 'hidden'}>${explanationBody(explanation)}</div>
       <details class="explain-details"><summary>Evidence and coverage</summary><p class="small">AI-generated; verify against the code. This does not start Fix or change ADO.</p>
         <div class="explain-evidence">${(explanation.evidence || []).map(x => `<p class="small">${esc(x)}</p>`).join('')}</div>
         <div class="explain-coverage">${(explanation.coverage || []).map(x => `<p class="small">${esc(x)}</p>`).join('')}</div></details>
       <p><button type="button" class="mini" data-assistance-attach="${esc(explanation.requestId)}" ${explanation.status !== 'completed' || !explanation.revision || busy ? 'disabled' : ''}>Ask about this explanation</button></p>
-      ${explanation.status !== 'completed' ? '<p class="small">Partial, failed or cancelled output is not a completed context attachment.</p>' : ''}
+      ${explanation.status !== 'completed' ? '<p class="small">Only a completed explanation is displayed and available as a context attachment.</p>' : ''}
     </div>` : result?.turn ? `<div class="explain-output investigation-transcript" data-inv="transcript" tabindex="0" aria-label="Selected assistance result">${renderInvestigationTurn(key, result.turn)}</div>` : d.selected ? '<p class="error">This selected result is no longer available. Select an available result; no substitute context has been attached.</p>' : ''}
     ${d.kind !== 'explain' ? `<form data-inv="form">
       <div class="assistance-context small">
@@ -226,12 +228,14 @@ function renderInvestigation(key = investigationKey) {
   if (!key) return;
   const card = assistanceCard(key), content = card?.querySelector('.assistance-content');
   if (!content) return;
+  const outputs = captureExplanationOutputs();
   rememberAssistancePosition(key);
   const focused = content.contains(document.activeElement) ? document.activeElement : null;
   const role = focused?.dataset.inv;
   const start = focused?.selectionStart, end = focused?.selectionEnd;
   const openDetails = [...content.querySelectorAll('details')].filter(x => x.open).map(x => x.querySelector('summary')?.textContent);
   content.innerHTML = renderAssistanceContent(key);
+  restoreExplanationOutputs(outputs);
   for (const details of content.querySelectorAll('details')) if (openDetails.includes(details.querySelector('summary')?.textContent)) details.open = true;
   const position = assistanceDraft(key).positions.get(assistanceSelection(key)?.id || assistanceDraft(key).selected);
   const output = content.querySelector(':scope > .assistance-explanation > .explain-output, :scope > .investigation-transcript');
@@ -241,6 +245,33 @@ function renderInvestigation(key = investigationKey) {
     next?.focus({ preventScroll: true });
     if (typeof start === 'number' && next?.setSelectionRange) next.setSelectionRange(start, end);
   }
+}
+
+function captureExplanationOutputs() {
+  const outputs = [...document.querySelectorAll('.explain-output[data-explanation-result]')]
+    .filter(el => el.dataset.explanationResult)
+    .map(el => ({ el, key: el.closest('.explanation').dataset.explainKey,
+      id: el.dataset.explanationResult, html: el.innerHTML, top: el.scrollTop, left: el.scrollLeft }));
+  const selection = window.getSelection();
+  const selected = selection?.isCollapsed === false && outputs.some(({ el }) =>
+    el.contains(selection.anchorNode) && el.contains(selection.focusNode));
+  return { outputs, focus: document.activeElement, selection: selected ? {
+    anchor: selection.anchorNode, anchorOffset: selection.anchorOffset,
+    focus: selection.focusNode, focusOffset: selection.focusOffset,
+  } : null };
+}
+
+function restoreExplanationOutputs(saved) {
+  for (const placeholder of document.querySelectorAll('.explain-output[data-explanation-result]')) {
+    const existing = saved.outputs.find(x => x.key === placeholder.closest('.explanation').dataset.explainKey &&
+      x.id === placeholder.dataset.explanationResult && x.html === placeholder.innerHTML);
+    if (!existing) continue;
+    if (existing.el !== placeholder) placeholder.replaceWith(existing.el);
+    existing.el.scrollTop = existing.top;
+    existing.el.scrollLeft = existing.left;
+    if (saved.focus === existing.el) existing.el.focus({ preventScroll: true });
+  }
+  restoreRunOutputSelection(saved.selection);
 }
 
 function updateInvestigation(r) {
