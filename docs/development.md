@@ -516,6 +516,8 @@ These synthetic checks do not establish that the full tenant sign-in flow in
 The popup also follows an intercepted HTTP redirect to a synthetic callback,
 returns its opener to a synthetic PR page, and closes. The dashboard must stay
 visible; this return must not infer a satisfied PoP policy. Trace assertions
+require successful HTTP 200 navigation to the exact synthetic callback and
+opener return pages, not just a navigation-completed event. They also
 check deferred close/disposal ordering, stale-selection decisions, safe handled
 exception structure and omission of synthetic auth-query/fragment canaries.
 It also forces a diagnostic rotation write failure inside a real WebView

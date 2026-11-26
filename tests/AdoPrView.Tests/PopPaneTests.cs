@@ -240,8 +240,7 @@ static class PopPaneTests
                         {
                             child.Navigate("https://login.microsoftonline.com/offline-redirect?state=SECRET-STATE");
                             return Task.CompletedTask;
-                        });
-                        Check(new Uri(child.Source).AbsolutePath == "/offline-callback", "Synthetic successful redirect did not return");
+                        }, expectedPage: "https://login.microsoftonline.com/offline-callback");
                         var traceStart = ReadTrace(diagnostics).Length;
                         var popupClosed = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
                         child.WindowCloseRequested += (_, _) =>
@@ -252,7 +251,7 @@ static class PopPaneTests
                         await Navigate(core, async () =>
                         {
                             await child.ExecuteScriptAsync("setTimeout(() => { window.opener.location.replace('https://dev.azure.com/offline-return?code=SECRET-CODE'); window.close(); window.close(); }, 20);");
-                        });
+                        }, expectedPage: "https://dev.azure.com/offline-return");
                         await popupClosed.Task.WaitAsync(TimeSpan.FromSeconds(15));
                         await window.Dispatcher.InvokeAsync(() => { }, DispatcherPriority.ApplicationIdle);
                         Check(popupView!.IsDisposed && closeRequests == 0 && window.IsVisible &&
@@ -433,12 +432,21 @@ static class PopPaneTests
             "Synthetic website close was followed by a host close/hide");
     }
 
-    static async Task Navigate(CoreWebView2 core, Func<Task> navigate)
+    static async Task Navigate(CoreWebView2 core, Func<Task> navigate, string? expectedPage = null)
     {
-        var ready = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
-        void Completed(object? sender, CoreWebView2NavigationCompletedEventArgs e) => ready.TrySetResult();
+        var ready = new TaskCompletionSource<(bool Success, int Status, string Source)>(TaskCreationOptions.RunContinuationsAsynchronously);
+        void Completed(object? sender, CoreWebView2NavigationCompletedEventArgs e) =>
+            ready.TrySetResult((e.IsSuccess, e.HttpStatusCode, core.Source));
         core.NavigationCompleted += Completed;
-        try { await navigate(); await ready.Task.WaitAsync(TimeSpan.FromSeconds(20)); }
+        try
+        {
+            await navigate();
+            var completed = await ready.Task.WaitAsync(TimeSpan.FromSeconds(20));
+            if (expectedPage is not null)
+                Check(completed.Success && completed.Status == 200 &&
+                    new Uri(completed.Source).GetLeftPart(UriPartial.Path) == expectedPage,
+                    "Expected synthetic page did not complete a successful HTTP 200 navigation");
+        }
         finally { core.NavigationCompleted -= Completed; }
     }
 
