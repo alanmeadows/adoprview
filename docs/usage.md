@@ -371,10 +371,14 @@ paths, revision identifiers and omissions separately, collapsed by default.
 Drafts are supported. This is separate from
 **Fix PR**: it does not start WSL, edit files, approve, publish or update ADO.
 
-Explain uses the native Windows Copilot SDK and its supported default model.
-Sign in with the native Windows Copilot CLI beforehand; the app reuses supported
-Copilot authentication, not your ADO token. Missing sign-in, model/access failures
-and ADO errors appear inline. One explanation runs at a time; **Cancel** stops it.
+Explain uses the Copilot runtime bundled with the app (native Windows Copilot SDK)
+and its supported default model. That runtime keeps a private Copilot home, so a
+standalone `copilot login` (Windows or WSL) and VS Code's Copilot sign-in are not
+used. Sign in with the **Windows GitHub CLI** (`gh auth login`) using an account
+with Copilot access; `gh` must be on the PATH ADO PR View started with. Exit the
+app from the tray and reopen it after installing `gh`. Your ADO token is never
+used for Copilot. Missing sign-in, model/access failures and ADO errors appear
+inline; see [TROUBLESHOOTING.md](../TROUBLESHOOTING.md#explain-says-copilot-is-not-signed-in). One explanation runs at a time; **Cancel** stops it.
 Partial or failed responses are labeled and must not be treated as completed.
 Results stay in memory until the app exits; **Explain again** starts a fresh session.
 After a failure or cancellation, choose **Retry Explain** to start over.
@@ -435,9 +439,10 @@ isolated mode without site initialization, so working-directory modules,
 Missing directories (including directories absent before a change) are reported
 as explicit omissions, not verified name listings or errors that block follow-ups.
 Copilot gets only bounded host-controlled source readers, not a shell or arbitrary
-filesystem access. Inference still uses the native Windows Copilot SDK/default
-model and native Copilot sign-in, separately from WSL Git authentication; it does
-not reuse Fix's broad-permission WSL model session.
+filesystem access. Inference still uses the bundled native Windows Copilot
+SDK/default model and the same Windows GitHub CLI sign-in as Explain, separately
+from WSL Git authentication; it does not reuse Fix's broad-permission WSL model
+session.
 
 Follow-ups retain completed turns and the same PR/source identity. Source and
 target refs are rechecked before and after generation and before posting.

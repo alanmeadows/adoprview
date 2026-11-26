@@ -611,7 +611,7 @@ contains `Agency`. A teammate's agent would:
 | Missing Desktop Runtime/WebView2 | Install only the missing compatible dependency with consent; recheck real EXE/shortcut discovery. |
 | 401/203/403 or wrong identity | Reuse/repair Windows auth for the selected org/account; request only needed human sign-in/consent. Never call it zero PRs. |
 | Empty dashboard | Check successful live lists, author IDs/whitelist, Hidden, filters, repo and row errors. |
-| Optional Copilot unavailable | Keep PR viewing usable; report exact optional WSL/tool/auth limitation, no test Fix/resume. |
+| Optional Copilot unavailable | Keep PR viewing usable; report exact optional WSL/tool/auth limitation, no test Fix/resume. Explain/questions/video need a Windows `gh auth login`, not `copilot login`; see [TROUBLESHOOTING.md](TROUBLESHOOTING.md). |
 | Embedded PoP rejected by tenant | Human-only flow; explicit external Edge fallback. Never weaken tenant/TLS protections. |
 
 On rerun, reuse the selected paths, valid auth, verified repositories and existing
@@ -635,6 +635,8 @@ Tell the user what remains for them, and only what actually applies:
 - a choice of repositories, watched authors or WSL checkout, only if discovery
   was ambiguous;
 - Copilot CLI sign-in in WSL, only if they want inline Copilot Fix;
+- Windows GitHub CLI sign-in (`gh auth login`) with a Copilot-enabled account,
+  only if they want Explain, PR questions or TikTok This PR;
 - the PR work itself: reviews, approvals, Proof of Presence, auto-complete and
   publishing stay deliberate human actions.
 

@@ -75,7 +75,10 @@ enough detail inline that you rarely need to click into ADO.
   instructions, skills, hooks, host Git operations, memory and session storage
   are disabled; all permission requests are rejected. The child environment
   excludes token overrides and ADO credentials. Copilot authentication uses the
-  SDK's logged-in-user mechanism. Stream events carry PR/request identity and a
+  SDK's logged-in-user mechanism; because the runtime home is private, that
+  resolves in practice through the Windows `gh` CLI sign-in (`gh auth token`),
+  not a standalone `copilot login` account list. Investigations and video reuse
+  this model with their own runtime homes and the same authentication. Stream events carry PR/request identity and a
   monotonic sequence; only the explanation panel updates. Completed Markdown
   permits no attributes, links, media or interactive controls. Shutdown cancels
   and awaits work before disposing the runtime. See [usage](usage.md#explain-this-pr)

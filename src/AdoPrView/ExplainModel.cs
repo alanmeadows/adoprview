@@ -62,6 +62,20 @@ internal sealed class ExplainModel : IExplainModel
         };
     }
 
+    // The isolated runtime home has no Copilot CLI account list, so a standalone `copilot login`
+    // is not found; with token variables stripped, the runtime's `gh auth token` fallback is the working path.
+    internal static string NotSignedInMessage(string? path)
+    {
+        var gh = (path ?? "").Split(Path.PathSeparator, StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
+            .Any(directory => { try { return File.Exists(Path.Combine(directory, "gh.exe")); } catch (Exception ex) when (ex is ArgumentException or IOException) { return false; } });
+        return "Copilot is not signed in for this app. Its bundled Copilot runtime uses a private Copilot home, so a standalone " +
+            "'copilot login' (Windows or WSL) and VS Code's Copilot sign-in are not used. It signs in through the Windows GitHub CLI: " +
+            "in Windows PowerShell run 'gh auth login', confirm 'gh auth status', then retry. " +
+            (gh ? "gh.exe is on this app's PATH but did not provide a signed-in account. "
+                : "gh.exe was not found on the PATH this app started with: install GitHub CLI for Windows, exit ADO PR View from the tray and reopen it. ") +
+            "See TROUBLESHOOTING.md in the ADO PR View GitHub repository. No ADO credentials are used for Copilot.";
+    }
+
     internal async Task<CopilotClient> ClientAsync(CancellationToken ct)
     {
         await _startup.WaitAsync(ct);
@@ -75,7 +89,7 @@ internal sealed class ExplainModel : IExplainModel
                 await client.StartAsync(ct);
                 var auth = await client.GetAuthStatusAsync(ct);
                 if (!auth.IsAuthenticated)
-                    throw new InvalidOperationException("Copilot is not signed in. Sign in with the native Windows Copilot CLI, then retry Explain. No ADO credentials are used for Copilot.");
+                    throw new InvalidOperationException(NotSignedInMessage(ChildEnvironment().GetValueOrDefault("PATH")));
                 _client = client;
                 return client;
             }
