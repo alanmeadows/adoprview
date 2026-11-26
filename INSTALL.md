@@ -19,7 +19,11 @@ unreadable file or write while a dashboard can autosave. Reconcile all relevant
 dashboard instances and owned jobs before proposing any exit/update; do not
 cancel work or restart an active session to install. Ask one focused question
 only when discovery cannot resolve a choice or human consent is truly required.
-Configure optional WSL Copilot only if wanted; viewing PRs does not require WSL.
+Configure optional native Windows Copilot Fix only if wanted; viewing, Ask and
+focused review do not require WSL. Preserve existing WSL run environments.
+Native Fix uses a separate versioned supervisor outside the app installation
+directory. Preserve active supervisor versions, receipts and worktrees during
+upgrades; never kill/delete work just to unblock installation.
 Leave settings fields you do not recognize unchanged; do not add or remove them.
 Do not use approvals, Fix, publishing, merge-preview restarts, PR writes or
 worktree cleanup as installation tests. Preserve global shell/model/MCP config.
@@ -111,10 +115,14 @@ or repository choices with one focused question. Do not invent watched authors.
 1. Enumerate `AdoPrView.exe` with `Get-CimInstance Win32_Process`, recording each
    exact path, PID and owner. Include other copies sharing this Windows user's
    app-data directory, including tray instances; never kill by process name.
-2. Read the updated build's `CopilotRuns` records privately and reconcile their
-   exact task IDs, run receipts, distro and worktree CWD against live `bgtask
-   status <exact-name> --json` in the **recorded** WSL environment. Names alone
-   and stale records do not establish ownership or inactivity.
+2. Read the updated build's `CopilotRuns` records privately. `backend:
+   windows-native` records use an exact nonce-named Windows Job and native
+   receipt with supervisor PID/start identity; records without a backend remain
+   legacy WSL. Reconcile those legacy task IDs, receipts, distro and worktree
+   CWD against live `bgtask status <exact-name> --json` in the **recorded**
+   already-running WSL environment. Names alone and stale records do not
+   establish ownership or inactivity. Do not substitute current native
+   checkouts or sign-in for an old WSL run.
 3. Absence of new records is not proof that older apps have no jobs. For legacy
    launches, inspect only the known `~/.local/state/ado-prview/runs` receipts and
    matching `ado-prview-<run-id>` tasks/runner processes in the known distro(s).
@@ -323,8 +331,9 @@ those authors and hidden keys. Empty `value: []` is valid; missing/invalid data,
 | `notifications` | Boolean; `true` |
 | `autoComplete` | `{mergeStrategy:"squash", deleteSourceBranch:true, transitionWorkItems:true}`; options, not an install-time action |
 | `triageInstructions` | Optional custom Fix prompt; preserve verbatim |
-| `wslDistro` | Optional distro name; null/blank uses WSL default |
-| `wslRepoDirectories` | Object keyed by lowercase `org/project/repo`, values Linux source paths |
+| `nativeRepoDirectories` | Object keyed by lowercase `org/project/repo`, values verified absolute local Windows checkout roots; `{}` until optional Fix is configured |
+| `wslDistro` | Retained legacy WSL setting; not used for new Windows runs |
+| `wslRepoDirectories` | Retained legacy Linux source mappings; never converted to native directories |
 | `window` | Optional `{left, top, width, height, maximized}`; preserve |
 | `reviewBot` | Optional `{name, authorId, organization}` of a review bot whose findings gate PRs in that ADO organization only; omit when the team has none |
 | `fixSkill` | Optional local Copilot skill named by the default Fix prompt; preserve |
@@ -460,10 +469,39 @@ PRs in other organizations get no bot gate. A `reviewBot` without
 the bot actually reviews rather than guessing.
 
 
-### Optional WSL Copilot
+### Optional Windows Copilot Fix
+
+Ask/focused review read pinned ADO source without a local checkout. For optional
+Fix, discover an existing **Windows** Git repository root and verify its exact
+ADO organization/project/repository remote. Store the local absolute path under
+`nativeRepoDirectories["org/project/repo"]`. UNC/device/reparse paths are
+unsupported; do not map by folder name, assume `~/clones`, or translate an old
+WSL run's recorded worktree.
+
+New Fix needs Git for Windows and a compatible full native Copilot CLI.
+The official Windows installation is `winget install GitHub.Copilot`, or the
+appropriate executable from [GitHub's install guide](https://docs.github.com/en/copilot/how-tos/copilot-cli/set-up-copilot-cli/install-copilot-cli).
+Official npm installs (`npm install -g @github/copilot`, Node 22+ for installation)
+resolve to their verified packaged native executable; arbitrary shell shims are
+not executed.
+Do not install without the user's authority. Check native executable discovery
+and `copilot --no-auto-update --help`; the bundled SDK stdio runtime is not the
+interactive/prompt CLI. Required flags include `--no-auto-update`,
+`--no-ask-user`, `--stream`, `--no-color`, `--deny-tool`, `--yolo`,
+`--session-id` and `--resume`. Help checks compatibility, not authentication.
+
+Let the user authenticate this Windows CLI with its own `copilot login`.
+Fix uses the default Windows user profile, independently of Explain's private
+runtime/Windows `gh` authentication. Git fetch credentials are also independent.
+Do not seed, decrypt or copy tokens, edit global shell configuration, or start
+Fix/resume/model work to diagnose sign-in. Keep named skills/reviewer models
+unchanged and report unavailable required tools/models instead of substituting.
+
+### Legacy WSL Copilot recovery only
 
 Leave it alone unless wanted/already configured; never install/enable it just to
-view PRs. Use `wsl.exe --list --verbose` to identify the actual distro, then
+view PRs or run new Ask/review/Fix. Use `wsl.exe --list --verbose` to identify the recorded distro; if it
+is Stopped, do not start it just to test recovery. Only then use
 read-only checks in that selected distro for the exact existing source checkout
 and its matching ADO remote. Record the verified Linux path under
 `wslRepoDirectories["org/project/repo"]` and distro under `wslDistro`; do not
@@ -597,9 +635,10 @@ contains `Agency`. A teammate's agent would:
    scripts or documents.
 4. Optionally set the team's agreed reviewer models, for example
    `fixReviewerModels = @('claude-opus-5.5', 'gpt-6-astra')`, and `fixSkill` only
-   when that skill is installed in the teammate's WSL Copilot.
-5. For WSL Copilot, map `wslRepoDirectories['msazuredev/azureforoperatorsindustry/azlocal-fabric']`
-   to the teammate's verified Linux checkout of that repository.
+   when that skill is installed in the teammate's Windows Copilot.
+5. For new Fix, map `nativeRepoDirectories['msazuredev/azureforoperatorsindustry/azlocal-fabric']`
+   to the teammate's verified local Windows checkout of that repository.
+   Preserve any legacy WSL mapping without silently migrating old work.
 
 ## Troubleshooting, resuming setup, and final report
 
@@ -611,7 +650,7 @@ contains `Agency`. A teammate's agent would:
 | Missing Desktop Runtime/WebView2 | Install only the missing compatible dependency with consent; recheck real EXE/shortcut discovery. |
 | 401/203/403 or wrong identity | Reuse/repair Windows auth for the selected org/account; request only needed human sign-in/consent. Never call it zero PRs. |
 | Empty dashboard | Check successful live lists, author IDs/whitelist, Hidden, filters, repo and row errors. |
-| Optional Copilot unavailable | Keep PR viewing usable; report exact optional WSL/tool/auth limitation, no test Fix/resume. |
+| Optional Copilot unavailable | Keep PR viewing usable; report the exact Windows tool/auth prerequisite or legacy WSL recovery limitation, no test Fix/resume. |
 | Embedded PoP rejected by tenant | Human-only flow; explicit external Edge fallback. Never weaken tenant/TLS protections. |
 
 On rerun, reuse the selected paths, valid auth, verified repositories and existing
@@ -622,8 +661,8 @@ of an installer attempt.
 
 Finish with: installed executable and shortcut locations; configuration/backup
 paths; configured org/project/repo scope and preserved watched-author choices;
-actual running PID/path and live refresh or verified no-PR outcome; optional WSL
-status; and any remaining blocker or specific human interaction. Report actual
+actual running PID/path and live refresh or verified no-PR outcome; optional
+Windows Fix readiness and legacy WSL recovery status; any remaining blocker or specific human interaction. Report actual
 side effects, not imagined tests or capabilities.
 
 ## After setup: what the human still does
@@ -632,9 +671,10 @@ Tell the user what remains for them, and only what actually applies:
 
 - any sign-in, MFA, SSO, consent, security-key or Windows Hello step the agent
   could not complete;
-- a choice of repositories, watched authors or WSL checkout, only if discovery
+- a choice of repositories, watched authors or Windows Fix checkout, only if discovery
   was ambiguous;
-- Copilot CLI sign-in in WSL, only if they want inline Copilot Fix;
+- Windows Copilot CLI sign-in, only if they want new inline Copilot Fix;
+- a deliberate legacy WSL recovery decision, only if an old run needs it;
 - the PR work itself: reviews, approvals, Proof of Presence, auto-complete and
   publishing stay deliberate human actions.
 

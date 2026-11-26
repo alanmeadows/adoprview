@@ -35,6 +35,9 @@ try {
 }
 finally { $archive.Dispose() }
 foreach ($required in 'AdoPrView.exe', 'hostfxr.dll', 'coreclr.dll', 'PresentationFramework.dll', 'WebView2Loader.dll',
+        'FixSupervisor\AdoPrView.FixSupervisor.exe', 'FixSupervisor\AdoPrView.FixSupervisor.dll',
+        'FixSupervisor\AdoPrView.FixSupervisor.runtimeconfig.json', 'FixSupervisor\AdoPrView.FixSupervisor.deps.json',
+        'FixSupervisor\coreclr.dll', 'FixSupervisor\hostfxr.dll', 'FixSupervisor\hostpolicy.dll',
         'wwwroot\index.html', 'LICENSE', 'THIRD-PARTY-NOTICES.txt') {
     if (-not $entries.ContainsKey($required)) { throw "ZIP is missing $required." }
 }

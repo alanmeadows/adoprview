@@ -162,6 +162,54 @@ test('Fix drawer saves additional instructions independently without changing ca
   assert.equal(hooks.S.runs.get(existing.runId), existing);
 });
 
+test('new Windows Fix settings save native checkouts while preserving legacy setup and label each actual run host', async () => {
+  const { hooks, pr, window, elements, document } = setup();
+  hooks.S.settings.repos = [{ org: 'contoso', project: 'Sample', repo: 'sample-service' }];
+  hooks.S.settings.wslDistro = 'Legacy-Ubuntu';
+  hooks.S.settings.wslRepoDirectories = { 'contoso/sample/sample-service': '/legacy/source' };
+  hooks.S.settings.nativeRepoDirectories = { 'contoso/sample/sample-service': 'C:\\repos\\sample-service' };
+  hooks.renderDrawer();
+  const drawer = elements.get('#drawerBody').innerHTML;
+  assert.match(drawer, /Copilot on Windows/);
+  assert.match(drawer, /data-native-repo="contoso\/sample\/sample-service"/);
+  assert.match(drawer, /C:\\repos\\sample-service/);
+  assert.match(drawer, /Ask\/focused review read pinned ADO source directly/);
+  assert.doesNotMatch(drawer, /id="wslDistro"|data-wsl-repo|placeholder="~\/clones/);
+  for (const id of ['refreshSeconds', 'mergeCheckMinutes', 'triageInstructions', 'additionalTriageInstructions',
+    'mergeStrategy', 'notifications', 'sound', 'deleteSourceBranch', 'transitionWorkItems'])
+    elements.set('#' + id, { value: '', checked: false });
+  document.querySelectorAll = selector => selector === '[data-native-repo]'
+    ? [{ dataset: { nativeRepo: 'contoso/sample/sample-service' }, value: ' C:\\other\\checkout ' }] : [];
+  let saved;
+  window.MockHost.rpc = async (method, params) => {
+    assert.equal(method, 'saveSettings'); saved = params.settings; return params.settings;
+  };
+  await hooks.onDrawerAction('save', {});
+  assert.equal(saved.nativeRepoDirectories['contoso/sample/sample-service'], 'C:\\other\\checkout');
+  assert.equal(saved.wslDistro, 'Legacy-Ubuntu');
+  assert.equal(saved.wslRepoDirectories['contoso/sample/sample-service'], '/legacy/source');
+  const native = { key: pr.key, runId: 'native', status: 'running', backend: 'windows-native', output: 'native log' };
+  hooks.S.runs.set(native.runId, native);
+  assert.match(hooks.renderDetail(pr), /Fix PR · Copilot on Windows/);
+  assert.doesNotMatch(hooks.renderDetail(pr), /Legacy Copilot in WSL/);
+  hooks.S.runs.clear();
+  const legacy = { key: pr.key, runId: 'legacy', status: 'running', backend: 'legacy-wsl',
+    distro: 'Legacy-Ubuntu', output: 'retained legacy log' };
+  hooks.S.runs.set(legacy.runId, legacy);
+  assert.match(hooks.renderDetail(pr), /Fix PR · Legacy Copilot in WSL/);
+  assert.match(hooks.renderDetail(pr), /retained legacy log/);
+  assert.equal(hooks.S.runs.get(legacy.runId), legacy);
+});
+
+test('Ask and focused review advertise authenticated native source without mandatory checkout or Linux tools', () => {
+  const { hooks, pr } = setup();
+  const html = hooks.renderDetail(pr);
+  assert.match(html, /Fix is a separate code-changing run/);
+  assert.doesNotMatch(html, /mapped WSL Git\/Python|separate WSL code-changing/);
+  const source = fs.readFileSync(path.join(__dirname, '..', 'src', 'AdoPrView', 'wwwroot', 'investigation.js'), 'utf8');
+  assert.match(source, /No WSL or local checkout is needed/);
+});
+
 test('first video requires explicit Azure setup and missing az stays an actionable setup error without starting generation', async () => {
   const { hooks, pr, window, elements } = setup();
   hooks.S.settings.videoSpeech = null;

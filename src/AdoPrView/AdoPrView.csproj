@@ -16,6 +16,7 @@
   </PropertyGroup>
 
   <ItemGroup>
+    <ProjectReference Include="..\AdoPrView.FixSupervisor\AdoPrView.FixSupervisor.csproj" ReferenceOutputAssembly="false" />
     <Using Remove="System.Windows.Forms" />
     <Using Remove="System.Drawing" />
   </ItemGroup>
@@ -34,5 +35,23 @@
     <Resource Include="app.ico" />
     <None Include="..\..\licenses\Primer\LICENSE.txt" Link="licenses\Primer\LICENSE.txt" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
   </ItemGroup>
+
+  <Target Name="CopyFixSupervisorBuild" AfterTargets="Build">
+    <ItemGroup>
+      <FixSupervisorBuild Include="..\AdoPrView.FixSupervisor\bin\$(Configuration)\net10.0\$(RuntimeIdentifier)\*" />
+    </ItemGroup>
+    <RemoveDir Directories="$(TargetDir)FixSupervisor" />
+    <Copy SourceFiles="@(FixSupervisorBuild)" DestinationFiles="@(FixSupervisorBuild->'$(TargetDir)FixSupervisor\%(RecursiveDir)%(Filename)%(Extension)')" SkipUnchangedFiles="true" />
+  </Target>
+  <Target Name="PublishFixSupervisor" AfterTargets="Publish">
+    <RemoveDir Directories="$(MSBuildProjectDirectory)\obj\fix-supervisor-publish\$(Configuration)\$(RuntimeIdentifier)" />
+    <MSBuild Projects="..\AdoPrView.FixSupervisor\AdoPrView.FixSupervisor.csproj" Targets="Publish"
+      Properties="Configuration=$(Configuration);RuntimeIdentifier=$(RuntimeIdentifier);SelfContained=$(SelfContained);PublishDir=$(MSBuildProjectDirectory)\obj\fix-supervisor-publish\$(Configuration)\$(RuntimeIdentifier)\" />
+    <ItemGroup>
+      <FixSupervisorPublish Include="$(MSBuildProjectDirectory)\obj\fix-supervisor-publish\$(Configuration)\$(RuntimeIdentifier)\**\*" />
+    </ItemGroup>
+    <RemoveDir Directories="$(PublishDir)FixSupervisor" />
+    <Copy SourceFiles="@(FixSupervisorPublish)" DestinationFiles="@(FixSupervisorPublish->'$(PublishDir)FixSupervisor\%(RecursiveDir)%(Filename)%(Extension)')" SkipUnchangedFiles="true" />
+  </Target>
 
 </Project>

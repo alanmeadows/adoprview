@@ -38,7 +38,7 @@ enough detail inline that you rarely need to click into ADO.
   get-access-token --resource 499b84ac-…` (cached until expiry). Tokens never
   reach the UI.
 * **Storage:** `settings.json` (repos, whitelist, hidden PRs, intervals, auto-
-  complete options, optional review bot, Fix prompt options, WSL mappings) in
+  complete options, optional review bot, Fix prompt options, Windows checkout mappings and retained legacy WSL mappings) in
   `%LOCALAPPDATA%\AdoPrView`. A missing file starts empty; an unreadable or
   invalid file stops startup with a message and is never overwritten. Every
   settings object keeps unrecognized JSON members and writes them back; saves
@@ -321,12 +321,19 @@ older snapshot's hidden flag, determine row visibility after a restore.
 * Settings drawer: repositories (paste any ADO repo URL, or discover repos
   with your PRs), whitelist authors (alias, UPN or display name; scope
   notifications), hidden PRs
-  (restore), refresh/merge-check intervals, auto-complete options, Copilot/WSL
+  (restore), refresh/merge-check intervals, auto-complete options, Windows Fix
   mappings, and provider settings only when a provider is loaded.
 * Fix PR: builds the existing context-rich prompt (PR URL, branch, blockers,
   log tail, threads and safety constraints), validates fresh active
   ADO PR identity plus its exact source ref/commit, then starts Copilot in an
-  isolated WSL worktree. Source checkout work files/index/branch are untouched.
+  isolated Windows worktree. Source checkout work files/index/branch are untouched.
+  New runs use `backend: windows-native`; missing backend on old records means
+  `legacy-wsl`. A detached native supervisor creates the CLI suspended, assigns
+  it to an exact nonce-named kill-on-close Windows Job, then resumes it. Durable
+  receipts/logs allow dashboard detach and exact descendant cancellation.
+  Restricted host job breakaway is an explicit failure, not a lifetime-inheriting
+  fallback. Native worktrees are retained and crashes are not automatically
+  replayed; original WSL recovery remains separate.
   `triageInstructions` replaces the default Ask; `fixSkill` optionally names a
   local skill for it. When `fixReviewerModels` lists models, the shared
   generated Fix/Copy prompt requires one independent read-only review per named

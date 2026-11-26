@@ -502,8 +502,8 @@ pre.log .t { color: var(--muted); }
 .run-only { margin-top: 16px; }
 .run-heading { padding: 12px 14px; display: flex; gap: 8px; align-items: flex-start; cursor: pointer; }
 .run-heading:hover { background: var(--hover); }
-.wsl-repo label { min-width: 130px; }
-.wsl-repo label small { display: block; color: var(--muted); }
+.native-repo label { min-width: 130px; }
+.native-repo label small { display: block; color: var(--muted); }
 .row-menu { position: fixed; z-index: 100; padding: 5px; background: var(--surface); border: 1px solid var(--border2); border-radius: var(--radius); box-shadow: var(--shadow); }
 .row-menu button { border: 0; background: transparent; color: var(--text); padding: 9px 14px; cursor: pointer; border-radius: 4px; }
 .row-menu button:hover, .row-menu button:focus-visible { background: var(--surface); outline: 1px solid var(--accent2); }

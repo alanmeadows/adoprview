@@ -84,6 +84,7 @@ public sealed class AppSettings
     public string? AdditionalTriageInstructions { get; set; }
     public string? WslDistro { get; set; }
     public Dictionary<string, string> WslRepoDirectories { get; set; } = new(StringComparer.OrdinalIgnoreCase);
+    public Dictionary<string, string> NativeRepoDirectories { get; set; } = new(StringComparer.OrdinalIgnoreCase);
     public WindowPlacement? Window { get; set; }
     public ReviewBotSettings? ReviewBot { get; set; }
     public string? FixSkill { get; set; }

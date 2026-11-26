@@ -456,6 +456,21 @@ static class ExplainTests
             Check(environment.Keys.All(k => !k.Contains("TOKEN", StringComparison.OrdinalIgnoreCase) && !k.Contains("PAT", StringComparison.OrdinalIgnoreCase) || k is "PATH" or "PATHEXT"), "Credentials inherited");
             Check(!environment.ContainsKey("NODE_OPTIONS") && !environment.ContainsKey("COPILOT_HOME"), "Ambient overrides inherited");
         });
+        await test("Explain not-signed-in message names the GitHub CLI requirement and whether gh.exe is on the app PATH", async () =>
+        {
+            var dir = Path.Combine(Path.GetTempPath(), "adoprview-gh-" + Guid.NewGuid().ToString("N"));
+            Directory.CreateDirectory(dir);
+            try
+            {
+                var missing = ExplainModel.NotSignedInMessage(dir + Path.PathSeparator + "bad\0dir");
+                Check(missing.Contains("gh auth login") && missing.Contains("'copilot login'") && missing.Contains("was not found"), "Missing-gh guidance absent");
+                await File.WriteAllTextAsync(Path.Combine(dir, "gh.exe"), "");
+                var present = ExplainModel.NotSignedInMessage(dir);
+                Check(present.Contains("is on this app's PATH") && !present.Contains("was not found") && !present.Contains(dir), "Present-gh guidance wrong or leaked a path");
+                Check(ExplainModel.NotSignedInMessage(null).Contains("was not found"), "Null PATH not handled");
+            }
+            finally { Directory.Delete(dir, true); }
+        });
         await test("Explain preserves deep multi-section output instead of compressing it into a PR description", async () =>
         {
             using var f = new Fixture();

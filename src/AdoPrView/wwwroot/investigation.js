@@ -134,7 +134,7 @@ function renderAssistanceContent(key) {
   return `<div class="assistance-tabs" role="group" aria-label="PR assistance intent">
     ${[['explain', 'Explain'], ['question', 'Ask'], ['lens', 'Focused review']].map(([kind, label]) =>
       `<button type="button" class="mini" data-assistance-intent="${kind}" aria-pressed="${d.kind === kind}" ${busy ? 'disabled' : ''}>${label}</button>`).join('')}</div>
-    <p class="small">Read-only understanding and private review. Results and drafts last while this app is running; they are not saved across app exit. Fix is a separate WSL code-changing run.</p>
+    <p class="small">Read-only understanding and private review. Results and drafts last while this app is running; they are not saved across app exit. Fix is a separate code-changing run.</p>
     ${options.length ? `<label class="small">Working result <select data-assistance-result data-inv="result">${options.map(o => `<option value="${esc(o.id)}" ${o.id === selected ? 'selected' : ''}>${esc(o.label)}</option>`).join('')}${d.selected && !result ? '<option selected value="">Selected result expired</option>' : ''}</select></label>` : ''}
     ${activeExplain && result?.explanation?.requestId !== latestExplanation.requestId ? '<p class="small" role="status">A new explanation is running; the selected result remains unchanged.</p>' : ''}
     ${activeExplain && d.kind !== 'explain' ? `<p class="small" role="status">${esc(latestExplanation.message)} <button class="mini" data-act="cancelExplanation" data-request-id="${esc(latestExplanation.requestId)}" ${latestExplanation.status === 'cancelling' ? 'disabled' : ''}>Cancel Explain</button></p>` : ''}
@@ -167,7 +167,7 @@ function renderAssistanceContent(key) {
         : '<p>No explanation attached. This request uses the investigation’s pinned source and completed history; a shared PR label is not an Explain handoff.</p>'}
         ${r?.explanationContexts?.length ? `<p>Conversation retains ${r.explanationContexts.map(c => esc(c.requestId.slice(0, 12))).join(', ')}. Changing the primary selection does not remove earlier context. Start a new conversation to clear its history and attachments.</p>` : ''}
       </div>
-      <p data-inv="status" class="small${r?.status === 'failed' ? ' error' : ''}" role="status" aria-live="polite">${esc(r?.message || 'Ask/review additionally use mapped WSL Git/Python and the bundled Windows Copilot runtime. Enter a question or a concrete focus and reference; no comments are posted by generation.')}</p>
+      <p data-inv="status" class="small${r?.status === 'failed' ? ' error' : ''}" role="status" aria-live="polite">${esc(r?.message || 'Ask/review use authenticated Azure DevOps source and the bundled Windows Copilot runtime. No WSL or local checkout is needed. Enter a question or a concrete focus and reference; no comments are posted by generation.')}</p>
       <p data-inv="source" class="small">${esc(r?.revision ? explanationRevision(r) : 'No investigation source captured yet.')}</p>
       <label for="${inputId}">${d.kind === 'lens' ? 'Review focus' : d.attachedId ? 'Question about this explanation' : 'Question or follow-up'}</label>
       <textarea id="${inputId}" data-inv="question" rows="3" maxlength="4000" required ${busy ? 'disabled' : ''}>${esc(d.kind === 'lens' ? d.focus : d.question)}</textarea>
@@ -320,7 +320,7 @@ async function investigationAction(action, key = investigationKey, turnId) {
   } else if (action === 'cancel') {
     method = 'cancelInvestigation'; payload = identity;
   } else if (action === 'reset') {
-    if (!confirm('Start a new conversation with fresh PR revisions? Completed investigation history and its attachments will be cleared and the owned source worktree closed. Explain results remain readable.')) return false;
+    if (!confirm('Start a new conversation with fresh PR revisions? Completed investigation history and its pinned source attachments will be cleared. Explain results remain readable.')) return false;
     method = 'resetInvestigation'; payload = identity;
   } else if (action === 'post') {
     const turn = r?.turns.find(t => t.id === turnId);

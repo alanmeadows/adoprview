@@ -221,6 +221,20 @@ public sealed class Bridge(PrService prs, SettingsStore store, Func<string, Task
                     s.WslDistro = string.IsNullOrWhiteSpace(incoming.WslDistro) ? null : incoming.WslDistro.Trim();
                     s.WslRepoDirectories = (incoming.WslRepoDirectories ?? new()).Where(kv => !string.IsNullOrWhiteSpace(kv.Value))
                         .ToDictionary(kv => kv.Key.ToLowerInvariant(), kv => kv.Value.Trim(), StringComparer.OrdinalIgnoreCase);
+                    if (p["settings"]!.AsObject().Any(field => field.Key.Equals("nativeRepoDirectories", StringComparison.OrdinalIgnoreCase)))
+                    {
+                        var directories = incoming.NativeRepoDirectories
+                            ?? throw new ArgumentException("Windows checkout mappings must be an object, not null.");
+                        foreach (var (key, value) in directories)
+                        {
+                            if (!string.IsNullOrWhiteSpace(value) && value.Trim().StartsWith(@"\\", StringComparison.Ordinal))
+                                throw new ArgumentException($"Windows checkout for {key} must be on a local drive; UNC/network and device paths are not supported.");
+                            if (!string.IsNullOrWhiteSpace(value) && (!System.IO.Path.IsPathFullyQualified(value.Trim()) || value.Any(char.IsControl)))
+                                throw new ArgumentException($"Windows checkout for {key} must be an absolute Windows directory, for example C:\\repos\\repository.");
+                        }
+                        s.NativeRepoDirectories = directories.Where(kv => !string.IsNullOrWhiteSpace(kv.Value))
+                            .ToDictionary(kv => kv.Key.ToLowerInvariant(), kv => kv.Value.Trim(), StringComparer.OrdinalIgnoreCase);
+                    }
                 });
                 prs.ApplyMonitoringSettings();
                 kickRefresh(false);

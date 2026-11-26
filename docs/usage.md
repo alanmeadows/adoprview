@@ -26,7 +26,7 @@ calls used see [DESIGN.md](DESIGN.md); for building and tests see
 - Auth: Windows `az login` (the app uses `az account get-access-token`), or set
   `AZURE_DEVOPS_EXT_PAT` / `AZURE_DEVOPS_PAT`.
 - Settings (repos, watched authors, hidden PRs, polling, auto-complete options,
-  Copilot/WSL mappings) live in the gear drawer and persist to
+  Windows Fix checkout mappings and retained legacy WSL settings) live in the gear drawer and persist to
   `%LOCALAPPDATA%\AdoPrView\settings.json`. A new install starts with no
   repositories. An unreadable or invalid settings file is reported at startup and
   left unchanged; it is never replaced with defaults. Fields the app does not
@@ -459,31 +459,29 @@ polish, unrelated best practices, speculative problems or a general security aud
 An empty result explicitly says no findings were established in the inspected
 scope; it does not certify the PR as bug-free.
 
-Questions and lens reviews require WSL, Git, Python 3 and the existing per-repo
-WSL checkout mapping in Settings (otherwise `~/clones/<repo>`). The configured
-checkout must have a remote matching the PR's exact organization/project/repository
-and existing Git authentication. No extra tokens or keys are requested.
-The same validated user environment is loaded for each source operation, without
-Fix's WSL Copilot/NVM initialization; questions do not require a WSL Copilot CLI.
-The app fetches the source and target refs into unique private refs and creates
-a detached **no-checkout Git worktree under the Git common metadata directory**.
-It never switches or edits your primary working files. The workspace identifies this
-worktree honestly: source tools read its pinned Git objects, not a populated
-filesystem checkout. This avoids executing checkout filters, hooks, submodules,
-skills, build steps or other PR-supplied commands. Symlinks are not followed.
-Local Git replacement objects are disabled so inspected content comes from the
-captured commit, not an unrelated local substitute. The Python reader uses
-isolated mode without site initialization, so working-directory modules,
-`PYTHONPATH`, user packages and site hooks cannot run before its pinned reads.
-Missing directories (including directories absent before a change) are reported
-as explicit omissions, not verified name listings or errors that block follow-ups.
-Copilot gets only bounded host-controlled source readers, not a shell or arbitrary
-filesystem access. Explain retains its pinned diff, file-window and directory
-tools; Ask/review retain their pinned Git-object source tools. Providing a reference
-does not enable unrestricted commands or make repository text authoritative instructions.
-Inference still uses the native Windows Copilot SDK/default
-model and native Copilot sign-in, separately from WSL Git authentication; it does
-not reuse Fix's broad-permission WSL model session.
+Questions and focused reviews run natively on Windows. They need no WSL, Git,
+Python or local checkout mapping. The app reuses its authenticated Azure DevOps
+readers to inspect full source files, callers, tests and directory names beyond
+the diff at the exact captured base, source and target commits. This is server
+source inspection, not an editable worktree. ADO repository Read permission and
+the dashboard's existing ADO sign-in are required; GitHub/Copilot sign-in does
+not grant ADO access.
+
+The model receives only bounded read-only tools, never a shell or arbitrary
+filesystem access. No checkout filters, hooks, submodules, skills or repository
+commands run. Symlinks, binary content, LFS payloads and files exceeding 80,000
+bytes are omitted. Each source window is at most 120 lines and 16,000 characters;
+partial windows are not accepted as exact finding evidence. Source file/directory
+tools share a 120-read conversation budget; the existing diff/context tools keep
+their separate bounds. Missing directories are explicit omissions, not verified
+name listings. Paths and returned commit identities are checked on every read.
+Providing a reference does not enable unrestricted commands or change the
+posting target.
+
+Inference uses the app's bundled Windows Copilot runtime and its default model,
+independently of Fix. Use **Windows GitHub CLI** `gh auth login` for github.com
+and `gh auth status` with a Copilot-enabled account. Standalone or WSL Copilot CLI
+sign-in is not this runtime's authentication. No tokens are copied between hosts.
 
 Follow-ups retain completed turns and the same PR/source identity. Source and
 target refs are rechecked before and after generation and before posting.
@@ -663,7 +661,7 @@ The player can read only host-registered completed MP4s, not arbitrary local fil
 ## Inline Copilot Fix
 
 **Fix PR** (the sparkle button in each row, also in the expanded **Fix with Copilot** area)
-starts Copilot in WSL and displays stdout/stderr, status and the actual exit code
+starts the Windows Copilot CLI and displays stdout/stderr, status and the actual exit code
 **inline in that PR's expanded details**. It does not copy/paste, focus desktop
 Copilot or open a separate terminal. **Copy prompt** remains available as an
 alternative. Fix is optional: viewing PRs needs neither WSL nor Copilot.
@@ -723,23 +721,30 @@ read back and compared with the intended body (only line endings/trailing
 newlines normalized). Success responses alone are not proof: one corrective
 retry is allowed; persistent mismatch/unreadability blocks completion/publication.
 
-In **Settings → Copilot in WSL**, select the distribution (blank uses the WSL
-default) and each repository's source directory. Blank directories try
-`~/clones/<repo>`. The app verifies the directory and its exact Azure DevOps
-organization/project/repository remote before launching. WSL needs Git,
-authenticated Copilot CLI and the managed task runner `bgtask`. The shared
-`~/.config/bash/environment` supplies PATH/BASH_ENV. The non-login runner keeps
-existing PATH resolution first, then tries nvm's default and executable
-`~/.local/bin/copilot` if Copilot is still missing. This PATH adjustment is
-inherited by runner children only; no shell configuration is edited.
-`bgtask` also supports the existing `~/go/bin/bgtask` fallback. Preflight errors
-identify the failed dependency or inspection stage and exit code without
-displaying environment values, remote URLs or raw tool errors.
+In **Settings → Copilot on Windows**, select each repository's existing absolute
+local Windows Git checkout root. There is no default `~/clones` directory, WSL
+mapping or Linux tool dependency for new runs. Install Git for Windows and the
+full [Windows Copilot CLI](https://docs.github.com/en/copilot/how-tos/copilot-cli/set-up-copilot-cli/install-copilot-cli)
+(for example `winget install GitHub.Copilot`) with native executables on the
+PATH the app started with. The bundled SDK stdio runtime used by Explain is not
+a prompt CLI. Official npm installs (`npm install -g @github/copilot`, Node 22+
+for installation) are supported by resolving the package's verified native
+executable directly; the launcher never executes arbitrary shell shims.
+
+Authenticate the chosen **Windows CLI** with its own `copilot login` in Windows,
+not a WSL terminal. This host uses the default Windows user profile, not
+Explain's private runtime home; token/custom-home/proxy environment overrides
+are not copied into it. Git fetch authentication is a separate Windows Git
+credential-helper requirement. No global shell/account configuration is changed.
+Missing native directory/executable, incompatible CLI flags, wrong repository
+remote and stale source revision produce explicit errors. Sign-in/entitlement
+failure must be corrected outside this noninteractive panel, never by copying
+tokens or starting real Fix work as a diagnostic.
 
 Inline-run compatibility checks advertised CLI option names, not exact help
 sentences. If a required option is absent, the error lists it. Check
-`copilot --help` in the configured WSL distribution; updating the Windows CLI
-does not change that installation.
+`copilot --no-auto-update --help` for the chosen Windows executable. A working
+help command does not establish sign-in or model entitlement.
 
 Each run gets a unique, isolated worktree/branch at the freshly verified PR source
 commit, not your current/default branch. Main-checkout files, index and branch
@@ -753,11 +758,11 @@ recognized authentication, network, path, conflict, dependency and unsupported
 Git/checkout errors. A changed source commit requires a fresh PR refresh, not a
 retry against an older commit. No existing worktree, branch or lock is removed to
 make setup succeed. A worktree is reported created only after Git creates it.
-When the app-owned run directory exists, its `prepare.stderr` retains the
-original command error with user-only permissions; its path appears in the run
-panel. **This private file may contain remote URLs or authentication details:
-review and redact it before sharing.** Raw Git errors never go into the dashboard
-or lifecycle log. Failed prelaunch records are not resumed.
+When the native run directory exists, its `stdout.log`/`stderr.log` hold
+private CLI output; paths appear in the run panel. **These files may contain
+source, remote URLs or authentication details: review and redact before
+sharing.** Raw Git preparation errors do not go into the dashboard or lifecycle
+log. Failed prelaunch records are not resumed.
 
 Short Fix output uses only the space it needs; longer output scrolls locally.
 Earlier runs retain their status and identity, with output collapsed under
@@ -794,7 +799,7 @@ prompt's restrictions on merge, approval, auto-complete and policy bypass. Runs
 started by earlier versions keep their original `git push` deny, including when
 resumed; they are not resumed or published retrospectively.
 The worktree is an isolated starting directory, **not a filesystem sandbox**.
-Interactive sign-in is not available in this output panel: authenticate in WSL
+Interactive sign-in is not available in this output panel: authenticate with the chosen Windows CLI
 beforehand, or use Copy prompt with your own interactive workflow. Missing
 CLI/auth/configuration or denied tools are errors, not clipboard-success
 fallbacks. Exit 0 means the CLI exited normally, not that the PR has been verified
@@ -807,9 +812,9 @@ icon keeps spinning for that PR's active run, including while its details are
 collapsed or another PR is open. If output following disconnects, the app keeps
 monitoring the owned task rather than treating the lost output as process exit.
 Completion, failure or cancellation clears the indicator only after the actual
-task ends. For tracked runs, an exited supervisor alone is not enough: the app
-also verifies workspace ownership and a free execution lock before recording
-stopped proof or releasing the same-PR reservation. Unconfirmed liveness stays
+task ends. Native runs require their exact owned job and stopped-descendant
+receipt; an exited leader alone is not successful completion. Legacy runs also
+verify workspace ownership and a free execution lock. Unconfirmed liveness stays
 busy with a needs-attention message and exact-run cancellation controls.
 Reduced-motion mode keeps the same busy state
 and accessible labels without animation. If the PR leaves the active list entirely (completed,
@@ -822,7 +827,13 @@ If the dashboard browser is busy, right-click the native tray icon and select
 not wait for unrelated startup recovery. Cancellation signals the owned
 transport before durable IO; short status/stop/ownership probes have bounded
 response limits independent of transport cancellation callbacks. An explicit
-stop, including one arriving before CLI identity capture, escalates TERM to KILL only for the new
+Windows Stop targets the exact nonce-named owned job, waits for its descendants
+to exit, and retains work/logs. The supervisor assigns the CLI to a kill-on-close
+Windows Job before letting it execute, so descendants belong to that run.
+No process-name killing is used.
+
+**The following transport-control details apply only to legacy WSL runs.**
+Their Stop, including one arriving before CLI identity capture, escalates TERM to KILL only for the old
 runner's own CLI group, after verifying its captured parent/group/session and
 Linux start time; a missing or reused leader is refused. No process-name searches or global WSL
 termination are used. Already-running runners retain their original scripts.
@@ -833,7 +844,7 @@ During blocked or failed shutdown, exact-run controls stay available until
 other service teardown succeeds. A failed exit restores browser output delivery.
 Native Stop entries include the full run ID to distinguish retained runs for
 the same PR. Unreadable history without a PR identity is not an actionable target.
-New launches capture the Linux HOME, XDG config directory and any
+Legacy launches captured the Linux HOME, XDG config directory and any
 `BGTASK_STATE_DIR` override. Launch, status, Stop and log access use that same
 registry even if shell configuration changes. Exact-task control and ownership
 probes do not re-source environment files for these captured runs, so a blocked
@@ -874,7 +885,7 @@ also rejects deferred callbacks without resetting output accounting.
 
 Output uses a grow-on-demand tail buffer with the same retained-output limit,
 so empty or short saved histories do not each reserve the maximum buffer.
-Native delivery keeps at most one
+Browser delivery for both backends keeps at most one
 unacknowledged browser message plus the latest pending snapshot per run. A busy
 browser cannot accumulate an unlimited output/dispatcher queue. Updates
 retain the latest terminal/status update while acknowledgements are missing;
@@ -909,6 +920,34 @@ Records contain captured PR/workspace/task/session identity, task-registry paths
 pointers, not the prompt, output body or credentials. WSL ownership receipts and
 supervised logs remain in their existing run/task locations. Cross-instance
 reservations and run leases prevent duplicate launches, resumes and cleanup.
+
+### New Windows runs
+
+Each new run records `backend: windows-native`; older records without that
+field remain `legacy-wsl`. An out-of-process Windows supervisor owns the CLI
+and its descendants. Closing/exiting the dashboard detaches its follower, not
+the supervisor; reopening verifies the exact run/nonce/session receipt and
+replays its native log. Stop does not require today's CLI installation,
+Git remote or authentication to be the same: it controls the recorded job.
+
+If the app's launching host prohibits detached job breakaway, native launch
+fails explicitly with the Windows error and retains the prepared work. It
+never silently inherits a host lifetime that could kill work on dashboard
+exit, starts WSL, or claims detached execution. Ordinary Start Menu launch
+and a restrictive automation/job host are different environments.
+
+Native worktrees are **always retained**, including successful or cancelled
+runs. There is no automatic clean-worktree removal or crash replay on this
+backend. A lost supervisor's stopped job does not imply successful completion;
+history becomes needs-attention and keeps its saved session/work. A deliberate
+new Fix run is a new captured source/worktree, not a silent resume or replacement
+of old edits. Inspect retained work before choosing how to continue it.
+
+### Legacy WSL runs
+
+These records retain their original transport, environment, authority and
+cleanup/resume rules. Do not start a stopped distro merely to test recovery.
+Missing WSL/tools leave explicit needs-attention history, never a native restart.
 
 Closing the dashboard detaches its output follower instead of cancelling
 the supervised WSL job. Startup checks live bgtask identity/status and reattaches

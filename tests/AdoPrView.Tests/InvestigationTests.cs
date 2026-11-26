@@ -24,6 +24,129 @@ static class InvestigationTests
 
     public static async Task Run(Func<string, Func<Task>, Task> test)
     {
+        await test("Investigation native default reads full pinned source and directory beyond diffs without WSL configuration", async () =>
+        {
+            using var f = new ExplainTests.Fixture();
+            f.Store.Current.WslDistro = "Not installed";
+            f.Store.Current.WslRepoDirectories[f.Store.Current.Repos.Single().Key] = "/missing/legacy/checkout";
+            await using var source = await f.Service.GetInvestigationSourceAsync(f.Pr.Key, default);
+            Check(source is AdoInvestigationSource && !source.Location.Contains("worktree", StringComparison.OrdinalIgnoreCase),
+                "New investigation still requires a WSL/local worktree");
+            var before = await source.ReadFileAsync("/RetryPolicy.cs", "before", 1, default);
+            var after = await source.ReadFileAsync("/RetryPolicy.cs", "after", 1, default);
+            var target = await source.ReadFileAsync("/RetryPolicy.cs", "target", 1, default);
+            var broader = await source.ReadFileAsync("/README.md", "after", 1, default);
+            var directory = await source.ListDirectoryAsync("/", "after", default);
+            Check(before.Contains("FromSeconds(2)") && after.Contains("Math.Pow") && target.Contains(ExplainTests.Fixture.Target) &&
+                broader.Contains("internal integration-test harness") && directory.Contains("/README.md"),
+                "Native source lost base/source/target or broader architectural context");
+            source.ValidateFinding(new("0", "Trigger", "Meaningful consequence", "/RetryPolicy.cs", 5,
+                "        return TimeSpan.FromSeconds(Math.Min(300, 2 * Math.Pow(2, attempt)));"));
+            await Throws<InvalidDataException>(() => Task.Run(() =>
+                source.ValidateFinding(new("0", "Trigger", "Consequence", "/README.md", 1, "# Retry"))));
+            await Throws<InvalidDataException>(() => Task.Run(() =>
+                source.ValidateFinding(new("0", "Trigger", "Consequence", "/RetryPolicy.cs", 5, "        return TimeSpan.FromSeconds(2);"))));
+            await source.Context.ReadChangeAsync(0, default);
+            InvestigationModel.RequireInspection(source);
+            await source.VerifyAsync(default);
+            Check(f.Urls.Where(u => u.Contains("/items?")).All(u => u.Contains("versionDescriptor.versionType=commit")) &&
+                InvestigationModel.Names.Contains("read_source_file") && !InvestigationModel.Names.Contains("read_worktree_file"),
+                "Native review tool contract retained unpinned content or misleading filesystem tools");
+        });
+        await test("Investigation native default completes selected-only lens preview using actual API evidence and preserves target freshness", async () =>
+        {
+            using var f = new ExplainTests.Fixture();
+            var writes = 0;
+            var finding = new LensFinding("0", "Concrete failure", "Synthetic triggering input and consequence.",
+                "/RetryPolicy.cs", 1, "public static class RetryPolicy");
+            await using var service = new InvestigationService(f.Service.GetInvestigationSourceAsync,
+                (key, revision, _, _, _, selected, _, _) =>
+                {
+                    writes++;
+                    Check(key == f.Pr.Key && revision.SourceCommit == ExplainTests.Fixture.Source && selected.SequenceEqual([finding]),
+                        "Native posting target or selection changed");
+                    return Task.FromResult(new[] { new CommentOutcome("0", "posted", "Synthetic confirmed target", null) });
+                }, new Model(async (source, _, _, _, ct) =>
+                {
+                    Check(source.Location.StartsWith("Azure DevOps:", StringComparison.Ordinal), "Production capture did not use authenticated native source");
+                    await source.Context.ReadChangeAsync(0, ct);
+                    await source.ReadFileAsync("/RetryPolicy.cs", "after", 1, ct);
+                    source.ValidateFinding(finding);
+                    InvestigationModel.RequireInspection(source);
+                    return new("Synthetic private preview.", [finding]);
+                }));
+            var start = service.Ask(f.Pr.Key, "", "lens", "Check a concrete synthetic contract.");
+            var done = await Finish(service);
+            Check(done.Status == "completed" && writes == 0 && done.Evidence.Any(e => e.StartsWith("Source after:")),
+                "Native generation failed or implicitly posted findings: " + done.Message);
+            f.TargetHead = ExplainTests.Fixture.Base;
+            done = await service.PostAsync(f.Pr.Key, start.ConversationId, start.RequestId, ["0"], true);
+            Check(done.Status == "failed" && writes == 0, "Native source freshness no longer protects posting");
+        });
+        await test("Investigation native source blocks failed auth wrong revision and scope without accepting evidence", async () =>
+        {
+            foreach (var reason in new[] { "auth", "revision", "network", "directory" })
+            {
+                using var f = new ExplainTests.Fixture();
+                await using var source = await InvestigationSource.CreateAsync(await f.Capture(), f.Pr, f.Store.Current, default);
+                if (reason == "auth") f.DenyFiles = true;
+                if (reason == "revision") f.WrongItem = true;
+                if (reason == "network") f.NetworkFailure = true;
+                if (reason == "directory")
+                    f.AdditionalResponse = request => request.RequestUri!.AbsolutePath.EndsWith("/items")
+                        ? Json(new { value = new[] { new { path = "/outside/secret.cs", commitId = ExplainTests.Fixture.Source } } }) : null;
+                await Throws<Exception>(() => reason == "directory" ? source.ListDirectoryAsync("/within", "after", default) :
+                    source.ReadFileAsync("/RetryPolicy.cs", "after", 1, default));
+                Check(!source.Evidence.Any(e => e.StartsWith("Source ")), "Failed native source read became inspected evidence");
+                await Throws<InvalidOperationException>(() => source.VerifyAsync(default));
+            }
+        });
+        await test("Investigation native source omissions never validate symlink binary LFS oversized or partial quote evidence", async () =>
+        {
+            foreach (var reason in new[] { "symlink", "submodule", "binary", "lfs", "bytes", "window" })
+            {
+                using var f = new ExplainTests.Fixture();
+                f.AdditionalResponse = request =>
+                {
+                    var uri = request.RequestUri!;
+                    if (!uri.AbsolutePath.EndsWith("/items")) return null;
+                    var query = uri.Query.TrimStart('?').Split('&').Select(s => s.Split('=', 2))
+                        .ToDictionary(p => p[0], p => Uri.UnescapeDataString(p[1]));
+                    return Json(new { path = "/RetryPolicy.cs", commitId = query["versionDescriptor.version"],
+                        gitObjectType = reason == "submodule" ? "commit" : "blob", isSymLink = reason == "symlink",
+                        contentMetadata = new { isBinary = reason == "binary" },
+                        content = !query.ContainsKey("includeContent") ? null : reason switch
+                        {
+                            "lfs" => "version https://git-lfs.github.com/spec/v1\noid sha256:synthetic",
+                            "bytes" => new string('\u00e9', 40001),
+                            "window" => new string('x', 16001),
+                            _ => "public static class RetryPolicy",
+                        } });
+                };
+                await using var source = await InvestigationSource.CreateAsync(await f.Capture(), f.Pr, f.Store.Current, default);
+                var output = await source.ReadFileAsync("/RetryPolicy.cs", "after", 1, default);
+                Check(output.Contains("omitted", StringComparison.OrdinalIgnoreCase) || output.Contains("TRUNCATED"),
+                    "Native source omission was hidden: " + reason);
+                Check(!source.Evidence.Any(e => e.StartsWith("Source after:")), "Omitted or partial native content became exact finding proof");
+                await Throws<InvalidDataException>(() => Task.Run(() =>
+                    source.ValidateFinding(new("0", "Failure", "Consequence", "/RetryPolicy.cs", 1, "public static class RetryPolicy"))));
+                await source.VerifyAsync(default);
+            }
+        });
+        await test("Investigation native read budget and invalid paths fail explicitly before accepting further content", async () =>
+        {
+            using var f = new ExplainTests.Fixture();
+            await using var source = await InvestigationSource.CreateAsync(await f.Capture(), f.Pr, f.Store.Current, default);
+            var calls = f.Urls.Count;
+            await Throws<ArgumentException>(() => source.ReadFileAsync("/../secret", "after", 1, default));
+            await Throws<ArgumentException>(() => source.ReadFileAsync("/RetryPolicy.cs", "main", 1, default));
+            Check(f.Urls.Count == calls, "Invalid source arguments reached ADO");
+            for (var i = 0; i < 120; i++) await source.ListDirectoryAsync("/", "after", default);
+            calls = f.Urls.Count;
+            await Throws<InvalidOperationException>(() => source.ListDirectoryAsync("/", "after", default));
+            Check(f.Urls.Count == calls, "Native read budget issued another source request");
+            await Throws<InvalidOperationException>(() => source.VerifyAsync(default));
+        });
         await test("Investigation explicit explanation section preserves full ARM host risks attribution and pinned selection without truncating the displayed artifact", async () =>
         {
             using var f = new ExplainTests.Fixture();

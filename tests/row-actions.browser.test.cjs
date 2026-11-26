@@ -74,6 +74,8 @@ test('Additional Fix fields are independently editable and restored in the real 
       S.snap.approvalProvider=null;
       S.settings.triageInstructions=null;S.settings.additionalTriageInstructions=null;
       S.settings.futureSetting='SYNTHETIC-KEEP';
+      S.settings.wslDistro='Legacy-Ubuntu';S.settings.wslRepoDirectories={'offline/project/repo':'/legacy/source'};
+      S.settings.nativeRepoDirectories={};
       window.fixSaved=[];
       window.fixExisting=['running','recovering','completed'].map((status,i)=>({
         key:'offline:'+i,runId:'existing-'+i,status,output:'Captured session '+i
@@ -86,6 +88,12 @@ test('Additional Fix fields are independently editable and restored in the real 
       };
     `);
     await click('#settingsBtn');
+    assert.equal(await evaluate(`!!document.querySelector('[data-native-repo]')&&!document.querySelector('[data-wsl-repo]')&&!document.querySelector('#wslDistro')`), true);
+    assert.equal(await evaluate(`getComputedStyle(document.querySelector('.native-repo label small')).display`), 'block');
+    const nativeKey = await evaluate(`document.querySelector('[data-native-repo]').dataset.nativeRepo`);
+    const nativeDirectory = 'C:\\synthetic\\checkout with spaces';
+    await click('[data-native-repo]');
+    await send('Input.insertText', { text: nativeDirectory });
     const labels = await evaluate(`['triageInstructions','additionalTriageInstructions'].map(id=>
       document.querySelector('label[for="'+id+'"]').textContent)`);
     assert.deepEqual(labels, ['Custom Ask (override)', 'Additional instructions (append)']);
@@ -101,8 +109,12 @@ test('Additional Fix fields are independently editable and restored in the real 
     assert.equal(saved.triageInstructions, ask);
     assert.equal(saved.additionalTriageInstructions, extra);
     assert.equal(saved.futureSetting, 'SYNTHETIC-KEEP');
+    assert.equal(saved.nativeRepoDirectories[nativeKey], nativeDirectory);
+    assert.equal(saved.wslDistro, 'Legacy-Ubuntu');
+    assert.equal(saved.wslRepoDirectories['offline/project/repo'], '/legacy/source');
     await evaluate('closeDrawer();S.settings=structuredClone(window.fixSaved[0]);');
     await click('#settingsBtn');
+    assert.equal(await evaluate(`document.querySelector('[data-native-repo]').value`), nativeDirectory);
     assert.deepEqual(await evaluate(`['triageInstructions','additionalTriageInstructions'].map(id=>
       document.getElementById(id).value)`), [ask, extra]);
     await click('[data-dact="save"]');
@@ -1593,7 +1605,7 @@ test('real row hit testing and action identity across refreshes', { timeout: 900
     const assertOneStatusScope = layout => {
       assert.equal(layout.scopes.length, 1, 'One Fix PR execution notice per expanded PR');
       assert.deepEqual([layout.scopes[0].inStatus, layout.scopes[0].inRun, layout.scopes[0].visible], [true, false, true]);
-      assert.match(layout.scopes[0].text, /By default, Fix PR asks Copilot in WSL to try to fix merge conflicts, failing checks and review feedback/);
+      assert.match(layout.scopes[0].text, /By default, Fix PR asks Copilot on Windows to try to fix merge conflicts, failing checks and review feedback/);
     };
 
     await t.test('Fix PR plain-language summary and accessible permission details survive panel updates', async () => {
@@ -1616,7 +1628,7 @@ test('real row hit testing and action identity across refreshes', { timeout: 900
       assert.deepEqual([info.hidden, info.expanded, info.visible, info.associated], [true, 'false', false, true]);
       assert.equal(info.name, 'Fix PR permissions and limitations');
       for (const text of ['--yolo', 'not globally', 'not a filesystem sandbox', 'prompt instruction, not enforced',
-        'no-approval/policy-bypass', 'earlier runs keep their original no-push scope', 'Sign-in is required',
+        'no-approval/policy-bypass', 'Legacy WSL runs keep their recorded environment and original permission/publish scope', 'Sign-in is required',
         'noninteractive', 'Exit 0 does not verify', 'verify the results'])
         assert.ok(info.details.includes(text), `Missing boundary: ${text}`);
 
@@ -2259,8 +2271,8 @@ test('real row hit testing and action identity across refreshes', { timeout: 900
           start:document.activeElement.selectionStart,end:document.activeElement.selectionEnd
         })`), { id: 'triageInstructions', value: 'Synthetic saved instructions with an unsaved longer draft', start: 40, end: 47 },
         'Draft text must be restored before its focused selection');
-        await evaluate(`document.querySelector('[data-wsl-repo]').focus();renderDrawer()`);
-        assert.equal(await evaluate(`document.activeElement.dataset.wslRepo===document.querySelector('[data-wsl-repo]').dataset.wslRepo`), true);
+        await evaluate(`document.querySelector('[data-native-repo]').focus();renderDrawer()`);
+        assert.equal(await evaluate(`document.activeElement.dataset.nativeRepo===document.querySelector('[data-native-repo]').dataset.nativeRepo`), true);
         await evaluate(`document.querySelector('[data-dact="discover"]').focus();renderDrawer()`);
         assert.equal(await evaluate(`document.activeElement.id`), 'closeDrawer', 'Removed button focus falls back inside the drawer');
         for (const outcome of ['saved', 'failed', 'moved', 'discover', 'closed']) {
@@ -3418,6 +3430,9 @@ test('real row hit testing and action identity across refreshes', { timeout: 900
       await evaluate(`window.draftRpc=MockHost.rpc;window.originalDraftSettings=structuredClone(S.settings);
         S.settings.futureProvider={preserve:'synthetic unknown field'};
         S.settings.autoComplete.futureOption='synthetic nested option';
+        S.settings.wslDistro='Legacy-Ubuntu';
+        S.settings.wslRepoDirectories={'legacy/project/repo':'/legacy/checkout'};
+        S.settings.nativeRepoDirectories={};
         window.committedDraftSettings=structuredClone(S.settings);
         window.draftWrites=[];window.denyDraftMethod='';window.holdDraftMethod='';
         MockHost.rpc=async(method,p)=>{
@@ -3428,7 +3443,6 @@ test('real row hit testing and action identity across refreshes', { timeout: 900
             const next=structuredClone(window.committedDraftSettings);
             if(method==='saveSettings'){
               Object.assign(next,p.settings,{theme:next.theme});
-              next.wslDistro=next.wslDistro?.trim()||null;
             }
             if(method==='setTheme')next.theme=p.theme;
             if(method==='addRepo'){
@@ -3445,20 +3459,20 @@ test('real row hit testing and action identity across refreshes', { timeout: 900
       try {
         await click(await elementPoint('#settingsBtn')); await frame();
         await evaluate(`window.readDraftFields=()=>({
-          ...Object.fromEntries(['triageInstructions','refreshSeconds','mergeCheckMinutes','mergeStrategy','wslDistro',
+          ...Object.fromEntries(['triageInstructions','refreshSeconds','mergeCheckMinutes','mergeStrategy',
             ...(document.querySelector('#additionalTriageInstructions')?['additionalTriageInstructions']:[])].map(id=>[id,document.getElementById(id).value])),
           ...Object.fromEntries(['notifications','sound','ignoreDrafts','deleteSourceBranch','transitionWorkItems'].map(id=>[id,document.getElementById(id).checked])),
-          wslRepoDirectories:Object.fromEntries([...document.querySelectorAll('[data-wsl-repo]')].map(e=>[e.dataset.wslRepo,e.value]))
+          nativeRepoDirectories:Object.fromEntries([...document.querySelectorAll('[data-native-repo]')].map(e=>[e.dataset.nativeRepo,e.value]))
         });
         document.querySelector('#triageInstructions').value='Unsaved Custom Ask\\n';
         if(document.querySelector('#additionalTriageInstructions'))document.querySelector('#additionalTriageInstructions').value='Unsaved additive instructions\\n';
         document.querySelector('#refreshSeconds').value='333';
         document.querySelector('#mergeCheckMinutes').value='23';
         document.querySelector('#mergeStrategy').value='rebase';
-        document.querySelector('#wslDistro').value='Synthetic Ubuntu';
         for(const id of ['notifications','sound','deleteSourceBranch','transitionWorkItems'])document.getElementById(id).checked=false;
         document.querySelector('#ignoreDrafts').checked=true;
-        [...document.querySelectorAll('[data-wsl-repo]')].forEach((e,i)=>e.value='/home/synthetic/checkout-'+i);
+        [...document.querySelectorAll('[data-native-repo]')].forEach((e,i)=>e.value='C:\\\\synthetic\\\\checkout-'+i);
+        window.draftNativeKey=document.querySelector('[data-native-repo]').dataset.nativeRepo;
         window.expectedDraftFields=window.readDraftFields();`);
         const saved = await evaluate('structuredClone(window.committedDraftSettings)');
         const assertDraft = async () => assert.deepEqual(await evaluate('window.readDraftFields()'), await evaluate('window.expectedDraftFields'));
@@ -3515,7 +3529,9 @@ test('real row hit testing and action identity across refreshes', { timeout: 900
           assert.deepEqual(await evaluate('S.settings'), committed, 'Fresh boot reads only confirmed synthetic host settings');
           assert.equal(await evaluate(`document.querySelector('#triageInstructions').value`), 'Unsaved Custom Ask\n');
           assert.equal(await evaluate(`document.querySelector('#refreshSeconds').value`), '334');
-          assert.equal(await evaluate(`document.querySelector('#wslDistro').value`), 'Synthetic Ubuntu');
+          assert.equal(await evaluate(`document.querySelector('[data-native-repo]').value`), Object.values(committed.nativeRepoDirectories)[0]);
+          assert.equal(await evaluate(`S.settings.wslDistro`), 'Legacy-Ubuntu');
+          assert.deepEqual(await evaluate(`S.settings.wslRepoDirectories`), { 'legacy/project/repo': '/legacy/checkout' });
           assert.equal(await evaluate(`document.querySelector('#repoUrl').value`), '');
           assert.equal(await evaluate(`document.querySelector('#wlInput').value`), '');
         } finally {
@@ -3544,7 +3560,7 @@ test('real row hit testing and action identity across refreshes', { timeout: 900
         const withRepo = { ...saved, repos: [...saved.repos, { org:'contoso', project:'Sample', repo:'synthetic-draft-repo' }] };
         await assertCommitted(withRepo);
         const fields = await evaluate('window.readDraftFields()'), expected = await evaluate('window.expectedDraftFields');
-        assert.deepEqual(fields, { ...expected, wslRepoDirectories: { ...expected.wslRepoDirectories, 'contoso/sample/synthetic-draft-repo': '' } });
+        assert.deepEqual(fields, { ...expected, nativeRepoDirectories: { ...expected.nativeRepoDirectories, 'contoso/sample/synthetic-draft-repo': '' } });
         assert.equal(await evaluate(`document.querySelector('#repoUrl').value`), '');
         await evaluate(`window.expectedDraftFields=window.readDraftFields();window.denyDraftMethod='saveSettings';
           document.querySelector('#wlInput').value='Unfinished author';document.querySelector('#toasts').replaceChildren();`);
@@ -3620,19 +3636,22 @@ test('real row hit testing and action identity across refreshes', { timeout: 900
         assert.equal(await evaluate(`document.querySelector('#notifications').checked`), true);
         assert.equal(await evaluate(`document.querySelector('#repoUrl').value`), 'Unsubmitted repository URL');
         assert.equal(await evaluate(`document.querySelector('#wlInput').value`), 'Unsubmitted author');
-        assert.equal(await evaluate(`document.querySelector('#wslDistro').value`), 'Synthetic Ubuntu');
+        assert.equal(await evaluate(`document.querySelector('[data-native-repo]').value`), 'C:\\synthetic\\checkout-0');
 
-        await evaluate(`window.holdDraftMethod='saveSettings';document.querySelector('#wslDistro').value='  Submitted distro  ';`);
+        await evaluate(`window.holdDraftMethod='saveSettings';
+          window.submittedNativePath='  C:\\\\synthetic\\\\submitted  ';
+          document.querySelector('[data-native-repo]').value=window.submittedNativePath;`);
         await click(await elementPoint('[data-dact="save"]')); await frame();
         await evaluate(`(async()=>{closeDrawer();await openDrawer();
           document.querySelector('#triageInstructions').value='Newer Custom Ask';
-          document.querySelector('#wslDistro').value='  Submitted distro  ';
+          document.querySelector('[data-native-repo]').value=window.submittedNativePath;
           document.querySelector('#wlInput').value='Reopened author';renderDrawer();})()`);
         await finishWrite();
         assert.equal(await evaluate('S.settings.triageInstructions'), 'Newer Custom Ask');
         assert.equal(await evaluate(`document.querySelector('#triageInstructions').value`), 'Newer Custom Ask');
-        assert.equal(await evaluate('S.settings.wslDistro'), 'Submitted distro');
-        assert.equal(await evaluate(`document.querySelector('#wslDistro').value`), '  Submitted distro  ', 'Same-valued reopened input is not normalized by the previous drawer Save');
+        assert.equal(await evaluate('S.settings.nativeRepoDirectories[window.draftNativeKey]'), 'C:\\synthetic\\submitted');
+        assert.equal(await evaluate(`document.querySelector('[data-native-repo]').value`), '  C:\\synthetic\\submitted  ', 'Same-valued reopened input is not normalized by the previous drawer Save');
+        assert.equal(await evaluate('S.settings.wslDistro'), 'Legacy-Ubuntu');
         assert.equal(await evaluate(`document.querySelector('#wlInput').value`), 'Reopened author');
 
         for (const action of ['addRepo','addWl']) {
