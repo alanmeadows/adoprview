@@ -983,15 +983,15 @@ function syncRunOutput(card) {
   }
 }
 
-const runCardTitle = earlier => earlier ? 'Earlier run · Copilot in WSL' : 'Fix PR · Copilot in WSL';
+const runCardTitle = (earlier, run) => `${earlier ? 'Earlier run' : 'Fix PR'} · ${run?.backend === 'legacy-wsl' || run?.backend !== 'windows-native' && run?.distro ? 'Legacy Copilot in WSL' : 'Copilot on Windows'}`;
 // One per PR (beside Fix PR, or atop shelf/ignored-draft runs) so card promotion never hides or duplicates it.
 let runInfoId = 0;
 const runScopeNotice = () => {
   const id = `run-info-${++runInfoId}`;
   return `<div class="small run-scope">
-    <p class="run-summary">By default, Fix PR asks Copilot in WSL to try to fix merge conflicts, failing checks and review feedback in a separate working copy. New runs are asked to validate, commit and push fixes back to this PR. Follow progress here, then review the changes and results.
+    <p class="run-summary">By default, Fix PR asks Copilot on Windows to try to fix merge conflicts, failing checks and review feedback in a separate working copy. New runs are asked to validate, commit and push fixes back to this PR. Follow progress here, then review the changes and results.
       <button type="button" class="mini run-info-button" aria-label="Fix PR permissions and limitations" aria-expanded="false" aria-controls="${id}" aria-describedby="${id}">i</button></p>
-    <p id="${id}" class="run-info-details" hidden>Fix PR starts in a separate PR worktree with --yolo: tools, paths and URLs are allowed without confirmation for this run, not globally. This is not a filesystem sandbox. New runs are told to commit validated fixes and ordinary-push them only to this PR's captured source branch; that limit is a prompt instruction, not enforced. Merge/PR-update command denies and the prompt's no-approval/policy-bypass boundaries remain; earlier runs keep their original no-push scope. Sign-in is required beforehand; this panel is noninteractive. Exit 0 does not verify the PR fix or publication. Inspect the run's output and verify the results.</p>
+    <p id="${id}" class="run-info-details" hidden>Fix PR starts in a separate PR worktree with --yolo: tools, paths and URLs are allowed without confirmation for this run, not globally. This is not a filesystem sandbox. New runs are told to commit validated fixes and ordinary-push them only to this PR's captured source branch; that limit is a prompt instruction, not enforced. Merge/PR-update command denies and the prompt's no-approval/policy-bypass boundaries remain. Legacy WSL runs keep their recorded environment and original permission/publish scope, never silently restart on Windows. Sign-in is required beforehand; this panel is noninteractive. Exit 0 does not verify the PR fix or publication. Inspect the run's output and verify the results.</p>
   </div>`;
 };
 function setRunInfo(scope, open) {
@@ -1000,7 +1000,7 @@ function setRunInfo(scope, open) {
 }
 function renderRunCard(key, r = runForPr(key), earlier = false) {
   return `<div class="card copilot-run${earlier ? ' run-earlier' : ''}" data-run-key="${esc(key)}" data-run-id="${esc(r?.runId || '')}">
-    <h3><span class="grow">${runCardTitle(earlier)}</span>
+    <h3><span class="grow">${runCardTitle(earlier, r)}</span>
       <button class="mini" data-act="cancelRun" data-run-id="${esc(r?.runId || '')}" ${runCancelable(r) ? '' : 'hidden'}>${svg('x')} Cancel run</button></h3>
     <div class="body">
       <p class="run-status" role="status">${esc(r ? runSummary(r) : 'Not started. Choose Fix PR to begin, or Copy prompt to review the instructions first.')}</p>
@@ -1128,8 +1128,8 @@ function reorderRunCards(key, runCards) {
   const main = runCards.find(el => !el.classList.contains('run-earlier'));
   const promoted = runCards.find(el => el.dataset.runId === latestId);
   if (!main || !promoted || main === promoted) return;
-  main.classList.add('run-earlier'); $('h3 .grow', main).textContent = runCardTitle(true);
-  promoted.classList.remove('run-earlier'); $('h3 .grow', promoted).textContent = runCardTitle(false);
+  main.classList.add('run-earlier'); $('h3 .grow', main).textContent = runCardTitle(true, S.runs.get(main.dataset.runId));
+  promoted.classList.remove('run-earlier'); $('h3 .grow', promoted).textContent = runCardTitle(false, S.runs.get(promoted.dataset.runId));
   if (runOutputSelected($('.run-output', main)) || main.contains(document.activeElement) ||
       S.runOutputs.get(main.dataset.runId)?.following === false)
     S.runHistoryOpen.add(main.dataset.runId);
@@ -1209,7 +1209,7 @@ function syncCopilotButton(key) {
     button.innerHTML = svg(active || busy ? 'refresh' : 'spark') + (expanded ? ` ${cancelable ? 'Show run' : 'Fix PR'}` : '');
     button.title = cancelable ? runForPr(key)?.status === 'needs-attention'
       ? 'Copilot task may still be active; show status and cancellation controls'
-      : 'Show the active inline Copilot run for this PR' : 'Fix PR with Copilot in an isolated WSL worktree; output stays inline';
+      : 'Show the active inline Copilot run for this PR' : 'Fix PR with Copilot in an isolated Windows worktree; output stays inline';
     button.setAttribute('aria-label', button.title);
     if (active || busy) button.setAttribute('aria-busy', 'true');
     else button.removeAttribute('aria-busy');
@@ -1366,7 +1366,7 @@ function actionButtons(p) {
   else if (p.gates?.pop?.state === 'ok') out.pop = b('pop', 'key', '', 'done', 'Proof of Presence satisfied', 'disabled');
   if (p.autoCompleteBy) out.auto = b('cancelAuto', 'check', 'Auto', 'auto-set', autoCompleteTitle(p), 'aria-pressed="true"');
   else out.auto = b('autocomplete', 'zap', 'Auto', human.includes('autocomplete') ? hot : '', autoCompleteTitle(p), 'aria-pressed="false"');
-  out.fix = b('triage', 'spark', '', 'copilot', runCancelable(runForPr(p.key)) ? 'Show the inline Copilot run for this PR' : 'Fix PR with Copilot in an isolated WSL worktree; output stays inline');
+  out.fix = b('triage', 'spark', '', 'copilot', runCancelable(runForPr(p.key)) ? 'Show the inline Copilot run for this PR' : 'Fix PR with Copilot in an isolated Windows worktree; output stays inline');
   out.open = b('open', 'ext', '', '', 'Open in Azure DevOps');
   return ['approval', 'publish', 'pop', 'auto', 'fix', 'open'].map(slot => `<span class="action-slot" data-slot="${slot}">${out[slot] || ''}</span>`).join('');
 }
@@ -2010,8 +2010,8 @@ async function loadApprovalSettings() {
   if (S.drawer) renderDrawer();
 }
 
-const drawerFieldKey = el => el.id || `wsl:${el.dataset.wslRepo}`;
-const drawerFields = () => [...$('#drawerBody').querySelectorAll('input[id], select[id], textarea[id], input[data-wsl-repo]')];
+const drawerFieldKey = el => el.id || `native:${el.dataset.nativeRepo}`;
+const drawerFields = () => [...$('#drawerBody').querySelectorAll('input[id], select[id], textarea[id], input[data-native-repo]')];
 
 function clearSubmittedDrawerInput(id, value, epoch) {
   const current = $('#' + id);
@@ -2101,12 +2101,12 @@ function renderDrawer() {
       <label class="check"><input type="checkbox" id="transitionWorkItems" ${st.autoComplete.transitionWorkItems ? 'checked' : ''}/> Complete linked work items</label>
     </div>
     <div class="section">
-      <h4>Copilot in WSL</h4>
-      <p class="help">Fix PR creates an isolated worktree at the PR source commit and streams its run inline. The source checkout is not switched or edited by the launcher. WSL needs authenticated Copilot, Git and bgtask. Each deliberate run uses --yolo for tool/path/URL permissions without confirmation; global settings are unchanged. Worktree isolation is not a filesystem sandbox. Runs are told to commit validated fixes and ordinary-push them only to the PR's captured source branch (a prompt instruction, not enforced). Merge/PR-update command denies and the prompt's approval/policy boundaries remain.</p>
-      <div class="field"><label>WSL distribution (blank = default)</label><input id="wslDistro" type="text" value="${esc(st.wslDistro || '')}" placeholder="Default WSL distribution" /></div>
-      ${st.repos.map(r => `<div class="field wsl-repo"><label>${esc(r.repo)}<small>${esc(r.org)} / ${esc(r.project)}</small></label>
-        <input type="text" data-wsl-repo="${esc(repoKey(r))}" value="${esc(st.wslRepoDirectories?.[repoKey(r)] || '')}" placeholder="~/clones/${esc(r.repo)}" /></div>`).join('')}
-      <p class="help">Use an absolute Linux directory or ~/path. Blank tries ~/clones/&lt;repo&gt;. The directory and exact Azure DevOps remote are checked before any run. Failed/cancelled runs and generated changes are preserved at the displayed worktree path.</p>
+      <h4>Copilot on Windows</h4>
+      <p class="help">New Fix PR runs use Windows Copilot and Git in an isolated worktree at the captured PR source commit; no WSL or bgtask is needed. The source checkout is not switched or edited by the launcher. Each deliberate run uses --yolo for tool/path/URL permissions without confirmation; global settings are unchanged. Worktree isolation is not a filesystem sandbox. Runs are told to commit validated fixes and ordinary-push them only to the PR's captured source branch (a prompt instruction, not enforced). Merge/PR-update command denies and the prompt's approval/policy boundaries remain.</p>
+      ${st.repos.map(r => `<div class="field native-repo"><label>${esc(r.repo)}<small>${esc(r.org)} / ${esc(r.project)}</small></label>
+        <input type="text" data-native-repo="${esc(repoKey(r))}" value="${esc(st.nativeRepoDirectories?.[repoKey(r)] || '')}" placeholder="C:\\repos\\${esc(r.repo)}" /></div>`).join('')}
+      <p class="help">Choose an existing absolute Windows Git checkout for each Fix repository. There is no ~/clones or WSL fallback. Native directory, tools, authentication and the exact ADO remote are checked before launch. Ask/focused review read pinned ADO source directly and do not need these mappings.</p>
+      <p class="help">Legacy WSL Fix runs remain on their recorded host with their original work and scope. Their WSL setup is retained in settings for migration/history, not required for new work. Use each run's exact Cancel control; unavailable legacy tools leave an explicit recovery warning, never a new native restart.</p>
     </div>
     <div class="section">
       <h4>Copilot triage instructions</h4>
@@ -2269,8 +2269,7 @@ async function onDrawerAction(act, el) {
           additionalTriageInstructions: typeof storedAdditionalInstructions === 'string' &&
             additionalInstructions === storedAdditionalInstructions.replace(/\r\n?/g, '\n')
             ? storedAdditionalInstructions : additionalInstructions,
-          wslDistro: $('#wslDistro').value.trim(),
-          wslRepoDirectories: Object.fromEntries([...document.querySelectorAll('[data-wsl-repo]')].map(e => [e.dataset.wslRepo, e.value.trim()]).filter(([, value]) => value)),
+          nativeRepoDirectories: Object.fromEntries([...document.querySelectorAll('[data-native-repo]')].map(e => [e.dataset.nativeRepo, e.value.trim()]).filter(([, value]) => value)),
         }, true);
         toast('Settings saved');
         break;

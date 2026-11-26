@@ -74,6 +74,8 @@ test('Additional Fix fields are independently editable and restored in the real 
       S.snap.approvalProvider=null;
       S.settings.triageInstructions=null;S.settings.additionalTriageInstructions=null;
       S.settings.futureSetting='SYNTHETIC-KEEP';
+      S.settings.wslDistro='Legacy-Ubuntu';S.settings.wslRepoDirectories={'offline/project/repo':'/legacy/source'};
+      S.settings.nativeRepoDirectories={};
       window.fixSaved=[];
       window.fixExisting=['running','recovering','completed'].map((status,i)=>({
         key:'offline:'+i,runId:'existing-'+i,status,output:'Captured session '+i
@@ -86,6 +88,12 @@ test('Additional Fix fields are independently editable and restored in the real 
       };
     `);
     await click('#settingsBtn');
+    assert.equal(await evaluate(`!!document.querySelector('[data-native-repo]')&&!document.querySelector('[data-wsl-repo]')&&!document.querySelector('#wslDistro')`), true);
+    assert.equal(await evaluate(`getComputedStyle(document.querySelector('.native-repo label small')).display`), 'block');
+    const nativeKey = await evaluate(`document.querySelector('[data-native-repo]').dataset.nativeRepo`);
+    const nativeDirectory = 'C:\\synthetic\\checkout with spaces';
+    await click('[data-native-repo]');
+    await send('Input.insertText', { text: nativeDirectory });
     const labels = await evaluate(`['triageInstructions','additionalTriageInstructions'].map(id=>
       document.querySelector('label[for="'+id+'"]').textContent)`);
     assert.deepEqual(labels, ['Custom Ask (override)', 'Additional instructions (append)']);
@@ -101,8 +109,12 @@ test('Additional Fix fields are independently editable and restored in the real 
     assert.equal(saved.triageInstructions, ask);
     assert.equal(saved.additionalTriageInstructions, extra);
     assert.equal(saved.futureSetting, 'SYNTHETIC-KEEP');
+    assert.equal(saved.nativeRepoDirectories[nativeKey], nativeDirectory);
+    assert.equal(saved.wslDistro, 'Legacy-Ubuntu');
+    assert.equal(saved.wslRepoDirectories['offline/project/repo'], '/legacy/source');
     await evaluate('closeDrawer();S.settings=structuredClone(window.fixSaved[0]);');
     await click('#settingsBtn');
+    assert.equal(await evaluate(`document.querySelector('[data-native-repo]').value`), nativeDirectory);
     assert.deepEqual(await evaluate(`['triageInstructions','additionalTriageInstructions'].map(id=>
       document.getElementById(id).value)`), [ask, extra]);
     await click('[data-dact="save"]');
@@ -1593,7 +1605,7 @@ test('real row hit testing and action identity across refreshes', { timeout: 900
     const assertOneStatusScope = layout => {
       assert.equal(layout.scopes.length, 1, 'One Fix PR execution notice per expanded PR');
       assert.deepEqual([layout.scopes[0].inStatus, layout.scopes[0].inRun, layout.scopes[0].visible], [true, false, true]);
-      assert.match(layout.scopes[0].text, /By default, Fix PR asks Copilot in WSL to try to fix merge conflicts, failing checks and review feedback/);
+      assert.match(layout.scopes[0].text, /By default, Fix PR asks Copilot on Windows to try to fix merge conflicts, failing checks and review feedback/);
     };
 
     await t.test('Fix PR plain-language summary and accessible permission details survive panel updates', async () => {
@@ -1616,7 +1628,7 @@ test('real row hit testing and action identity across refreshes', { timeout: 900
       assert.deepEqual([info.hidden, info.expanded, info.visible, info.associated], [true, 'false', false, true]);
       assert.equal(info.name, 'Fix PR permissions and limitations');
       for (const text of ['--yolo', 'not globally', 'not a filesystem sandbox', 'prompt instruction, not enforced',
-        'no-approval/policy-bypass', 'earlier runs keep their original no-push scope', 'Sign-in is required',
+        'no-approval/policy-bypass', 'Legacy WSL runs keep their recorded environment and original permission/publish scope', 'Sign-in is required',
         'noninteractive', 'Exit 0 does not verify', 'verify the results'])
         assert.ok(info.details.includes(text), `Missing boundary: ${text}`);
 

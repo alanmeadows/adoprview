@@ -99,7 +99,7 @@ internal sealed class InvestigationService(
             c.Cancel?.Dispose();
             c.Cancel = new CancellationTokenSource(TimeSpan.FromMinutes(10));
             Set(c, s => s with { RequestId = Guid.NewGuid().ToString("N"), Status = "preparing",
-                Message = c.Source is null ? "Preparing a pinned isolated WSL source worktree..." : "Checking the pinned PR revision before this follow-up..." });
+                Message = c.Source is null ? "Preparing authenticated pinned PR source..." : "Checking the pinned PR revision before this follow-up..." });
             c.Work = Task.Run(() => RunAsync(c, kind, question.Trim(), contexts, selectedId, urls, c.Cancel.Token));
             return Snapshot(c.State);
         }
@@ -204,7 +204,7 @@ internal sealed class InvestigationService(
             c = Current(key, conversationId);
             if (c.State.RequestId != requestId) throw new InvalidOperationException("This investigation turn is no longer current.");
             if (c.State.Status == "posting") throw new InvalidOperationException("Posting cannot be cancelled mid-request. Wait for the exact result.");
-            if (c.Closing) throw new InvalidOperationException("Owned worktree cleanup is finishing. Wait for its exact result.");
+            if (c.Closing) throw new InvalidOperationException("Pinned source cleanup is finishing. Wait for its exact result.");
             if (Active(c.State.Status)) { c.Cancel!.Cancel(); Set(c, s => s with { Status = "cancelling", Message = "Cancelling source inspection..." }); }
         }
         await c.Work;
@@ -219,7 +219,7 @@ internal sealed class InvestigationService(
             c = Current(key, conversationId);
             if (Active(c.State.Status)) throw new InvalidOperationException("Finish or cancel this turn before starting a new conversation.");
             c.Closing = true;
-            Set(c, s => s with { Status = "preparing", Message = "Closing the owned source worktree..." });
+            Set(c, s => s with { Status = "preparing", Message = "Closing the pinned source context..." });
             c.Work = ResetCoreAsync(c);
         }
         await c.Work;
@@ -239,7 +239,7 @@ internal sealed class InvestigationService(
             Set(c, s => s with { ConversationId = Guid.NewGuid().ToString("N"), RequestId = "", Status = "completed",
                 Message = "New conversation. The next question will capture fresh source.", Revision = null, Worktree = null, Turns = [], Evidence = [], Coverage = [], ExplanationContexts = [], ReferencePrContexts = [] });
         }
-        catch (Exception ex) { Set(c, s => s with { Status = "failed", Message = "Worktree cleanup failed; it was retained: " + ex.Message }); }
+        catch (Exception ex) { Set(c, s => s with { Status = "failed", Message = "Pinned source cleanup failed; the context was retained: " + ex.Message }); }
         finally { c.Closing = false; }
     }
 
