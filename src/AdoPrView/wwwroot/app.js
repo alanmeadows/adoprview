@@ -616,7 +616,7 @@ function updateExplanation(r) {
   if (!old || old.requestId !== r.requestId) {
     if (d.kind === 'explain') d.selected = `explain:${r.requestId}`;
     renderInvestigation(r.key);
-  } else if (r.status !== old.status) {
+  } else if (explanationActive(r) !== explanationActive(old)) {
     renderInvestigation(r.key);
   }
   // Streaming only mutates this panel, preserving neighboring action targets and focus.

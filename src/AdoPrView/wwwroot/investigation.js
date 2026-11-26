@@ -196,7 +196,8 @@ function confirmLensPost(key, r, selected) {
   $('#assistancePostPreview').innerHTML = `<p>Post exactly ${selected.length} selected finding(s) on ${esc(p?.repo || key)} !${esc(p?.id || '')}?</p>
     <p class="small">${esc(explanationRevision(r))}<br>Unselected findings will not be posted.</p>
     ${selected.map(f => `<article class="lens-finding"><strong>${esc(f.title)}</strong>
-      <p>${esc(f.path)}:${esc(f.line)}</p><p>${esc(f.body)}</p><pre>${esc(f.quote)}</pre></article>`).join('')}
+      <p>${esc(f.path)}:${esc(f.line)}</p><p>Complete outgoing comment, including the review focus/reference and attribution:</p>
+      <pre>${esc(f.outgoingComment)}</pre><details><summary>Inspected source excerpt (not added to comment)</summary><pre>${esc(f.quote)}</pre></details></article>`).join('')}
     <p>These become visible ADO comments on the target PR, not the reference PR. A fresh revision check runs before posting.</p>`;
   dialog.returnValue = '';
   return new Promise(resolve => {
@@ -262,7 +263,7 @@ function updateInvestigation(r) {
   const activity = [...S.investigations.values()].find(investigationActive);
   $('#openInvestigationActivity').hidden = !activity;
   $('#openInvestigationActivity').dataset.key = activity?.key || '';
-  if (r.status === 'completed' && r.turns.at(-1)?.id !== old?.turns.at(-1)?.id) {
+  if (r.status === 'completed' && r.turns.length && r.turns.at(-1).id !== old?.turns.at(-1)?.id) {
     d.selected = `turn:${r.turns.at(-1).id}`;
     if (d.sentRequest === r.requestId) {
       if (investigationQuestion(d) === d.sentQuestion) {
@@ -328,6 +329,10 @@ async function investigationAction(action, key = investigationKey, turnId) {
       d.error = 'Select findings from the latest completed review. Nothing was posted.'; renderInvestigation(key); return;
     }
     const selected = turn.findings.filter(f => findingIds.includes(f.id));
+    if (selected.some(f => typeof f.outgoingComment !== 'string' || !f.outgoingComment)) {
+      d.error = 'The complete outgoing comment preview is unavailable. Generate a new private review before posting.';
+      renderInvestigation(key); return;
+    }
     if (!await confirmLensPost(key, r, selected)) return;
     method = 'postLensFindings'; payload = { ...identity, requestId: turnId, findingIds, confirmed: true };
   } else if (action === 'detach') {

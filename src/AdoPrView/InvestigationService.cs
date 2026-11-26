@@ -160,7 +160,9 @@ internal sealed class InvestigationService(
             if (string.IsNullOrWhiteSpace(answer.Answer) || answer.Answer.Length > 32000)
                 throw new InvalidOperationException("Copilot returned no bounded question answer.");
             InvestigationTurn[] turns = [.. c.State.Turns,
-                new(c.State.RequestId, kind, question, answer.Answer, answer.Findings, [], explanationRequestId,
+                new(c.State.RequestId, kind, question, answer.Answer,
+                    answer.Findings.Select(f => f with { OutgoingComment = PrService.LensCommentContent(
+                        c.Source.Context.Revision, c.State.ConversationId, c.State.RequestId, question, f) }).ToArray(), [], explanationRequestId,
                     references.Select(r => r.Url).ToArray(), contexts.Select(a => a.RequestId).ToArray(),
                     contexts.SingleOrDefault(a => a.RequestId == explanationRequestId)?.SectionIndex)];
             var referenceSnapshots = references.Select(r => r.Snapshot()).ToArray();

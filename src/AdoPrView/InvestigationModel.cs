@@ -7,7 +7,7 @@ using Microsoft.Extensions.AI;
 
 namespace AdoPrView;
 
-internal sealed record LensFinding(string Id, string Title, string Body, string Path, int Line, string Quote);
+internal sealed record LensFinding(string Id, string Title, string Body, string Path, int Line, string Quote, string? OutgoingComment = null);
 internal sealed record InvestigationAnswer(string Answer, LensFinding[] Findings);
 internal sealed record ExplanationAttachment(string RequestId, string Output, ExplainRevision Revision, string[] Evidence, string[] Coverage,
     int? SectionIndex = null, string? SectionTitle = null, int[]? IncludedSectionIndices = null,
@@ -201,7 +201,8 @@ internal sealed class InvestigationModel : IInvestigationModel
 
     internal static string SerializeReplay(InvestigationTurn[] turns, ExplanationAttachment[] explanationContexts,
         string kind, string question, string? explanationRequestId = null, ReferencePrAttachment[]? referencePrContexts = null) =>
-        JsonSerializer.Serialize(new { explanationContexts, referencePrContexts = referencePrContexts ?? [], turns,
+        JsonSerializer.Serialize(new { explanationContexts, referencePrContexts = referencePrContexts ?? [],
+            turns = turns.Select(t => t with { Findings = t.Findings.Select(f => f with { OutgoingComment = null }).ToArray() }),
             currentRequest = new { kind, question, explanationRequestId,
                 explanationSectionIndex = explanationContexts.SingleOrDefault(a => a.RequestId == explanationRequestId)?.SectionIndex } }, Bridge.Json);
 

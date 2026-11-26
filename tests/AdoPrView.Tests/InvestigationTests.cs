@@ -149,7 +149,7 @@ static class InvestigationTests
                 (key, revision, _, _, _, selected, _, _) =>
                 {
                     writes++;
-                    Check(key == f.Pr.Key && revision.Id == 123 && selected.Single() == finding, "Reference replaced the posting target");
+                    Check(key == f.Pr.Key && revision.Id == 123 && selected.Single() with { OutgoingComment = null } == finding, "Reference replaced the posting target");
                     return Task.FromResult(new[] { new CommentOutcome("0", "posted", "Confirmed target comment", null) });
                 }, new Model(async (source, history, kind, question, ct) =>
                 {
@@ -536,12 +536,15 @@ static class InvestigationTests
                 {
                     calls++;
                     Check(lens == "Does this work with the caller?", "Posted comment lost the concrete review lens");
-                    Check(selected.Length == 1 && selected[0] == finding, "Unselected findings posted");
+                    Check(selected.Length == 1 && selected[0] with { OutgoingComment = null } == finding, "Unselected findings posted");
                     return Task.FromResult(new[] { new CommentOutcome("0", "posted", "confirmed", "https://dev.azure.com/offline/thread") });
                 }, new Model((_, _, _, _, _) => Task.FromResult(new InvestigationAnswer("Scoped preview.", [finding, finding with { Id = "1" }]))));
             var start = service.Ask(f.Pr.Key, "", "lens", "Does this work with the caller?");
             var done = await Finish(service);
             Check(calls == 0 && done.Turns[0].Findings.Length == 2, "Lens generation wrote to ADO");
+            Check(done.Turns[0].Findings[0].OutgoingComment == PrService.LensCommentContent(source.Context.Revision,
+                start.ConversationId, start.RequestId, "Does this work with the caller?", finding),
+                "Confirmation preview differs from the full host-formatted outgoing comment");
             await Throws<ArgumentException>(() => service.PostAsync(f.Pr.Key, start.ConversationId, start.RequestId, ["0"], false));
             await Throws<ArgumentException>(() => service.PostAsync(f.Pr.Key, start.ConversationId, start.RequestId, [], true));
             await Throws<InvalidOperationException>(() => service.PostAsync(f.Pr.Key, start.ConversationId, "stale", ["0"], true));
@@ -740,6 +743,10 @@ static class InvestigationTests
                 posts++;
                 var thread = JsonNode.Parse(request.Content!.ReadAsStringAsync().GetAwaiter().GetResult())!;
                 var content = thread["comments"]![0]!["content"]!.GetValue<string>();
+                Check(content == PrService.LensCommentContent(context.Revision, "conversation", "turn",
+                    "[label](https://example.invalid/target)", new LensFinding((posts - 1).ToString(), "Failure",
+                    "![hidden](https://example.invalid/image) <img src='https://example.invalid/html'>", "/RetryPolicy.cs", 2, "{")),
+                    "Actual outgoing text differs from the server preview formatter");
                 Check(content.Contains(@"\!\[hidden\]\(https://example\.invalid/image\)") &&
                     content.Contains(@"\[label\]\(https://example\.invalid/target\)") && content.Contains("&lt;img"),
                     "Comment published Markdown/HTML absent from literal preview");

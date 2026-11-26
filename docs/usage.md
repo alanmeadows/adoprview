@@ -538,7 +538,10 @@ escapes Markdown/HTML so image URLs, hidden link targets or markup cannot be pos
 without being visible in the confirmed preview.
 **Nothing is selected or posted automatically.** Select the findings you want,
 choose **Post selected findings to ADO...**, and inspect the exact selected
-comment bodies, count, target PR and revision in the confirmation dialog.
+complete outgoing comments, count, target PR and revision in the confirmation
+dialog. Each literal-text preview includes the full review focus/reference
+(including any supplied private rule quote or URL), revision metadata,
+attribution and reconciliation marker exactly as formatted by the host.
 **Keep private** or Escape cancels without writing and returns focus to the
 posting action; **Confirm selected comments** publishes that selection.
 The host rechecks PR identity and revisions, posts only that selection through
