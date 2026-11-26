@@ -135,7 +135,7 @@ function renderAssistanceContent(key) {
     ${[['explain', 'Explain'], ['question', 'Ask'], ['lens', 'Focused review']].map(([kind, label]) =>
       `<button type="button" class="mini" data-assistance-intent="${kind}" aria-pressed="${d.kind === kind}" ${busy ? 'disabled' : ''}>${label}</button>`).join('')}</div>
     <p class="small">Read-only understanding and private review. Results and drafts last while this app is running; they are not saved across app exit. Fix is a separate WSL code-changing run.</p>
-    ${options.length ? `<label class="small">Working result <select data-assistance-result>${options.map(o => `<option value="${esc(o.id)}" ${o.id === selected ? 'selected' : ''}>${esc(o.label)}</option>`).join('')}${d.selected && !result ? '<option selected value="">Selected result expired</option>' : ''}</select></label>` : ''}
+    ${options.length ? `<label class="small">Working result <select data-assistance-result data-inv="result">${options.map(o => `<option value="${esc(o.id)}" ${o.id === selected ? 'selected' : ''}>${esc(o.label)}</option>`).join('')}${d.selected && !result ? '<option selected value="">Selected result expired</option>' : ''}</select></label>` : ''}
     ${activeExplain && result?.explanation?.requestId !== latestExplanation.requestId ? '<p class="small" role="status">A new explanation is running; the selected result remains unchanged.</p>' : ''}
     ${activeExplain && d.kind !== 'explain' ? `<p class="small" role="status">${esc(latestExplanation.message)} <button class="mini" data-act="cancelExplanation" data-request-id="${esc(latestExplanation.requestId)}" ${latestExplanation.status === 'cancelling' ? 'disabled' : ''}>Cancel Explain</button></p>` : ''}
     ${investigationActive(r) && d.kind === 'explain' ? `<p class="small" role="status">${esc(r.message)}
@@ -157,7 +157,7 @@ function renderAssistanceContent(key) {
       <div class="assistance-context small">
         ${d.attachedId ? `<strong>Using explanation ${esc(d.attachedId.slice(0, 12))}</strong>
           ${attached ? ` · ${esc(explanationRevision(attached))}` : '<span class="error"> · unavailable; submission is blocked until you explicitly choose another context.</span>'}
-          ${sections.length ? `<label>Context package <select data-assistance-section ${busy ? 'disabled' : ''}><option value="" ${d.sectionIndex === null ? 'selected' : ''}>Entire explanation</option>
+          ${sections.length ? `<label>Context package <select data-assistance-section data-inv="section" ${busy ? 'disabled' : ''}><option value="" ${d.sectionIndex === null ? 'selected' : ''}>Entire explanation</option>
             ${sections.map(s => `<option value="${s.index}" ${d.sectionIndex === s.index ? 'selected' : ''}>${esc(s.title)} · ${s.characters.toLocaleString()} characters${s.includesArm ? ' + complete ARM block' : ''}</option>`).join('')}</select></label>
             <p>Explicit sections retain their complete heading subtree plus the full host ARM Before/After, diff, risks and original coverage. Character estimates exclude JSON/history overhead; a package may still exceed the safe limit.</p>` : ''}
           ${sectionConflict ? '<p class="error">This explanation already has a different package in the conversation. Start a new conversation before changing it; prior context will not be silently replaced.</p>' : ''}
@@ -345,7 +345,14 @@ async function investigationAction(action, key = investigationKey, turnId) {
   try {
     const result = await rpc(method, payload);
     if (method === 'askPr') d.sentRequest = result.requestId;
-    if (method === 'resetInvestigation') { d.attachedId = ''; d.sectionIndex = null; d.selected = ''; }
+    if (method === 'resetInvestigation') {
+      if (result.status !== 'completed' || result.conversationId === identity.conversationId || result.turns?.length !== 0) {
+        updateInvestigation(result);
+        d.error = result.message || 'The conversation reset was not confirmed. Existing context was retained.';
+        return false;
+      }
+      d.attachedId = ''; d.sectionIndex = null; d.selected = '';
+    }
     updateInvestigation(result);
     return true;
   } catch (e) {

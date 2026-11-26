@@ -106,7 +106,10 @@ test('task-led assistance keeps exact Explain context, private review intent, se
           const state=S.investigations.get(p.key),turn=state.turns.at(-1);
           return {...state,sequence:++invSequence,status:'completed',message:'One selected comment confirmed; unselected findings remain private.',turns:[...state.turns.slice(0,-1),{...turn,outcomes:p.findingIds.map(id=>({findingId:id,status:'posted',message:'Synthetic ADO outcome for selected '+id,url:'https://dev.azure.com/offline/thread?discussionId=41'}))}]};
         }
-        if(method==='resetInvestigation')return {key:p.key,conversationId:'fresh-'+(++invRequest),requestId:'',sequence:++invSequence,status:'completed',message:'Fresh conversation; no source captured.',revision:null,worktree:null,turns:[],evidence:[],coverage:[]};
+        if(method==='resetInvestigation'){
+          if(window.resetDenied)return {...S.investigations.get(p.key),sequence:++invSequence,status:'failed',message:'Worktree cleanup failed; existing conversation retained.'};
+          return {key:p.key,conversationId:'fresh-'+(++invRequest),requestId:'',sequence:++invSequence,status:'completed',message:'Fresh conversation; no source captured.',revision:null,worktree:null,turns:[],evidence:[],coverage:[]};
+        }
         if(method==='openUrl')return null;
         throw Error('Unexpected mocked RPC '+method);
       };
@@ -239,6 +242,12 @@ test('task-led assistance keeps exact Explain context, private review intent, se
     await evaluate(`prA.reviewers=[{name:'Required no vote',vote:0,isRequired:true},{name:'Approved group',vote:10,isRequired:true,isContainer:true},{name:'Rejected',vote:-10,isRequired:true},{name:'Suggestions',vote:5},{name:'Waiting',vote:-5}];renderRows();`);
     await screenshot('15-reviewer-mix', 'Actual Approved-first list still calls out rejected/waiting/no-vote entries.', '#rows .reviewers');
     await click('[data-assistance-intent="question"]');
+    await evaluate(`window.resetDenied=true;window.retainedConversation=S.investigations.get(prA.key).conversationId;`);
+    await click('[data-investigation-action="detach"]');
+    assert.equal(await evaluate('assistanceDraft(prA.key).attachedId'),'E1');
+    assert.equal(await evaluate('S.investigations.get(prA.key).conversationId'),await evaluate('window.retainedConversation'));
+    assert.match(await evaluate('assistanceDraft(prA.key).error'),/cleanup failed/);
+    await evaluate('window.resetDenied=false');
     await click('[data-investigation-action="reset"]');
     assert.equal(await evaluate('S.investigations.get(prA.key).turns.length'),0);
     assert.equal(await evaluate('assistanceDraft(prA.key).attachedId'),'');
@@ -249,12 +258,19 @@ test('task-led assistance keeps exact Explain context, private review intent, se
     assert.match(await evaluate(`card().querySelector('[data-inv="error"]').textContent`), /serialized context limit/);
     await screenshot('16-section-choice', 'Actual overflow error and complete source remain above the chosen package/composer; this overview is not a selector crop.');
     await screenshot('16b-visible-section-choice', 'Actual package selector and preserved draft after whole-context overflow. Error remains recorded above; no context-free retry. Full explanation remains readable.', '[data-inv="form"]');
-    await evaluate(`(()=>{const choice=card().querySelector('[data-assistance-section]');choice.value='1';choice.dispatchEvent(new Event('change',{bubbles:true}));})()`);
+    await click('[data-assistance-section]');
+    await send('Input.dispatchKeyEvent',{type:'keyDown',key:'Escape',code:'Escape',windowsVirtualKeyCode:27});
+    await send('Input.dispatchKeyEvent',{type:'keyUp',key:'Escape',code:'Escape',windowsVirtualKeyCode:27});
+    await evaluate(`(()=>{const choice=card().querySelector('[data-assistance-section]');choice.focus();choice.value='1';choice.dispatchEvent(new Event('change',{bubbles:true}));})()`);
+    assert.equal(await evaluate('document.activeElement.dataset.inv'),'section');
     await click('[data-inv="send"]');
     assert.equal(await evaluate('calls.at(-1).explanationSectionIndex'),1);
     await evaluate(`finishInv('question');card().querySelector('.assistance-context details').open=true;`);
     assert.match(await evaluate(`card().querySelector('.assistance-context details').textContent`),/Omitted: Large notes.*Original coverage/s);
     await screenshot('17-section-receipt', 'Actual accepted package disclosure includes explicit omissions and full ARM/risks; full E4 artifact remains separately selectable.');
+    await evaluate(`(()=>{const result=card().querySelector('[data-assistance-result]');result.focus();result.value='explain:E4';result.dispatchEvent(new Event('change',{bubbles:true}));})()`);
+    assert.equal(await evaluate('document.activeElement.dataset.inv'),'result');
+    await click('[data-assistance-intent="question"]');
     await evaluate(`(()=>{const choice=card().querySelector('[data-assistance-section]');choice.value='';choice.dispatchEvent(new Event('change',{bubbles:true}));})()`);
     await input('question','Try changing the imported package.');
     assert.equal(await evaluate(`card().querySelector('[data-inv="send"]').disabled`),true);
