@@ -147,9 +147,16 @@ static class PopPaneTests
         var thread = new Thread(() =>
         {
             var directory = Path.Combine(Path.GetTempPath(), "ado-pop-browser-" + Guid.NewGuid().ToString("N"));
+            var diagnosticDirectory = directory + "-diagnostics";
+            using var diagnostics = new AppDiagnostics(diagnosticDirectory, ex => throw new Exception("Fixture logging failed", ex));
             var result = new PopPolicyResult("pending", "Offline ADO says PoP is still pending.");
+            Exception? policyFailure = null;
             var reads = new List<PopTarget>();
-            var pane = new PopBrowserPane(target => { reads.Add(target); return Task.FromResult(result); }, directory);
+            var pane = new PopBrowserPane(target =>
+            {
+                reads.Add(target);
+                return policyFailure is null ? Task.FromResult(result) : Task.FromException<PopPolicyResult>(policyFailure);
+            }, directory, diagnostics);
             var layout = new Grid();
             layout.RowDefinitions.Add(new RowDefinition { Height = new GridLength(170) });
             layout.RowDefinitions.Add(new RowDefinition { Height = new GridLength(10) });
@@ -168,8 +175,11 @@ static class PopPaneTests
                 Background = new System.Windows.Media.SolidColorBrush(System.Windows.Media.Color.FromRgb(0x0e, 0x10, 0x14)) };
             var closeRequests = 0;
             var finishing = false;
+            window.StateChanged += (_, _) => diagnostics.Record("window-state", window.WindowState.ToString());
+            window.IsVisibleChanged += (_, _) => diagnostics.Record("window-visibility", window.IsVisible ? "visible" : "hidden");
             window.Closing += (_, e) =>
             {
+                diagnostics.Record("window-close-requested", "fixture-close");
                 if (finishing) return;
                 closeRequests++;
                 e.Cancel = true;
@@ -183,7 +193,14 @@ static class PopPaneTests
                 core.AddWebResourceRequestedFilter("*", CoreWebView2WebResourceContext.All);
                 core.WebResourceRequested += (_, e) =>
                 {
-                    var error = e.Request.Uri.EndsWith("/offline-error");
+                    var path = new Uri(e.Request.Uri).AbsolutePath;
+                    if (path == "/offline-redirect")
+                    {
+                        e.Response = core.Environment.CreateWebResourceResponse(new MemoryStream(), 302, "Found",
+                            "Location: https://login.microsoftonline.com/offline-callback?code=SECRET-CODE#SECRET-FRAGMENT");
+                        return;
+                    }
+                    var error = path == "/offline-error";
                     var html = "<!doctype html><html><body style='background:#e8eef5;font:18px sans-serif;padding:24px'><h2>Offline PoP compatibility fixture</h2><p>No live sign-in, approval or credentials.</p><button onclick=\"window.open('https://login.microsoftonline.com/offline-popup')\">Open fake sign-in popup</button></body></html>";
                     e.Response = core.Environment.CreateWebResourceResponse(new MemoryStream(Encoding.UTF8.GetBytes(html)), error ? 503 : 200, error ? "Unavailable" : "OK", "Content-Type: text/html; charset=utf-8");
                 };
@@ -210,6 +227,8 @@ static class PopPaneTests
                     Check(reads.Single() == target && pane.Session.Status.Contains("pending"), "Policy check not captured");
                     foreach (var state in new[] { WindowState.Normal, WindowState.Maximized })
                     {
+                        var statusBeforeReturn = pane.Session.Status;
+                        var readsBeforeReturn = reads.Count;
                         window.WindowState = state;
                         popupReady = new(TaskCreationOptions.RunContinuationsAsynchronously);
                         await core.ExecuteScriptAsync("window.open('https://login.microsoftonline.com/offline-popup');");
@@ -217,18 +236,32 @@ static class PopPaneTests
                         var popupView = pane.Popup;
                         Check(pane.Popup is not null && child.Environment.UserDataFolder == core.Environment.UserDataFolder &&
                             !child.Settings.IsWebMessageEnabled && !child.Settings.AreHostObjectsAllowed, "Popup isolation/session mismatch");
+                        await Navigate(child, () =>
+                        {
+                            child.Navigate("https://login.microsoftonline.com/offline-redirect?state=SECRET-STATE");
+                            return Task.CompletedTask;
+                        });
+                        Check(new Uri(child.Source).AbsolutePath == "/offline-callback", "Synthetic successful redirect did not return");
+                        var traceStart = ReadTrace(diagnostics).Length;
                         var popupClosed = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
                         child.WindowCloseRequested += (_, _) =>
                         {
                             Check(!popupView!.IsDisposed, "Popup disposed inside the WebView callback");
                             popupClosed.TrySetResult();
                         };
-                        await child.ExecuteScriptAsync("setTimeout(() => { window.close(); window.close(); }, 20);");
+                        await Navigate(core, async () =>
+                        {
+                            await child.ExecuteScriptAsync("setTimeout(() => { window.opener.location.replace('https://dev.azure.com/offline-return?code=SECRET-CODE'); window.close(); window.close(); }, 20);");
+                        });
                         await popupClosed.Task.WaitAsync(TimeSpan.FromSeconds(15));
                         await window.Dispatcher.InvokeAsync(() => { }, DispatcherPriority.ApplicationIdle);
                         Check(popupView!.IsDisposed && closeRequests == 0 && window.IsVisible &&
                             dashboard.IsVisible && window.WindowState == state && pane.Session.IsOpen && pane.Popup is null,
                             "Website popup close reached the dashboard window instead of closing only the popup");
+                        CheckWebsiteCloseTrace(diagnostics, traceStart, "popup");
+                        Check(pane.Session.Status == statusBeforeReturn && reads.Count == readsBeforeReturn,
+                            "Synthetic sign-in return changed policy status without an ADO check");
+                        traceStart = ReadTrace(diagnostics).Length;
                         var paneClosed = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
                         void Closed(object? sender, object args) => paneClosed.TrySetResult();
                         core.WindowCloseRequested += Closed;
@@ -241,6 +274,7 @@ static class PopPaneTests
                         Check(closeRequests == 0 && window.IsVisible && dashboard.IsVisible && window.WindowState == state &&
                             !pane.Session.IsOpen && pane.Visibility == Visibility.Collapsed,
                             "Website pane close reached the dashboard window or changed its state");
+                        CheckWebsiteCloseTrace(diagnostics, traceStart, "pane");
                         await Navigate(core, () => pane.OpenAsync(target));
                     }
                     window.WindowState = WindowState.Normal;
@@ -271,6 +305,8 @@ static class PopPaneTests
                     await window.Dispatcher.InvokeAsync(() => { }, DispatcherPriority.ApplicationIdle);
                     Check(pane.Session.IsOpen && pane.Session.Selection!.Target == target && reads.Count == 5 &&
                         closeRequests == 0 && window.IsVisible, "A stale website close affected a newer PR selection");
+                    Check(ReadTrace(diagnostics).Any(record => Event(record) == "pop-website-close-ignored" &&
+                        record.GetProperty("reason").GetString()!.EndsWith(";selection-changed")), "Stale close decision missing from trace");
                     await Navigate(core, () => { core.Navigate(target.Url); return Task.CompletedTask; });
                     var shot = Environment.GetEnvironmentVariable("ADOPRVIEW_POP_SCREENSHOT");
                     if (!string.IsNullOrEmpty(shot))
@@ -284,6 +320,23 @@ static class PopPaneTests
                         Check(divider.Focusable && divider.KeyboardIncrement > 0, "Resize affordance is not keyboard accessible");
                         CaptureWindow(window, Path.ChangeExtension(shot, ".narrow.native.png"));
                     }
+                    policyFailure = new IOException("SECRET-ERROR https://private.invalid/auth?code=SECRET-CODE");
+                    try { await pane.CheckAsync(); throw new Exception("Synthetic policy failure succeeded"); }
+                    catch (IOException) { }
+                    var records = ReadTrace(diagnostics);
+                    var text = string.Join("\n", records.Select(record => record.GetRawText()));
+                    Check(diagnostics.Healthy && !text.Contains("SECRET") && !text.Contains("https://") &&
+                        !text.Contains("Offline PR") && !text.Contains("repo-id"), "PoP trace leaked page, auth or PR data");
+                    Check(records.All(record => record.GetProperty("session").GetString() == diagnostics.SessionId),
+                        "PoP and host events did not share a diagnostic session");
+                    var failedCheck = records.Last(record => Event(record) == "pop-policy-check-failed");
+                    Check(failedCheck.GetProperty("exceptions")[0].GetProperty("type").GetString() == typeof(IOException).FullName &&
+                        failedCheck.GetProperty("exceptions")[0].GetProperty("frames").GetArrayLength() > 0,
+                        "Handled PoP policy failure lost safe exception structure");
+                    Check(records.Any(record => Event(record) == "pop-navigation-completed" &&
+                        record.GetProperty("reason").GetString()!.Contains(";http-503;")) &&
+                        records.Any(record => Event(record) == "pop-popup-initialization-completed"),
+                        "Navigation outcome or popup initialization missing from trace");
                 }
                 catch (Exception ex) { failure = ex; }
                 finally
@@ -292,10 +345,18 @@ static class PopPaneTests
                     var environment = pane.Browser.CoreWebView2?.Environment;
                     if (environment is not null) environment.BrowserProcessExited += (_, _) => exited.TrySetResult();
                     pane.Dispose(); finishing = true; window.Close();
+                    var records = ReadTrace(diagnostics);
+                    if (!records.Any(record => Event(record) == "pop-pane-dispose-completed"))
+                        failure ??= new Exception("Pane disposal completion was not flushed.");
+                    diagnostics.Dispose();
                     if (!pane.Browser.IsDisposed) failure ??= new Exception("Native browser host did not dispose its child.");
                     if (window.IsVisible) failure ??= new Exception("Deliberate host window close was suppressed.");
                     if (environment is not null) await Task.WhenAny(exited.Task, Task.Delay(10000));
-                    try { if (Directory.Exists(directory)) Directory.Delete(directory, recursive: true); }
+                    try
+                    {
+                        if (Directory.Exists(directory)) Directory.Delete(directory, recursive: true);
+                        Directory.Delete(diagnosticDirectory, recursive: true);
+                    }
                     catch (IOException ex) { failure ??= new Exception("Could not clean the synthetic PoP browser profile.", ex); }
                     if (failure is null) done.TrySetResult(); else done.TrySetException(failure);
                     Dispatcher.CurrentDispatcher.BeginInvokeShutdown(DispatcherPriority.Background);
@@ -307,6 +368,34 @@ static class PopPaneTests
         thread.SetApartmentState(ApartmentState.STA);
         thread.Start();
         return done.Task.WaitAsync(TimeSpan.FromSeconds(90));
+    }
+
+    static string Event(JsonElement record) => record.GetProperty("event").GetString()!;
+
+    static JsonElement[] ReadTrace(AppDiagnostics diagnostics)
+    {
+        using var file = new FileStream(Path.Combine(diagnostics.DirectoryPath, "events.jsonl"), FileMode.Open,
+            FileAccess.Read, FileShare.ReadWrite);
+        using var reader = new StreamReader(file);
+        return reader.ReadToEnd().Split('\n', StringSplitOptions.RemoveEmptyEntries)
+            .Select(line => { using var json = JsonDocument.Parse(line); return json.RootElement.Clone(); }).ToArray();
+    }
+
+    static void CheckWebsiteCloseTrace(AppDiagnostics diagnostics, int start, string scope)
+    {
+        var records = ReadTrace(diagnostics).Skip(start).ToArray();
+        var requested = Array.FindIndex(records, record => Event(record) == "pop-website-close-requested");
+        Check(requested >= 0, "Website close request missing from trace");
+        var identity = records[requested].GetProperty("reason").GetString()!;
+        var applied = Array.FindIndex(records, record => Event(record) == "pop-website-close-applied" &&
+            record.GetProperty("reason").GetString() == identity + ";" + scope);
+        var completed = Array.FindIndex(records, record => Event(record) ==
+            (scope == "popup" ? "pop-popup-dispose-completed" : "pop-pane-closed") &&
+            record.GetProperty("reason").GetString() == identity);
+        Check(applied > requested && completed > applied, "Scoped close ordering or opaque identity missing");
+        Check(!records.Any(record => Event(record) == "window-close-requested" ||
+            Event(record) == "window-visibility" && record.GetProperty("reason").GetString() == "hidden"),
+            "Synthetic website close was followed by a host close/hide");
     }
 
     static async Task Navigate(CoreWebView2 core, Func<Task> navigate)
