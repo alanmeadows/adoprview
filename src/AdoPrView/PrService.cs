@@ -534,7 +534,10 @@ public sealed partial class PrService
             }
             view.Policies.Add(p);
             if (kind == "build" && p.Status is "rejected" or "broken" && buildId is int fb)
-                failedBuilds.Add(GetFailedBuildAsync(view, fb, name, p.EvaluationId, p.IsBlocking));
+            {
+                bool? requiredness = cfg["isBlocking"] is JsonValue value && value.TryGetValue<bool>(out var required) ? required : null;
+                failedBuilds.Add(GetFailedBuildAsync(view, fb, name, p.EvaluationId, requiredness));
+            }
         }
         foreach (var fb in await Task.WhenAll(failedBuilds))
             if (fb != null) view.FailedBuilds.Add(fb);
@@ -552,7 +555,7 @@ public sealed partial class PrService
          description.Contains("human sign-off is required", StringComparison.OrdinalIgnoreCase) ||
          Regex.IsMatch(description, @"(?i)waiting on reviewer(?:\(s\)|s)? to approve"));
 
-    async Task<FailedBuild?> GetFailedBuildAsync(PrView view, int buildId, string name, string evaluationId, bool isBlocking)
+    async Task<FailedBuild?> GetFailedBuildAsync(PrView view, int buildId, string name, string evaluationId, bool? isBlocking)
     {
         var cacheKey = BuildKey(view.Org, view.Project, buildId);
         if (_buildCache.TryGetValue(cacheKey, out var cached)) return cached with { Name = name, EvaluationId = evaluationId, IsBlocking = isBlocking };

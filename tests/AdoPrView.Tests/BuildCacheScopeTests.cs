@@ -51,6 +51,38 @@ static class BuildCacheScopeTests
             Check(json.Contains("\"isBlocking\":false") && json.Contains("\"isBlocking\":true"), "Bridge lost build requiredness");
             Check(handler.Reads["alpha/one/timeline"] == 1, "Policy metadata prevented scoped timeline reuse");
         });
+        foreach (var metadata in new[] { "", "\"isBlocking\":null," })
+            await test("failed build diagnostics preserve unknown parsed requiredness: " + (metadata.Length == 0 ? "missing" : "null"), async () =>
+            {
+                var unknown = $$$"""
+                    {"value":[{"evaluationId":"unknown","status":"rejected","context":{"buildId":123},
+                      "configuration":{"isEnabled":true,{{{metadata}}}
+                        "type":{"id":"0609b952-1397-4640-95ec-e00a01b2c241","displayName":"Build"},
+                        "settings":{"displayName":"Unknown CI"} } } ]}
+                    """;
+                var handler = new Handler { Evaluations = unknown };
+                var store = new SettingsStore(new AppSettings { Repos = [new() { Org = "alpha", Project = "one", Repo = "repo" }] });
+                using var http = new HttpClient(handler);
+                var service = new PrService(new AdoClient(http, _ => Task.FromResult(new AuthenticationHeaderValue("Bearer", "offline"))), store);
+                for (var pass = 0; pass < 2; pass++)
+                {
+                    handler.Evaluations = unknown;
+                    await service.RefreshAsync();
+                    Check(service.Current.Error is null && service.Current.RepoErrors.Count == 0, "Refresh failed");
+                    var pr = service.Current.Prs.Single();
+                    Check(pr.FailedBuilds.Single() is { IsBlocking: null, EvaluationId: "unknown", Name: "Unknown CI" },
+                        "Unavailable policy metadata became optional diagnostics");
+                    var prompt = await service.BuildTriagePromptAsync(pr.Key);
+                    Check(prompt.Contains("Failed build (requiredness unknown): Unknown CI") &&
+                        !prompt.Contains("not a merge blocker") && prompt.Contains("```text") && prompt.Contains("log alpha-one"),
+                        "Unknown requiredness lost its diagnostic label or automatic log tail");
+                    handler.Evaluations = unknown.Replace("\"isEnabled\":true,", "\"isEnabled\":true,\"isBlocking\":false,");
+                    if (metadata.Length > 0) handler.Evaluations = handler.Evaluations.Replace(metadata, "");
+                    await service.RefreshAsync();
+                    Check(service.Current.Prs.Single().FailedBuilds.Single().IsBlocking == false, "Explicit optional metadata was lost");
+                }
+                Check(handler.Reads["alpha/one/timeline"] == 1, "Unknown requiredness prevented diagnostic cache reuse");
+            });
         await test("failed build diagnostics, log tails and Fix prompt never cross organizations or projects with equal build ids", async () =>
         {
             var handler = new Handler();
