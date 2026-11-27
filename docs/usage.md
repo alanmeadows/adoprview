@@ -675,7 +675,7 @@ The player can read only host-registered completed MP4s, not arbitrary local fil
 ## Inline Copilot Fix
 
 **Fix PR** (the sparkle button in each row, also in the expanded **Fix with Copilot** area)
-starts the Windows Copilot CLI and displays stdout/stderr, status and the actual exit code
+starts the selected Copilot CLI (Windows by default, WSL only by explicit opt-in) and displays stdout/stderr, status and the actual exit code
 **inline in that PR's expanded details**. It does not copy/paste, focus desktop
 Copilot or open a separate terminal. **Copy prompt** remains available as an
 alternative. Fix is optional: viewing PRs needs neither WSL nor Copilot.
@@ -735,9 +735,13 @@ read back and compared with the intended body (only line endings/trailing
 newlines normalized). Success responses alone are not proof: one corrective
 retry is allowed; persistent mismatch/unreadability blocks completion/publication.
 
-In **Settings → Copilot on Windows**, select each repository's existing absolute
-local Windows Git checkout root. There is no default `~/clones` directory, WSL
-mapping or Linux tool dependency for new runs. Install Git for Windows and the
+In **Settings → Copilot Fix**, choose **Windows (default)** or **WSL (opt in)**.
+This is a mutually exclusive choice for new runs, never an automatic fallback.
+Both backends retain their configuration when switching; active runs retain
+their captured backend, paths and distro.
+
+For Windows, select each Fix repository's existing absolute local Windows Git
+checkout root. There is no inferred directory or Linux tool dependency. Install Git for Windows and the
 full [Windows Copilot CLI](https://docs.github.com/en/copilot/how-tos/copilot-cli/set-up-copilot-cli/install-copilot-cli)
 (for example `winget install GitHub.Copilot`) with native executables on the
 PATH the app started with. The bundled SDK stdio runtime used by Explain is not
@@ -846,7 +850,7 @@ to exit, and retains work/logs. The supervisor assigns the CLI to a kill-on-clos
 Windows Job before letting it execute, so descendants belong to that run.
 No process-name killing is used.
 
-**The following transport-control details apply only to legacy WSL runs.**
+**The following transport-control details apply to WSL runs.**
 Their Stop, including one arriving before CLI identity capture, escalates TERM to KILL only for the old
 runner's own CLI group, after verifying its captured parent/group/session and
 Linux start time; a missing or reused leader is refused. No process-name searches or global WSL
@@ -937,18 +941,37 @@ reservations and run leases prevent duplicate launches, resumes and cleanup.
 
 ### New Windows runs
 
-Each new run records `backend: windows-native`; older records without that
+Each new Windows run records `backend: windows-native`; older records without that
 field remain `legacy-wsl`. An out-of-process Windows supervisor owns the CLI
 and its descendants. Closing/exiting the dashboard detaches its follower, not
 the supervisor; reopening verifies the exact run/nonce/session receipt and
 replays its native log. Stop does not require today's CLI installation,
 Git remote or authentication to be the same: it controls the recorded job.
 
-If the app's launching host prohibits detached job breakaway, native launch
-fails explicitly with the Windows error and retains the prepared work. It
-never silently inherits a host lifetime that could kill work on dashboard
-exit, starts WSL, or claims detached execution. Ordinary Start Menu launch
-and a restrictive automation/job host are different environments.
+New native runs use one on-demand **per-user Task Scheduler task** named
+`AdoPrView-Fix-<run-id>-<ownership-token>` to launch the pinned immutable
+supervisor. This avoids `CreateProcess` error 5 when the dashboard's host
+uses a kill-on-close job without breakaway permission. It does not weaken
+survival by inheriting the app's lifetime job or switch to WSL.
+
+The task uses the current user's interactive Windows token at least privilege:
+no stored password, administrator elevation or service installation. It has no
+triggers, no restart rule and no runtime/battery time limit. Its only action is
+the captured supervisor executable and exact ownership file. Each task is
+created once, never updated/reused, and dispatch is attempted once. An uncertain
+Scheduler result preserves the run reservation and work; it is never retried.
+The supervisor removes its own verified task registration on exit, including
+when the dashboard is closed. Cleanup failures are reported in the receipt/log;
+removing a registration is not a substitute for Stop of the owned process job.
+Logging out ends the interactive-user environment; survival across logout or
+machine shutdown is not promised and never causes a crash replay.
+
+Task Scheduler must be available and current-user task registration must be
+allowed by Windows policy. A policy/registration failure is explicit and
+preserves prepared work. Older native records retain their original direct
+launch identity; recovery never migrates or relaunches them through the broker.
+Direct-launch diagnostics distinguish output-file failures from supervisor
+`CreateProcess` failures and include queried innermost host-job limits.
 
 Native worktrees are **always retained**, including successful or cancelled
 runs. There is no automatic clean-worktree removal or crash replay on this
@@ -957,9 +980,22 @@ history becomes needs-attention and keeps its saved session/work. A deliberate
 new Fix run is a new captured source/worktree, not a silent resume or replacement
 of old edits. Inspect retained work before choosing how to continue it.
 
-### Legacy WSL runs
+### Opted-in WSL runs and legacy WSL recovery
 
-These records retain their original transport, environment, authority and
+For new WSL runs, select an installed distro using **Refresh distros** and enter
+an existing absolute Linux Git checkout root for each Fix repository, for example
+`/home/user/repos/repository`. A distro/path is mandatory: neither the Windows
+mapping nor the default distro nor `~/clones` is inferred. The selected distro
+must already have Git, the full authenticated Copilot CLI, bgtask and the
+supervision/ownership prerequisites checked by preflight. An unavailable distro
+or missing tools fails explicitly; it never launches Windows instead.
+
+New opted-in runs record `backend: wsl`. They reconnect to a surviving exact
+owned task, but never automatically resume an interrupted task or replay its
+prompt. Interrupted work/session state is retained with needs-attention.
+The automatic continuation rule below is retained only for legacy records.
+
+Legacy records retain their original transport, environment, authority and
 cleanup/resume rules. Do not start a stopped distro merely to test recovery.
 Missing WSL/tools leave explicit needs-attention history, never a native restart.
 

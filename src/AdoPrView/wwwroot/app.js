@@ -983,13 +983,13 @@ function syncRunOutput(card) {
   }
 }
 
-const runCardTitle = (earlier, run) => `${earlier ? 'Earlier run' : 'Fix PR'} · ${run?.backend === 'legacy-wsl' || run?.backend !== 'windows-native' && run?.distro ? 'Legacy Copilot in WSL' : 'Copilot on Windows'}`;
+const runCardTitle = (earlier, run) => `${earlier ? 'Earlier run' : 'Fix PR'} · ${run?.backend === 'wsl' || !run && S.settings?.fixBackend === 'wsl' ? 'Copilot in WSL' : run?.backend === 'legacy-wsl' || run?.backend !== 'windows-native' && run?.distro ? 'Legacy Copilot in WSL' : 'Copilot on Windows'}`;
 // One per PR (beside Fix PR, or atop shelf/ignored-draft runs) so card promotion never hides or duplicates it.
 let runInfoId = 0;
 const runScopeNotice = () => {
   const id = `run-info-${++runInfoId}`;
   return `<div class="small run-scope">
-    <p class="run-summary">By default, Fix PR asks Copilot on Windows to try to fix merge conflicts, failing checks and review feedback in a separate working copy. New runs are asked to validate, commit and push fixes back to this PR. Follow progress here, then review the changes and results.
+    <p class="run-summary">Fix PR asks Copilot to try to fix merge conflicts, failing checks and review feedback in a separate working copy. Windows is the default; WSL runs only if selected in Settings. New runs are asked to validate, commit and push fixes back to this PR. Follow progress here, then review the changes and results.
       <button type="button" class="mini run-info-button" aria-label="Fix PR permissions and limitations" aria-expanded="false" aria-controls="${id}" aria-describedby="${id}">i</button></p>
     <p id="${id}" class="run-info-details" hidden>Fix PR starts in a separate PR worktree with --yolo: tools, paths and URLs are allowed without confirmation for this run, not globally. This is not a filesystem sandbox. New runs are told to commit validated fixes and ordinary-push them only to this PR's captured source branch; that limit is a prompt instruction, not enforced. Merge/PR-update command denies and the prompt's no-approval/policy-bypass boundaries remain. Legacy WSL runs keep their recorded environment and original permission/publish scope, never silently restart on Windows. Sign-in is required beforehand; this panel is noninteractive. Exit 0 does not verify the PR fix or publication. Inspect the run's output and verify the results.</p>
   </div>`;
@@ -1990,6 +1990,7 @@ async function openDrawer() {
   S.drawer = true; $('#drawer').hidden = false; $('#scrim').hidden = false; renderDrawer();
   $('#closeDrawer').focus?.({ preventScroll: true });
   await loadApprovalSettings();
+  if (S.settings.fixBackend === 'wsl') await loadWslDistros();
 }
 function closeDrawer() {
   S.drawer = false; $('#drawer').hidden = true; $('#scrim').hidden = true;
@@ -2014,8 +2015,24 @@ async function loadApprovalSettings() {
   if (S.drawer) renderDrawer();
 }
 
-const drawerFieldKey = el => el.id || `native:${el.dataset.nativeRepo}`;
-const drawerFields = () => [...$('#drawerBody').querySelectorAll('input[id], select[id], textarea[id], input[data-native-repo]')];
+const drawerFieldKey = el => el.id || (el.dataset.wslRepo ? `wsl:${el.dataset.wslRepo}` : `native:${el.dataset.nativeRepo}`);
+const drawerFields = () => [...$('#drawerBody').querySelectorAll('input[id], select[id], textarea[id], input[data-native-repo], input[data-wsl-repo]')];
+function checkoutMappings(backend) {
+  const mappings = { ...(backend === 'native' ? S.settings.nativeRepoDirectories : S.settings.wslRepoDirectories) };
+  for (const el of $('#drawerBody').querySelectorAll(`[data-${backend}-repo]`)) {
+    const key = backend === 'native' ? el.dataset.nativeRepo : el.dataset.wslRepo;
+    if (el.value.trim()) mappings[key] = el.value.trim();
+    else delete mappings[key];
+  }
+  return mappings;
+}
+
+async function loadWslDistros() {
+  S.wslDistrosError = null;
+  try { S.wslDistros = await rpc('listWslDistros'); }
+  catch (e) { S.wslDistrosError = e.message || String(e); }
+  if (S.drawer) renderDrawer();
+}
 
 function clearSubmittedDrawerInput(id, value, epoch) {
   const current = $('#' + id);
@@ -2105,12 +2122,26 @@ function renderDrawer() {
       <label class="check"><input type="checkbox" id="transitionWorkItems" ${st.autoComplete.transitionWorkItems ? 'checked' : ''}/> Complete linked work items</label>
     </div>
     <div class="section">
-      <h4>Copilot on Windows</h4>
-      <p class="help">New Fix PR runs use Windows Copilot and Git in an isolated worktree at the captured PR source commit; no WSL or bgtask is needed. The source checkout is not switched or edited by the launcher. Each deliberate run uses --yolo for tool/path/URL permissions without confirmation; global settings are unchanged. Worktree isolation is not a filesystem sandbox. Runs are told to commit validated fixes and ordinary-push them only to the PR's captured source branch (a prompt instruction, not enforced). Merge/PR-update command denies and the prompt's approval/policy boundaries remain.</p>
+      <h4>Copilot Fix</h4>
+      <div class="field"><label for="fixBackend">Run new Fix tasks using</label><select id="fixBackend">
+        <option value="windows-native" ${(st.fixBackend || 'windows-native') === 'windows-native' ? 'selected' : ''}>Windows (default)</option>
+        <option value="wsl" ${st.fixBackend === 'wsl' ? 'selected' : ''}>WSL (opt in)</option></select></div>
+      <p class="help">Choose one backend; there is no automatic fallback. Save to apply to new runs only. Active runs keep their captured backend, distro and paths. Ask and focused reviews always use Windows independently.</p>
+      <p class="help">Both backends use an isolated worktree at the captured PR source commit. The source checkout is not switched or edited by the launcher. Each deliberate run uses --yolo for tool/path/URL permissions without confirmation; global settings are unchanged. Worktree isolation is not a filesystem sandbox. Runs are told to commit validated fixes and ordinary-push them only to the PR's captured source branch (a prompt instruction, not enforced). Merge/PR-update command denies and the prompt's approval/policy boundaries remain.</p>
+      <div data-fix-settings="windows-native">
       ${st.repos.map(r => `<div class="field native-repo"><label>${esc(r.repo)}<small>${esc(r.org)} / ${esc(r.project)}</small></label>
         <input type="text" data-native-repo="${esc(repoKey(r))}" value="${esc(st.nativeRepoDirectories?.[repoKey(r)] || '')}" placeholder="C:\\repos\\${esc(r.repo)}" /></div>`).join('')}
-      <p class="help">Choose an existing absolute Windows Git checkout for each Fix repository. There is no ~/clones or WSL fallback. Native directory, tools, authentication and the exact ADO remote are checked before launch. Ask/focused review read pinned ADO source directly and do not need these mappings.</p>
-      <p class="help">Legacy WSL Fix runs remain on their recorded host with their original work and scope. Their WSL setup is retained in settings for migration/history, not required for new work. Use each run's exact Cancel control; unavailable legacy tools leave an explicit recovery warning, never a new native restart.</p>
+      <p class="help">Required: an existing absolute local Windows Git checkout for each repository you Fix, Git for Windows and the full authenticated Windows Copilot CLI. Windows Fix registers one on-demand per-user Task Scheduler task to launch its separate immutable supervisor outside the app's lifetime job. It uses your current interactive token, no password, administrator rights or service installation. The supervisor removes its task registration on exit; exact Cancel stops the run's owned job, not other tasks. Task Scheduler policy failures are reported, never retried on an uncertain dispatch.</p></div>
+      <div data-fix-settings="wsl">
+      <div class="field"><label for="wslDistro">WSL distro (required)</label><select id="wslDistro">
+        <option value="">Select an installed distro</option>
+        ${[...new Set([st.wslDistro, ...(S.wslDistros || [])].filter(Boolean))].map(d => `<option value="${esc(d)}" ${d === st.wslDistro ? 'selected' : ''}>${esc(d)}</option>`).join('')}</select>
+        <button class="btn" data-dact="wslDistros">Refresh distros</button></div>
+      ${S.wslDistrosError ? `<p class="help" role="alert">${esc(S.wslDistrosError)}</p>` : ''}
+      ${st.repos.map(r => `<div class="field"><label>${esc(r.repo)}<small>${esc(r.org)} / ${esc(r.project)}</small></label>
+        <input type="text" data-wsl-repo="${esc(repoKey(r))}" value="${esc(st.wslRepoDirectories?.[repoKey(r)] || '')}" placeholder="/home/user/repos/${esc(r.repo)}" /></div>`).join('')}
+      <p class="help">Required: an explicit installed distro and absolute Linux Git checkout path for each repository you Fix. Git, authenticated full Copilot CLI, bgtask and ownership prerequisites are checked inside that distro. No default distro or ~/clones path is inferred for new WSL runs.</p></div>
+      <p class="help">Switching retains both backends' settings. Legacy WSL runs keep their original host and work. Use each run's exact Cancel control; unavailable tools leave a recovery warning, never a replay on a different backend.</p>
     </div>
     <div class="section">
       <h4>Copilot triage instructions</h4>
@@ -2127,6 +2158,8 @@ ${esc(st.additionalTriageInstructions || '')}</textarea></div>
     const draft = S.drawerDraft.get(drawerFieldKey(el));
     if (draft) { el.value = draft.value; if (el.type === 'checkbox') el.checked = draft.checked; }
   }
+  for (const group of body.querySelectorAll('[data-fix-settings]'))
+    group.hidden = group.dataset.fixSettings !== $('#fixBackend').value;
   focusBody.scrollTop = focusTop;
   const next = focused && current.find(el => drawerFieldKey(el) === drawerFieldKey(focused));
   if (S.drawer && next && !next.disabled) {
@@ -2273,11 +2306,15 @@ async function onDrawerAction(act, el) {
           additionalTriageInstructions: typeof storedAdditionalInstructions === 'string' &&
             additionalInstructions === storedAdditionalInstructions.replace(/\r\n?/g, '\n')
             ? storedAdditionalInstructions : additionalInstructions,
-          nativeRepoDirectories: Object.fromEntries([...document.querySelectorAll('[data-native-repo]')].map(e => [e.dataset.nativeRepo, e.value.trim()]).filter(([, value]) => value)),
+          nativeRepoDirectories: checkoutMappings('native'),
+          fixBackend: $('#fixBackend').value,
+          wslDistro: $('#wslDistro').value,
+          wslRepoDirectories: checkoutMappings('wsl'),
         }, true);
         toast('Settings saved');
         break;
       }
+      case 'wslDistros': await loadWslDistros(); break;
     }
   } catch (e) {
     if (act === 'discover' && S.discovered === 'loading') S.discovered = null;
@@ -2423,6 +2460,10 @@ function wire() {
   $('#scrim').addEventListener('click', closeDrawer);
   $('#drawerBody').addEventListener('change', (e) => {
     if (e.target.id === 'theme') changeTheme(e.target);
+    if (e.target.id === 'fixBackend') {
+      renderDrawer();
+      if (e.target.value === 'wsl') loadWslDistros();
+    }
   });
   document.addEventListener('keydown', (e) => {
     if (e.key === 'Escape') {

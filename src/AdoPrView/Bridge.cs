@@ -63,6 +63,8 @@ public sealed class Bridge(PrService prs, SettingsStore store, Func<string, Task
     {
         switch (method)
         {
+            case "listWslDistros":
+                return await WslCopilotRunTransport.ListDistributionsAsync();
             case "init":
                 return new {
                     runs = copilotAction is null ? Array.Empty<object>() : await copilotAction("listCopilot", p),
@@ -200,6 +202,12 @@ public sealed class Bridge(PrService prs, SettingsStore store, Func<string, Task
                 var incoming = p["settings"]!.Deserialize<AppSettings>(Json)!;
                 store.Update(s =>
                 {
+                    if (p["settings"]!.AsObject().Any(field => field.Key.Equals("fixBackend", StringComparison.OrdinalIgnoreCase)))
+                    {
+                        if (incoming.FixBackend is not ("windows-native" or "wsl"))
+                            throw new ArgumentException("Choose Windows or WSL in Settings > Copilot Fix.");
+                        s.FixBackend = incoming.FixBackend;
+                    }
                     s.Whitelist = incoming.Whitelist.Select(w => w.Trim()).Where(w => w.Length > 0).Distinct(StringComparer.OrdinalIgnoreCase).ToList();
                     s.RefreshSeconds = Math.Clamp(incoming.RefreshSeconds, 30, 3600);
                     s.MergeCheckMinutes = Math.Clamp(incoming.MergeCheckMinutes, 1, 240);
@@ -218,15 +226,32 @@ public sealed class Bridge(PrService prs, SettingsStore store, Func<string, Task
                     s.TriageInstructions = string.IsNullOrWhiteSpace(incoming.TriageInstructions) ? null : incoming.TriageInstructions;
                     if (p["settings"]!.AsObject().Any(field => field.Key.Equals("additionalTriageInstructions", StringComparison.OrdinalIgnoreCase)))
                         s.AdditionalTriageInstructions = string.IsNullOrWhiteSpace(incoming.AdditionalTriageInstructions) ? null : incoming.AdditionalTriageInstructions;
-                    s.WslDistro = string.IsNullOrWhiteSpace(incoming.WslDistro) ? null : incoming.WslDistro.Trim();
-                    s.WslRepoDirectories = (incoming.WslRepoDirectories ?? new()).Where(kv => !string.IsNullOrWhiteSpace(kv.Value))
-                        .ToDictionary(kv => kv.Key.ToLowerInvariant(), kv => kv.Value.Trim(), StringComparer.OrdinalIgnoreCase);
+                    if (p["settings"]!.AsObject().Any(field => field.Key.Equals("wslDistro", StringComparison.OrdinalIgnoreCase)))
+                    {
+                        if (incoming.WslDistro is { } distro && (distro.Any(char.IsControl) || distro.Trim().StartsWith('-')))
+                            throw new ArgumentException("Choose a valid installed WSL distro name.");
+                        s.WslDistro = string.IsNullOrWhiteSpace(incoming.WslDistro) ? null : incoming.WslDistro.Trim();
+                    }
+                    if (p["settings"]!.AsObject().Any(field => field.Key.Equals("wslRepoDirectories", StringComparison.OrdinalIgnoreCase)))
+                    {
+                        var directories = incoming.WslRepoDirectories
+                            ?? throw new ArgumentException("WSL checkout mappings must be an object, not null.");
+                        foreach (var (key, value) in directories)
+                            if (s.FixBackend == "wsl" && !string.IsNullOrWhiteSpace(value) &&
+                                (!value.Trim().StartsWith('/') || value.Any(char.IsControl)))
+                                throw new ArgumentException($"WSL checkout for {key} must be an absolute Linux directory, for example /home/user/repos/repository.");
+                        s.WslRepoDirectories = directories.Where(kv => !string.IsNullOrWhiteSpace(kv.Value))
+                            .ToDictionary(kv => kv.Key.ToLowerInvariant(), kv => kv.Value.Trim(), StringComparer.OrdinalIgnoreCase);
+                    }
+                    if (s.FixBackend == "wsl" && string.IsNullOrWhiteSpace(s.WslDistro))
+                        throw new ArgumentException("Select an explicit installed WSL distro in Settings > Copilot Fix.");
                     if (p["settings"]!.AsObject().Any(field => field.Key.Equals("nativeRepoDirectories", StringComparison.OrdinalIgnoreCase)))
                     {
                         var directories = incoming.NativeRepoDirectories
                             ?? throw new ArgumentException("Windows checkout mappings must be an object, not null.");
                         foreach (var (key, value) in directories)
                         {
+                            if (s.FixBackend != "windows-native") continue;
                             if (!string.IsNullOrWhiteSpace(value) && value.Trim().StartsWith(@"\\", StringComparison.Ordinal))
                                 throw new ArgumentException($"Windows checkout for {key} must be on a local drive; UNC/network and device paths are not supported.");
                             if (!string.IsNullOrWhiteSpace(value) && (!System.IO.Path.IsPathFullyQualified(value.Trim()) || value.Any(char.IsControl)))

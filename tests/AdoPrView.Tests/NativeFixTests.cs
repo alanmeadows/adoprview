@@ -7,7 +7,10 @@ internal static class NativeFixTests
 {
     const string Help = "--no-auto-update --no-ask-user --stream --no-color --deny-tool --yolo --session-id --resume";
     static string Exe => Path.Combine(AppContext.BaseDirectory, "AdoPrView.Tests.exe");
-    sealed record ShellProbe(bool Launched, int Pid, long Started, int Error);
+    sealed record ShellProbe(bool Launched, int Pid, long Started, int Error)
+    {
+        public string? Diagnostic { get; init; }
+    }
 
     [System.Runtime.CompilerServices.ModuleInitializer]
     internal static void DispatchSyntheticFixture()
@@ -18,6 +21,31 @@ internal static class NativeFixTests
 
     static bool Fixture(string[] args)
     {
+        if (args is ["--native-fix-broker-cleanup", var cleanupOwnership])
+        {
+            NativeFixTaskBroker.Cleanup(NativeFixSupervisor.Read<NativeFixSupervisor.Specification>(cleanupOwnership));
+            return true;
+        }
+        if (args is ["--native-fix-broker-launch", var brokerOwnership, var brokerOutcome])
+        {
+            using var lifetime = new NativeFixTestJob();
+            using var self = Process.GetCurrentProcess();
+            lifetime.Assign(self.Handle);
+            var specification = NativeFixSupervisor.Read<NativeFixSupervisor.Specification>(brokerOwnership);
+            try
+            {
+                NativeFixSupervisor.Launch(specification);
+                NativeFixSupervisor.Write(brokerOutcome, new ShellProbe(true, self.Id, self.StartTime.ToUniversalTime().Ticks, 0)
+                    { Diagnostic = NativeFixSupervisor.InspectHostJob().Diagnostic });
+            }
+            catch (Exception ex)
+            {
+                NativeFixSupervisor.Write(brokerOutcome, new ShellProbe(false, self.Id, self.StartTime.ToUniversalTime().Ticks, ex.HResult)
+                    { Diagnostic = ex.Message });
+            }
+            Thread.Sleep(Timeout.Infinite);
+            return true;
+        }
         if (args is ["--native-fix-shell-launch", var ownership, var outcome])
         {
             using var self = Process.GetCurrentProcess();
@@ -28,7 +56,8 @@ internal static class NativeFixTests
             }
             catch (System.ComponentModel.Win32Exception ex)
             {
-                NativeFixSupervisor.Write(outcome, new ShellProbe(false, self.Id, self.StartTime.ToUniversalTime().Ticks, ex.NativeErrorCode));
+                NativeFixSupervisor.Write(outcome, new ShellProbe(false, self.Id, self.StartTime.ToUniversalTime().Ticks, ex.NativeErrorCode)
+                    { Diagnostic = ex.Message });
             }
             return true;
         }
@@ -159,6 +188,63 @@ internal static class NativeFixTests
     internal static async Task Run(Func<string, Func<Task>, Task> test)
     {
         await NativeFixStartTests.Run(test);
+        if (Environment.GetEnvironmentVariable("ADOPRVIEW_TEST_NATIVE_SCHEDULER_PROBE") == "1")
+            await test("Native Fix Task Scheduler broker survives actual launcher kill-on-close job termination and exact Stop", async () =>
+            {
+                var root = Path.Combine(Environment.CurrentDirectory, ".native-scheduler-fixture-" + Guid.NewGuid().ToString("N"));
+                Directory.CreateDirectory(root);
+                var spec = Spec(root);
+                Process? launcher = null;
+                try
+                {
+                    var payload = Environment.GetEnvironmentVariable("ADOPRVIEW_TEST_NATIVE_SUPERVISOR_PAYLOAD");
+                    var deployment = NativeFixDeployment.Ensure(payload is null ? AppContext.BaseDirectory : Path.GetDirectoryName(payload)!, root);
+                    spec = spec with { SupervisorExecutable = deployment.Executable, SupervisorBundleId = deployment.BundleId,
+                        SupervisorLauncher = "task-scheduler", SupervisorUserSid = NativeFixTaskBroker.CurrentSid() };
+                    NativeFixSupervisor.Write(NativeFixSupervisor.FilePath(spec, "ownership.json"), spec);
+                    var outcome = Path.Combine(root, "broker-outcome.json");
+                    var start = new ProcessStartInfo(Exe) { UseShellExecute = false, CreateNoWindow = true };
+                    foreach (var argument in new[] { "--native-fix-broker-launch", NativeFixSupervisor.FilePath(spec, "ownership.json"), outcome })
+                        start.ArgumentList.Add(argument);
+                    launcher = Process.Start(start)!;
+                    await Until(() => File.Exists(outcome));
+                    var result = NativeFixSupervisor.Read<ShellProbe>(outcome);
+                    Check(result.Launched, "Real Task Scheduler broker did not dispatch: " + result.Diagnostic);
+                    await Until(() => File.Exists(Path.Combine(spec.Worktree, "fixture-child.pid")));
+                    var supervisor = NativeFixSupervisor.Status(spec)!;
+                    var cli = int.Parse(File.ReadAllText(Path.Combine(spec.Worktree, "fixture-parent.pid")));
+                    var descendant = int.Parse(File.ReadAllText(Path.Combine(spec.Worktree, "fixture-child.pid")));
+                    Check(NativeFixTaskBroker.Registered(spec), "Exact scoped task registration was not observable");
+                    try { NativeFixSupervisor.Launch(spec); throw new Exception("Duplicate Scheduler registration was reused"); }
+                    catch (NativeFixSupervisor.LaunchException) { }
+                    Check(NativeFixTaskBroker.Registered(spec) && Alive(cli) && Alive(descendant),
+                        "Rejected duplicate registration removed or replaced the original live task");
+                    launcher.Kill();
+                    await launcher.WaitForExitAsync();
+                    await Task.Delay(500);
+                    Check(NativeFixSupervisor.SupervisorAlive(supervisor) && Alive(cli) && Alive(descendant) &&
+                        NativeFixSupervisor.ActiveProcesses(spec) >= 2, "Scheduler Fix inherited the terminated launcher's kill-on-close job");
+                    NativeFixSupervisor.RequestCancel(spec);
+                    await Until(() => NativeFixSupervisor.Status(spec) is { DescendantsStopped: true });
+                    await Until(() => !NativeFixSupervisor.SupervisorAlive(supervisor));
+                    Check(!Alive(cli) && !Alive(descendant) && NativeFixSupervisor.ActiveProcesses(spec) is null or 0,
+                        "Scheduler Fix Stop did not retire exact owned CLI and descendant");
+                    await Until(() => !NativeFixTaskBroker.Registered(spec));
+                    Console.WriteLine("NATIVE-SCHEDULER independent supervisor/CLI/descendant survived launcher kill-on-close job termination; exact Stop and scoped task cleanup confirmed. " + result.Diagnostic);
+                }
+                finally
+                {
+                    if (launcher is not null)
+                    {
+                        if (!launcher.HasExited) launcher.Kill();
+                        await launcher.WaitForExitAsync();
+                        launcher.Dispose();
+                    }
+                    await Clean(spec);
+                    if (spec.SupervisorLauncher == "task-scheduler") NativeFixTaskBroker.Cleanup(spec);
+                    Directory.Delete(root, true);
+                }
+            });
         if (Environment.GetEnvironmentVariable("ADOPRVIEW_TEST_NATIVE_SHELL_PROBE") == "1")
             await test("Native Fix permitted desktop-shell fixture checks production launcher exit independence", async () =>
             {
@@ -204,7 +290,7 @@ internal static class NativeFixTests
                     await Until(() => !NativeFixSupervisor.SupervisorAlive(launcher));
                     if (!result.Launched)
                     {
-                        Console.WriteLine("NATIVE-SHELL production detach not established: permitted shell host refused breakaway (Windows error " + result.Error + ")");
+                        Console.WriteLine("NATIVE-SHELL production detach not established: " + result.Diagnostic);
                         return;
                     }
                     await Until(() => File.Exists(Path.Combine(spec.Worktree, "fixture-child.pid")));
@@ -376,7 +462,9 @@ internal static class NativeFixTests
                 {
                     Check(NativeFixSupervisor.Status(spec) is null && NativeFixSupervisor.ActiveProcesses(spec) is null &&
                         File.Exists(Path.Combine(spec.RunDirectory, "prompt")), "Denied detach launch consumed a prompt or left a native child running");
-                    Console.WriteLine("NATIVE-DETACH independent launch blocked by this host job (Windows error 5); nested fixtures do not establish host-exit independence");
+                    Check(ex is NativeFixSupervisor.LaunchException && ex.Message.Contains("supervisor CreateProcess"),
+                        "Error 5 came from a different launch stage, not supervisor CreateProcess");
+                    Console.WriteLine("NATIVE-DETACH " + ex.Message + " Nested fixtures do not establish host-exit independence.");
                 }
             }
             finally { await Clean(spec); Directory.Delete(directory, true); }

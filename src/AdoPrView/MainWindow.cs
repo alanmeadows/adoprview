@@ -502,13 +502,11 @@ public sealed class MainWindow : Window, IApprovalUi
             var source = await _prs.GetCopilotSourceAsync(key);
             var pr = source.Pr;
             var settings = _store.Current;
-            var directories = settings.NativeRepoDirectories
-                ?? throw new InvalidOperationException("Windows checkout mappings are invalid. Open Settings > Copilot on Windows and select this repository's checkout.");
-            directories.TryGetValue($"{pr.Org}/{pr.Project}/{pr.Repo}".ToLowerInvariant(), out var directory);
+            var target = settings.FixTarget(new RepoRef { Org = pr.Org, Project = pr.Project, Repo = pr.Repo });
             var prompt = source.Prompt + $"\nVerified source: {source.SourceRef} at {source.SourceCommit}. The isolated run branch is not the PR source branch; do not assume they have the same name.\n";
             var started = await _copilot.StartAsync(new(pr.Key, pr.Id, pr.Title, pr.Org, pr.Project, pr.Repo, pr.RepoId,
-                source.SourceRef, source.SourceCommit, prompt, Directory: directory, PushToSource: true)
-                { AdditionalInstructions = source.AdditionalInstructions });
+                source.SourceRef, source.SourceCommit, prompt, Distro: target.Distro, Directory: target.Directory, PushToSource: true)
+                { AdditionalInstructions = source.AdditionalInstructions, Backend = target.Backend });
             return RunForUi(started);
         }
         finally { _copilotStarting.TryRemove(key, out _); }

@@ -10,6 +10,59 @@ static class SettingsTests
 
     public static async Task Run(Func<string, Func<Task>, Task> test)
     {
+        await test("settings Fix backend defaults Windows and selected targets require their own explicit path and distro", () =>
+        {
+            var repo = new RepoRef { Org = "org", Project = "project", Repo = "repo" };
+            var settings = new AppSettings { WslDistro = "Ubuntu", WslRepoDirectories = new() { [repo.Key] = "/source" } };
+            Check(settings.FixBackend == "windows-native", "Legacy WSL configuration opted into new WSL Fix runs");
+            void Missing(string expected)
+            {
+                try { settings.FixTarget(repo); }
+                catch (ArgumentException ex) { Check(ex.Message.Contains(expected), "Wrong selected target diagnostic"); return; }
+                throw new Exception("Missing selected backend configuration was accepted");
+            }
+            Missing("Windows");
+            settings.NativeRepoDirectories[repo.Key] = @"C:\source";
+            Check(settings.FixTarget(repo) == ("windows-native", null, @"C:\source"), "Windows borrowed WSL distro/path");
+            settings.FixBackend = "wsl";
+            Check(settings.FixTarget(repo) == ("wsl", "Ubuntu", "/source"), "WSL borrowed native path");
+            settings.WslDistro = null;
+            Missing("explicit");
+            settings.WslDistro = "Ubuntu";
+            settings.WslRepoDirectories.Clear();
+            Missing("WSL");
+            return Task.CompletedTask;
+        });
+        await test("settings Fix backend round-trips both inactive mappings and older clients cannot reset the choice", () => InDir(dir =>
+        {
+            var store = new SettingsStore(Path.Combine(dir, "settings.json"));
+            using var http = new HttpClient();
+            var prs = new PrService(new AdoClient(http, _ => Task.FromResult(new AuthenticationHeaderValue("Bearer", "offline"))), store);
+            string? reply = null;
+            var bridge = new Bridge(prs, store, text => { reply = text; return Task.CompletedTask; }, _ => { });
+            var form = JsonSerializer.SerializeToNode(store.Current, Bridge.Json)!.AsObject();
+            form["nativeRepoDirectories"] = new JsonObject { ["org/project/repo"] = @"C:\source" };
+            form["wslRepoDirectories"] = new JsonObject { ["org/project/repo"] = "/source" };
+            form["fixBackend"] = "wsl";
+            void Save() => bridge.HandleAsync(new JsonObject { ["id"] = 1, ["method"] = "saveSettings",
+                ["params"] = new JsonObject { ["settings"] = form.DeepClone() } }.ToJsonString()).GetAwaiter().GetResult();
+            Save();
+            Check(reply!.Contains("explicit installed WSL"), "WSL was selected without a distro");
+            form["wslDistro"] = "Ubuntu";
+            Save();
+            Check(!reply!.Contains("\"error\"") && store.Current.FixBackend == "wsl", "Valid WSL option failed");
+            form.Remove("fixBackend"); form.Remove("wslDistro"); form.Remove("wslRepoDirectories");
+            Save();
+            Check(store.Current.FixBackend == "wsl" && store.Current.WslDistro == "Ubuntu" &&
+                store.Current.WslRepoDirectories["org/project/repo"] == "/source", "Older client erased opted-in WSL configuration");
+            form["fixBackend"] = "windows-native";
+            Save();
+            Check(store.Current.FixBackend == "windows-native" && store.Current.NativeRepoDirectories["org/project/repo"] == @"C:\source" &&
+                store.Current.WslRepoDirectories["org/project/repo"] == "/source", "Switch discarded inactive configuration");
+            form["fixBackend"] = "automatic";
+            Save();
+            Check(reply!.Contains("Choose Windows or WSL") && store.Current.FixBackend == "windows-native", "Automatic fallback backend was saved");
+        }));
         await test("settings Windows checkout mappings validate native paths and preserve legacy WSL and future fields", () => InDir(dir =>
         {
             var path = Path.Combine(dir, "settings.json");

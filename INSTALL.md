@@ -332,8 +332,9 @@ those authors and hidden keys. Empty `value: []` is valid; missing/invalid data,
 | `autoComplete` | `{mergeStrategy:"squash", deleteSourceBranch:true, transitionWorkItems:true}`; options, not an install-time action |
 | `triageInstructions` | Optional custom Fix prompt; preserve verbatim |
 | `nativeRepoDirectories` | Object keyed by lowercase `org/project/repo`, values verified absolute local Windows checkout roots; `{}` until optional Fix is configured |
-| `wslDistro` | Retained legacy WSL setting; not used for new Windows runs |
-| `wslRepoDirectories` | Retained legacy Linux source mappings; never converted to native directories |
+| `fixBackend` | `windows-native` by default; `wsl` only by explicit user opt-in in Settings > Copilot Fix. Preserve an existing choice |
+| `wslDistro` | Explicit installed distro required for opted-in new WSL runs; retained for legacy recovery, not used for Windows Fix |
+| `wslRepoDirectories` | Explicit absolute Linux source mappings for opted-in WSL runs; retained for legacy recovery, never converted to native directories |
 | `window` | Optional `{left, top, width, height, maximized}`; preserve |
 | `reviewBot` | Optional `{name, authorId, organization}` of a review bot whose findings gate PRs in that ADO organization only; omit when the team has none |
 | `fixSkill` | Optional local Copilot skill named by the default Fix prompt; preserve |
@@ -478,7 +479,7 @@ ADO organization/project/repository remote. Store the local absolute path under
 unsupported; do not map by folder name, assume `~/clones`, or translate an old
 WSL run's recorded worktree.
 
-New Fix needs Git for Windows and a compatible full native Copilot CLI.
+New Windows Fix needs Git for Windows and a compatible full native Copilot CLI.
 The official Windows installation is `winget install GitHub.Copilot`, or the
 appropriate executable from [GitHub's install guide](https://docs.github.com/en/copilot/how-tos/copilot-cli/set-up-copilot-cli/install-copilot-cli).
 Official npm installs (`npm install -g @github/copilot`, Node 22+ for installation)
@@ -496,6 +497,20 @@ runtime/Windows `gh` authentication. Git fetch credentials are also independent.
 Do not seed, decrypt or copy tokens, edit global shell configuration, or start
 Fix/resume/model work to diagnose sign-in. Keep named skills/reviewer models
 unchanged and report unavailable required tools/models instead of substituting.
+
+New Windows Fix also requires Task Scheduler to permit a current-user,
+interactive-token on-demand task. The app creates one exact-run task to launch
+its immutable supervisor outside the dashboard's lifetime job; no password,
+administrator rights or service installation is used. It has no triggers/restart
+rule and removes its verified registration on exit. Do not weaken survival by
+omitting job breakaway or silently switching to WSL when policy blocks Scheduler.
+
+If the user explicitly chooses WSL in Settings > Copilot Fix, require an installed
+distro and an absolute Linux Git checkout path for every repository they Fix.
+Check the full Copilot CLI, Git, bgtask and ownership tools in that selected
+distro, without inferring a clone path or copying credentials. Preserve inactive
+Windows/WSL settings and existing runs' captured host. New WSL runs never
+automatically resume/replay after interruption; legacy recovery stays unchanged.
 
 ### Legacy WSL Copilot recovery only
 

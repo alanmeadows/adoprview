@@ -23,6 +23,22 @@ static class CopilotRecoveryTests
 
     public static async Task Run(Func<string, Func<Task>, Task> test)
     {
+        await test("Copilot opted-in WSL interrupted recovery preserves captured target and never resumes or replays", async () =>
+        {
+            using var f = new Fixture();
+            await using var first = f.Service();
+            var run = await first.StartAsync(Request() with { Backend = "wsl" });
+            await Wait(first, run.RunId, s => s.Output.Contains("FAKE-READY"));
+            await first.DisposeAsync();
+            f.Transport.End(137, outcome: false);
+            await using var second = f.Service();
+            await second.RecoverAsync();
+            var stopped = await Wait(second, run.RunId, s => s.Status == "needs-attention");
+            Check(stopped.Backend == "wsl" && stopped.Request.Distro == run.Request.Distro &&
+                stopped.Request.Directory == run.Request.Directory && stopped.ResumeAttempts == 0 &&
+                f.Transport.Launches == 1 && stopped.Error!.Contains("never automatically resumed"),
+                "Opted-in WSL interruption launched a continuation or lost the captured host");
+        });
         await test("Copilot admitted recovery callback cannot append after Stop", async () =>
         {
             using var f = new Fixture();

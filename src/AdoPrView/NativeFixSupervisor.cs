@@ -12,12 +12,31 @@ namespace AdoPrView;
 internal static class NativeFixSupervisor
 {
     internal sealed class OwnershipException(string message) : InvalidOperationException(message);
+    internal sealed class LaunchException(int error, string message) : Win32Exception(error, message);
+    internal sealed record HostJob(bool InJob, uint? InnermostFlags)
+    {
+        public string Diagnostic => !InJob ? "The launcher is not in a Windows job." :
+            InnermostFlags is { } flags ? $"The launcher is in a Windows job; innermost limit flags are 0x{flags:x8}. Outer job limits are not available through this query." :
+            "The launcher is in a Windows job; its limits could not be queried.";
+    }
+
+    internal static HostJob InspectHostJob()
+    {
+        if (!IsProcessInJob(new IntPtr(-1), IntPtr.Zero, out var inJob))
+            throw new LaunchException(Marshal.GetLastWin32Error(), "Native supervisor host-job inspection failed; no process was launched.");
+        if (!inJob) return new(false, null);
+        var limits = new ExtendedLimits();
+        return new(true, QueryCurrentJob(IntPtr.Zero, 9, ref limits, Marshal.SizeOf<ExtendedLimits>(), IntPtr.Zero)
+            ? limits.Basic.LimitFlags : null);
+    }
     internal sealed record Specification(string RunId, string Token, string SessionId, string RunDirectory,
         string SourceDirectory, string CommonDirectory, string Worktree, string Branch, string Commit,
         string Git, string Cli, string Remote, string FetchUrl, string[] PushUrls, bool PushToSource)
     {
         public string? SupervisorBundleId { get; init; }
         public string? SupervisorExecutable { get; init; }
+        public string? SupervisorLauncher { get; init; }
+        public string? SupervisorUserSid { get; init; }
     }
     internal sealed record Receipt(string RunId, string Token, string SessionId, int SupervisorPid,
         long SupervisorStartedTicks, int? ExitCode, string? Error, bool DescendantsStopped);
@@ -47,6 +66,10 @@ internal static class NativeFixSupervisor
             !Path.GetFullPath(s.Worktree).Equals(Path.Combine(s.RunDirectory, "worktree"), StringComparison.OrdinalIgnoreCase))
             throw new OwnershipException("The native run ownership record is invalid; work is preserved.");
         SafePath(s.RunDirectory);
+        if (s.SupervisorLauncher is not (null or "task-scheduler") ||
+            s.SupervisorLauncher == "task-scheduler" && (s.SupervisorExecutable is null ||
+                s.SupervisorUserSid is null || !s.SupervisorUserSid.StartsWith("S-1-", StringComparison.Ordinal)))
+            throw new OwnershipException("The native supervisor launch principal/method is invalid.");
         if (s.SupervisorExecutable is not null || s.SupervisorBundleId is not null)
         {
             var root = Path.GetDirectoryName(Path.GetDirectoryName(s.RunDirectory))!;
@@ -93,18 +116,42 @@ internal static class NativeFixSupervisor
         if (s.SupervisorExecutable is not null &&
             !Path.GetFullPath(executable).Equals(s.SupervisorExecutable, StringComparison.OrdinalIgnoreCase))
             throw new OwnershipException("A stable native run cannot be launched from a different supervisor executable.");
-        if (!File.Exists(executable)) throw new InvalidOperationException("The native Fix supervisor executable is missing. Reinstall the complete application.");
-        using var stdout = InheritableFile(FilePath(s, "supervisor.stdout.log"), true, append: true);
-        using var stderr = InheritableFile(FilePath(s, "supervisor.stderr.log"), true, append: true);
+        if (!File.Exists(executable)) throw new LaunchException(2, "The native Fix supervisor executable is missing. Reinstall the complete application; no task was launched.");
+        if (s.SupervisorLauncher == "task-scheduler" && !nestedSyntheticFixture)
+        {
+            NativeFixTaskBroker.Launch(s);
+            return;
+        }
+        using var stdout = LaunchOutput(s, "supervisor.stdout.log");
+        using var stderr = LaunchOutput(s, "supervisor.stderr.log");
         var startup = new StartupInfo { Size = Marshal.SizeOf<StartupInfo>(), Flags = 0x00000100,
             StdOutput = stdout.DangerousGetHandle(), StdError = stderr.DangerousGetHandle() };
         var command = new StringBuilder(Quote(executable) + " --native-fix-supervisor " + Quote(FilePath(s, "ownership.json")));
+        var host = InspectHostJob();
         // Never fall back to inheriting a host's lifetime job: that would falsely promise detached execution.
         if (!CreateProcess(executable, command, IntPtr.Zero, IntPtr.Zero, true,
-            0x00000008 | 0x00000200 | (nestedSyntheticFixture ? 0u : 0x01000000u), IntPtr.Zero, s.RunDirectory, ref startup, out var process))
-            throw new Win32Exception(Marshal.GetLastWin32Error(), "Native supervisor launch failed (the host may prohibit job breakaway).");
+            0x00000008 | 0x00000200 | (!nestedSyntheticFixture && host.InJob ? 0x01000000u : 0u),
+            IntPtr.Zero, s.RunDirectory, ref startup, out var process))
+        {
+            var error = Marshal.GetLastWin32Error();
+            throw new LaunchException(error, $"Native supervisor CreateProcess failed (Windows error {error}). {host.Diagnostic} " +
+                (error == 5 && host.InJob
+                    ? "Access was denied while requesting detached job breakaway. The host must allow independent launch; inheriting its lifetime would not preserve Fix survival. "
+                    : "Check executable access, application-control policy and the retained supervisor logs. ") +
+                "No supervisor/CLI was created and no WSL fallback was attempted. The prepared worktree is retained.");
+        }
         CloseHandle(process.Thread);
         CloseHandle(process.Process);
+    }
+
+    static SafeFileHandle LaunchOutput(Specification s, string name)
+    {
+        try { return InheritableFile(FilePath(s, name), true, append: true); }
+        catch (Win32Exception ex)
+        {
+            throw new LaunchException(ex.NativeErrorCode,
+                $"Native supervisor output-file setup failed (Windows error {ex.NativeErrorCode}). Check access to the owned run directory; CreateProcess was not called and no task was launched.");
+        }
     }
 
     internal static Receipt? Status(Specification s)
@@ -286,6 +333,23 @@ internal static class NativeFixSupervisor
             if (child.Thread != IntPtr.Zero) CloseHandle(child.Thread);
             if (child.Process != IntPtr.Zero) CloseHandle(child.Process);
             job?.Dispose();
+            if (s?.SupervisorLauncher == "task-scheduler" && receipt is not null)
+            {
+                try { NativeFixTaskBroker.Cleanup(s); }
+                catch (Exception ex) when (ex is COMException or OwnershipException or IOException or UnauthorizedAccessException)
+                {
+                    const string warning = "The exact per-user Fix task registration could not be removed. It has no triggers; inspect the retained scheduler task. Exact process Stop is separate.";
+                    Console.Error.WriteLine(warning);
+                    try
+                    {
+                        var latest = Status(s);
+                        if (latest is not null) Write(FilePath(s, "receipt.json"),
+                            latest with { Error = latest.Error is null ? warning : latest.Error + "\n" + warning });
+                    }
+                    catch (Exception failure) when (failure is IOException or UnauthorizedAccessException or OwnershipException)
+                    { Console.Error.WriteLine("Scheduler cleanup warning could not be persisted; inspect supervisor logs."); }
+                }
+            }
         }
     }
 
@@ -386,6 +450,12 @@ internal static class NativeFixSupervisor
     [DllImport("kernel32.dll", SetLastError = true)]
     [return: MarshalAs(UnmanagedType.Bool)]
     static extern bool QueryInformationJobObject(SafeFileHandle job, int kind, ref BasicAccounting accounting, int size, IntPtr returned);
+    [DllImport("kernel32.dll", EntryPoint = "QueryInformationJobObject", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    static extern bool QueryCurrentJob(IntPtr job, int kind, ref ExtendedLimits limits, int size, IntPtr returned);
+    [DllImport("kernel32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    static extern bool IsProcessInJob(IntPtr process, IntPtr job, [MarshalAs(UnmanagedType.Bool)] out bool result);
     [DllImport("kernel32.dll", SetLastError = true)]
     [return: MarshalAs(UnmanagedType.Bool)]
     static extern bool AssignProcessToJobObject(SafeFileHandle job, IntPtr process);

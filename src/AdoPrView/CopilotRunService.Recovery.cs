@@ -162,6 +162,8 @@ public sealed partial class CopilotRunService
                 throw new RunSetupException("The task did not provide a definite inactive state. No resume was attempted.");
             e.TaskConfirmedStopped = true;
             Update(e, s => s with { MayBeRunning = false });
+            if (e.State.Backend == "wsl")
+                throw new RunSetupException("The opted-in WSL task was interrupted. Its work and session are retained; new WSL runs are never automatically resumed or replayed. Inspect the run before deliberately starting new work.");
             if (e.DriverLease is null)
                 throw new RunSetupException("Another dashboard owns recovery of this run. No duplicate resume or cleanup was attempted.");
             CheckCli(env.Help);
@@ -408,7 +410,7 @@ public sealed partial class CopilotRunService
                         saved.State.Status is not ("preparing" or "running" or "recovering" or "cancelling" or "needs-attention" or "completed" or "failed" or "cancelled") ||
                         saved.State.Request.Id <= 0 || string.IsNullOrWhiteSpace(saved.State.Request.Org) ||
                         string.IsNullOrWhiteSpace(saved.State.Request.Project) || string.IsNullOrWhiteSpace(saved.State.Request.Repo) ||
-                        saved.State.Backend is not ("legacy-wsl" or "windows-native") ||
+                        saved.State.Backend is not ("legacy-wsl" or "windows-native" or "wsl") ||
                         saved.Native is not null && (saved.State.Backend != "windows-native" ||
                             saved.Native.RunId != saved.State.RunId || saved.Native.Token != saved.OwnershipToken ||
                             saved.Native.SessionId != saved.State.SessionId || saved.Native.RunDirectory != saved.RunDirectory ||

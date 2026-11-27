@@ -145,6 +145,7 @@ Fixes AB#1234`;
     refreshSeconds: 120, mergeCheckMinutes: 10, notifications: true, sound: true, ignoreDrafts: false,
     autoComplete: { mergeStrategy: 'squash', deleteSourceBranch: true, transitionWorkItems: true },
     triageInstructions: null,
+    fixBackend: 'windows-native', nativeRepoDirectories: {},
     wslDistro: null, wslRepoDirectories: {},
   };
   // Completions from the last 7 days; read-only and separate from active prs.
@@ -178,6 +179,7 @@ Fixes AB#1234`;
     async rpc(method, p) {
       await new Promise((r) => setTimeout(r, 150));
       switch (method) {
+        case 'listWslDistros': return ['Demo-Ubuntu', 'Demo-Debian'];
         case 'init': return { settings, snapshot, runs: [...runs.values()], explanations: [...explanations.values()], investigations: [...investigations.values()], videos: [...videos.values()], version: 'mock', update: null };
         case 'askPr': {
           if (!prs.some(x => x.key === p.key)) throw new Error('Mock PR not found.');
@@ -274,6 +276,7 @@ Fixes AB#1234`;
           if (['preparing', 'running'].includes(runs.get(p.key)?.status)) throw new Error('A run is already active for this PR.');
           const pr = prs.find(x => x.key === p.key);
           const run = { key: pr.key, id: pr.id, title: pr.title, repo: pr.repo, runId: 'mock-' + Date.now(),
+            backend: settings.fixBackend,
             status: 'running', message: 'Mock run: no process or live fix was started.', exitCode: null,
             worktreePath: '/home/offline/.local/share/ado-prview/worktrees/mock-' + pr.id,
             worktreeRetained: false, output: 'Mock: isolated PR worktree ready.\nStarting fake Copilot output...\n', updatedAt: new Date().toISOString() };

@@ -1,6 +1,6 @@
 <Project Sdk="Microsoft.NET.Sdk">
   <PropertyGroup>
-    <OutputType>Exe</OutputType>
+    <OutputType>WinExe</OutputType>
     <TargetFramework>net10.0</TargetFramework>
     <Nullable>enable</Nullable>
     <ImplicitUsings>enable</ImplicitUsings>
@@ -9,5 +9,6 @@
   <ItemGroup>
     <Compile Include="..\AdoPrView\NativeFixSupervisor.cs" Link="NativeFixSupervisor.cs" />
     <Compile Include="..\AdoPrView\NativeFixEnvironment.cs" Link="NativeFixEnvironment.cs" />
+    <Compile Include="..\AdoPrView\NativeFixTaskBroker.cs" Link="NativeFixTaskBroker.cs" />
   </ItemGroup>
 </Project>

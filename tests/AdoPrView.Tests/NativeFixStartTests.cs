@@ -139,6 +139,61 @@ internal static class NativeFixStartTests
 
     internal static async Task Run(Func<string, Func<Task>, Task> test)
     {
+        if (Environment.GetEnvironmentVariable("ADOPRVIEW_TEST_NATIVE_SCHEDULER_PROBE") == "1")
+            await test("Native Fix Task Scheduler NEW start reconnects captured backend and exact Stop removes task without changing source", async () =>
+            {
+                await using var fixture = await LocalSource.Create();
+                string id;
+                NativeFixSupervisor.Specification specification;
+                await using (var service = fixture.Service())
+                {
+                    service.NativeLauncherForTests = null;
+                    if (Environment.GetEnvironmentVariable("ADOPRVIEW_TEST_NATIVE_SUPERVISOR_PAYLOAD") is { } payload)
+                        service.NativeSupervisorAppDirectoryForTests = Path.GetDirectoryName(payload);
+                    var run = service.Start(fixture.Request());
+                    id = run.RunId;
+                    await Until(() => File.Exists(Path.Combine(fixture.State, "native", id, "worktree", "fixture-child.pid")) ||
+                        service.Get(id)!.Status is "failed" or "needs-attention");
+                    Check(service.Get(id) is { Backend: "windows-native", MayBeRunning: true, Status: "running" },
+                        "Real native Scheduler start failed: " + service.Get(id)!.Error);
+                    specification = NativeFixSupervisor.Read<NativeFixSupervisor.Specification>(
+                        Path.Combine(fixture.State, "native", id, "ownership.json"));
+                    Check(specification.SupervisorLauncher == "task-scheduler" && NativeFixTaskBroker.Registered(specification),
+                        "New native run did not pin its Scheduler launch ownership");
+                    await fixture.AssertPrimaryUnchanged();
+                }
+                Check(NativeFixSupervisor.SupervisorAlive(NativeFixSupervisor.Status(specification)!),
+                    "Disposing the first dashboard killed its Scheduler supervisor");
+                await using var reopened = fixture.Service();
+                await reopened.RecoverAsync();
+                Check(reopened.Get(id) is { Backend: "windows-native", Status: "running", ResumeAttempts: 0 },
+                    "Native Scheduler recovery switched backend or relaunched a prompt");
+                var cancelled = await reopened.CancelAsync(id);
+                Check(cancelled is { Status: "cancelled", MayBeRunning: false, WorktreeRetained: true },
+                    "Reopened exact Stop did not preserve work and confirm inactivity");
+                await Until(() => !NativeFixTaskBroker.Registered(specification));
+                await fixture.AssertPrimaryUnchanged();
+            });
+        await test("Native Fix uncertain NEW launch result preserves reservation and exact Stop without duplicate dispatch", async () =>
+        {
+            await using var fixture = await LocalSource.Create();
+            await using var service = fixture.Service();
+            var launches = 0;
+            service.NativeLauncherForTests = s =>
+            {
+                launches++;
+                NativeFixSupervisor.Launch(s, nestedSyntheticFixture: true);
+                throw new NativeFixTaskBroker.DispatchException("Synthetic uncertain dispatch", new IOException("lost acknowledgement"));
+            };
+            var run = service.Start(fixture.Request());
+            await Until(() => service.Get(run.RunId)!.Status == "needs-attention");
+            Check(service.Get(run.RunId)!.MayBeRunning, "Uncertain dispatch was recorded as a definite no-child failure");
+            try { service.Start(fixture.Request()); throw new Exception("Uncertain launch allowed a duplicate start"); }
+            catch (InvalidOperationException) { }
+            var stopped = await service.CancelAsync(run.RunId);
+            Check(launches == 1 && stopped is { Status: "cancelled", MayBeRunning: false },
+                "Exact Stop failed after uncertain launch or dispatch was retried");
+        });
         await test("Native Fix NEW Start runs real local Git preparation, exact owned worktree and CLI without WSL", async () =>
         {
             await using var fixture = await LocalSource.Create();
@@ -280,7 +335,7 @@ internal static class NativeFixStartTests
             string id;
             await using (var service = fixture.Service())
             {
-                service.NativeLauncherForTests = _ => throw new System.ComponentModel.Win32Exception(5);
+                service.NativeLauncherForTests = _ => throw new NativeFixSupervisor.LaunchException(5, "Synthetic definite CreateProcess failure");
                 var started = service.Start(fixture.Request());
                 id = started.RunId;
                 await Until(() => service.Get(id)!.Status == "failed");

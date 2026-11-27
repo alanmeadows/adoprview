@@ -111,7 +111,8 @@ with a message in the row; it does not stop the dashboard.
 | **Explain this PR** | The full app package (bundled runtime), GitHub CLI `gh` on the app's PATH | Nothing | Windows `gh auth login` with Copilot access |
 | **Ask** / **Focused review** | Same as Explain, plus the dashboard's ADO source Read access. Full files/directories are read at pinned commits, with no local checkout mapping. | Nothing | Windows `gh` for Copilot; existing dashboard ADO sign-in for source |
 | **TikTok This PR** | Same as Explain, plus Windows `az`, H.264/AAC encoders (Windows N needs the Media Feature Pack) | Nothing | Windows `gh` with access to the `claude-opus-5.5` model; `az login` with Speech access (**Cognitive Services Speech User**) |
-| **New Fix PR** | Git for Windows, a compatible full Windows Copilot CLI, PowerShell, and an existing absolute local Windows Git checkout root mapped in Settings | Nothing | Chosen Windows CLI's own `copilot login` in the default Windows user profile; Windows Git credential helper separately |
+| **New Windows Fix PR (default)** | Git for Windows, full Windows Copilot CLI, current-user interactive Task Scheduler registration allowed, and an absolute local Git checkout mapped in Settings | Nothing | Chosen Windows CLI's own `copilot login`; Windows Git credential helper separately |
+| **New WSL Fix PR (opt in)** | `wsl.exe`, explicit WSL backend selection in Settings | Explicit installed distro and absolute Linux Git checkout; Git, full Copilot CLI, bgtask and ownership tools in that distro | Selected distro's Copilot/Git sign-in, not Windows or Explain credentials |
 | **Legacy WSL Fix recovery** | `wsl.exe` for the exact recorded environment | Recorded distro/user, `git`, authenticated `copilot`, the recorded `bgtask`, `flock`, `setsid`, `python3` and existing shell environment | Captured WSL Copilot sign-in. Windows sign-ins do not repair this old run. |
 | **PoP** | WebView2 runtime | Nothing | Your normal organization sign-in in the PoP pane; human only |
 | Approval provider (**+1**) | A locally installed provider assembly configured in settings | Depends on the provider | Owned by the provider |
@@ -119,8 +120,8 @@ with a message in the row; it does not stop the dashboard.
 
 Notes:
 
-- New Windows work needs neither Windows nor WSL `bgtask`. It is retained only
-  for legacy WSL Fix records, never installed by the app.
+- New Windows work needs neither Windows nor WSL `bgtask`. WSL Fix and legacy
+  WSL recovery need it in their selected/recorded distro; the app never installs it.
 - Windows checkout settings apply only to new Fix work. Old WSL runs keep their
   captured distro/user, paths, registry and original permission/publish scope.
 - Installing or signing in to a different Copilot host does not migrate an
@@ -128,7 +129,7 @@ Notes:
 
 ### New Windows Fix: check dependencies in order
 
-1. **Checkout:** in Settings > Copilot on Windows, select the repository's actual
+1. **Checkout:** in Settings > Copilot Fix, choose Windows and select the repository's actual
    local Windows Git root, not a WSL path, UNC/device path, reparse link or
    same-named unrelated folder. No `~/clones` fallback exists.
 2. **Git:** run `where.exe git` in Windows. If missing, install Git for Windows
@@ -158,16 +159,28 @@ force-fetch, reset, stash or delete somebody's existing work to make setup pass.
 
 Native Fix uses an out-of-process owned Windows Job supervisor with exact run,
 nonce and session receipts. Dashboard close/reopen keeps the same run and
-replays its private log; exact Cancel waits for descendants to stop. If a
-restrictive launch host prohibits detached job breakaway, Windows launch fails
-explicitly rather than tying task lifetime to that host or falling back to WSL.
-An ordinary installed app launch and a restricted automation host are different
-contexts. Native worktrees are always retained; there is no automatic crash
+replays its private log; exact Cancel waits for descendants to stop. New runs
+use an on-demand per-user Task Scheduler task to launch the immutable supervisor
+outside the dashboard's host job. This avoids error 5 from prohibited job
+breakaway without tying task lifetime to that host or falling back to WSL.
+The task uses the current interactive token at least privilege, with no password,
+administrator rights, triggers or restart rule, and removes its own verified
+registration on exit. If Scheduler setup is denied, check current-user task
+registration policy; do not elevate, borrow credentials or delete unrelated tasks.
+An uncertain dispatch retains its reservation and is never retried.
+Native worktrees are always retained; there is no automatic crash
 replay or clean-worktree deletion. Inspect retained work before a deliberate
 new run, which is not a resume of those edits.
 The separate supervisor uses an immutable, versioned deployment outside the app
 installation directory. Active versions are retained through dashboard upgrades;
 do not delete them, kill supervisors or erase receipts to unblock setup.
+
+For WSL Fix, explicitly choose WSL in Settings > Copilot Fix, use **Refresh
+distros** to select an installed distro and enter its absolute Linux repository
+path. No distro or checkout is inferred. Missing prerequisites fail before
+launch with actionable feedback. Switching backends retains inactive settings
+and cannot move an existing run. New WSL runs reconnect but do not automatically
+resume after a crash; legacy records keep their previous recovery rules.
 
 ### Safe checks for legacy WSL Fix recovery
 
