@@ -533,16 +533,19 @@ test('real row hit testing and action identity across refreshes', { timeout: 900
 
     await t.test('Explain optional Mermaid diagrams render offline and retain completed reading state across async rerenders', async sub => {
       const key = 'sample-service-id:101';
-      const output = 'The reader receives pinned evidence before producing the explanation.\n\n```mermaid\nflowchart LR\n  Reader["PR reader $& $$"] <--> Evidence["Pinned evidence"]\n  Evidence -.-> Result["Completed explanation"]\n```\n\n```mermaid\nsequenceDiagram\n  participant Reader\n  participant Host\n  Reader->>Host: Read pinned source\n  Host-->>Reader: Evidence\n```';
+      const output = 'The reader receives pinned evidence before producing the explanation.\n\n```mermaid\nflowchart LR\n  Class["PR reader $& $$"]:::explain-diagram <--> Link["Pinned evidence"]\n  Link -.-> Result["Completed explanation"]\n```\n\n```mermaid\nsequenceDiagram\n  participant Reader\n  participant Host\n  Reader->>Host: Read pinned source\n  Host<<-->>Reader: Evidence\n```';
       await reset(true);
       sub.after(async () => {
         await evaluate('mermaid.render=window.realDiagramRender;window.releaseDiagram?.();');
+        await evaluate('window.removeEventListener("unhandledrejection",window.diagramRejectHandler);');
         await send('Network.setBlockedURLs', { urls: [] });
       });
       await send('Network.enable');
       await send('Network.setBlockedURLs', { urls: ['http://*', 'https://*'] });
       await evaluate(`S.expanded.add('${key}');renderRows();
         window.realDiagramRender=mermaid.render.bind(mermaid);window.diagramCalls=0;
+        window.diagramUnhandled=[];window.diagramRejectHandler=e=>{window.diagramUnhandled.push(e.reason.message);e.preventDefault();};
+        window.addEventListener('unhandledrejection',window.diagramRejectHandler);
         window.diagramGate=new Promise(resolve=>window.releaseDiagram=resolve);
         mermaid.render=(render=>async(...args)=>{window.diagramCalls++;await window.diagramGate;return render(...args);})(window.realDiagramRender);
         updateExplanation({key:'${key}',requestId:'diagram-final',sequence:++window.explainSequence,status:'running',
@@ -599,6 +602,10 @@ test('real row hit testing and action identity across refreshes', { timeout: 900
       await evaluate(`window.diagramSvg=window.diagramOutput.querySelector('svg');
         updateExplanation({...S.explanations.get('${key}'),sequence:++window.explainSequence,message:'Still ready'});
         renderInvestigation('${key}');renderRows();`);
+      await frame();
+      assert.deepEqual(await evaluate('window.diagramUnhandled'), [], 'Rendered SVG classes never become hydration placeholders');
+      assert.equal(await evaluate(`!!window.diagramOutput.querySelector('svg .explain-diagram') &&
+        !window.diagramOutput.querySelector('svg .explain-diagram').dataset.diagramState`), true);
       assert.equal(await evaluate(`window.diagramOutput===document.querySelector('[data-key="${key}"] .explain-output') &&
         window.diagramSvg===window.diagramOutput.querySelector('svg') && window.diagramCalls===2 &&
         window.getSelection().anchorNode===window.diagramParagraph`), true);
@@ -706,6 +713,35 @@ test('real row hit testing and action identity across refreshes', { timeout: 900
         return {unsafe:!!diagram.querySelector('script,style,foreignObject,image,a,[href],[onload],[marker-end]'),
           injected:window.diagramInjected===true,text:diagram.textContent};
       })()`), {unsafe:false,injected:false,text:'Safe label'});
+      assert.deepEqual(await calls(), []);
+    });
+
+    await t.test('Explain sequence diagrams enforce the 80-connection limit before rendering, not counting notes or activation', async sub => {
+      const key = 'sample-service-id:101';
+      await reset(true);
+      sub.after(() => evaluate('mermaid.render=window.realDiagramRender;'));
+      await evaluate(`S.expanded.add('${key}');renderRows();window.diagramCalls=0;
+        window.realDiagramRender=mermaid.render.bind(mermaid);
+        mermaid.render=async()=>{window.diagramCalls++;return {svg:'<svg><text>Budgeted sequence</text></svg>'};};`);
+      const atLimit = 'sequenceDiagram\nloop Evidence\nNote over A,B: An arrow ->> in a note is not a connection\n' +
+        Array.from({length:40},()=> 'A->>+B: Read\nB-->>-A: Evidence').join('\n') + '\nend';
+      const overLimit = 'sequenceDiagram\n' + Array.from({length:81},()=> 'A->>B: Evidence').join(';');
+      for (const [source, state] of [[atLimit, 'completed'], [overLimit, 'failed']]) {
+        const output = 'Completed prose.\n\n```mermaid\n' + source + '\n```';
+        const before = await evaluate('window.diagramCalls');
+        await evaluate(`updateExplanation({key:'${key}',requestId:'budget-'+window.explainSequence,
+          sequence:++window.explainSequence,status:'completed',message:'Ready',output:${JSON.stringify(output)},coverage:[]});`);
+        await evaluate(`new Promise((resolve,reject)=>{
+          const deadline=Date.now()+15000;
+          const check=()=>document.querySelector('[data-key="${key}"] figure.explain-diagram')?.dataset.diagramState===${JSON.stringify(state)}?resolve():
+            Date.now()>deadline?reject(Error('Sequence budget did not reach '+${JSON.stringify(state)})):setTimeout(check,20);check();
+        })`);
+        assert.equal(await evaluate('window.diagramCalls'), before + (state === 'completed' ? 1 : 0));
+        if (state === 'failed') {
+          assert.match(await evaluate(`document.querySelector('[data-key="${key}"] .explain-diagram-status').textContent`), /80-connection/);
+          assert.equal(await evaluate(`document.querySelector('[data-key="${key}"] figure.explain-diagram code').textContent`), source);
+        }
+      }
       assert.deepEqual(await calls(), []);
     });
 

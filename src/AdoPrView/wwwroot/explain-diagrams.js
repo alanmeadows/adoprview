@@ -17,7 +17,8 @@ function explanationDiagramProblem(source) {
   if (!/^\s*(?:flowchart\s+(?:TB|TD|BT|RL|LR)|graph\s+(?:TB|TD|BT|RL|LR)|sequenceDiagram)\b/.test(source))
     return 'Only Mermaid flowcharts and sequence diagrams are supported.';
   // Keep model-supplied configuration, HTML, links, images and CSS out of the renderer itself.
-  if (/%%\s*\{|^\s*---|<(?![-=])|@\{|https?:|javascript:|data:|(?:^|[;\n])\s*(?:click|link|links|style|classDef|class|linkStyle)\b/im.test(source))
+  if (/%%\s*\{|^\s*---|<(?![-=<])|@\{|https?:|javascript:|data:/im.test(source) ||
+      /(?:^|[;\n])\s*(?:click|link|links|style|classDef|class|linkStyle)[ \t]+(?![-=<])\S/m.test(source))
     return 'Diagram configuration, HTML, links, images and custom styles are not allowed.';
   return '';
 }
@@ -59,9 +60,9 @@ function safeExplanationDiagram(svg) {
 
 function renderExplanationDiagrams() {
   for (const output of document.querySelectorAll('.explain-output')) {
-    if (!output.querySelector('.explain-diagram')) continue;
+    if (!output.querySelector('figure.explain-diagram')) continue;
     if (!explanationBodies.has(output)) explanationBodies.set(output, output.innerHTML);
-    for (const figure of output.querySelectorAll('.explain-diagram')) {
+    for (const figure of output.querySelectorAll('figure.explain-diagram')) {
       if (figure.dataset.diagramState || figure.closest('[hidden], details:not([open])')) continue;
       figure.dataset.diagramState = 'rendering';
       void renderExplanationDiagram(figure, output);
@@ -89,6 +90,14 @@ async function renderExplanationDiagram(figure, output) {
       });
       explanationDiagramsInitialized = true;
     }
+    if (/^\s*sequenceDiagram\b/.test(source)) {
+      const diagram = await mermaid.mermaidAPI.getDiagramFromText(source);
+      const signals = new Set(Object.entries(diagram.db.LINETYPE)
+        .filter(([name]) => /SOLID|DOTTED/.test(name)).map(([, type]) => type));
+      if (diagram.db.getMessages().filter(message => signals.has(message.type)).length > 80)
+        throw new Error('The diagram exceeds the 80-connection rendering limit.');
+    }
+    if (!figure.isConnected || !output.contains(figure)) return;
     figure.appendChild(work);
     const { svg } = await mermaid.render(`explanation-diagram-${++explanationDiagramId}`, source, work);
     if (!figure.isConnected || !output.contains(figure)) return;

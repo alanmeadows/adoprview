@@ -654,7 +654,9 @@ test('Explain diagram guard rejects unsafe configuration resources styles and ov
   const problem = source => vm.runInContext(`explanationDiagramProblem(${JSON.stringify(source)})`, context);
   assert.equal(problem('flowchart LR\n  Reader --> Result'), '');
   assert.equal(problem('flowchart LR\n  Reader <--> Result\n  Result <-.-> Evidence'), '');
+  assert.equal(problem('flowchart LR\n Class["ExplainModel"] --> Link["Native bridge"]\n Link --> Class'), '');
   assert.equal(problem('sequenceDiagram\n  Reader->>Host: Read pinned source\n  Host-->>Reader: Evidence'), '');
+  assert.equal(problem('sequenceDiagram\n  Reader<<->>Host: Exchange\n  Host<<-->>Reader: Evidence'), '');
   for (const source of [
     'pie\n  "Other" : 1',
     '%%{init: {"securityLevel": "loose"}}%%\nflowchart LR\n A --> B',
