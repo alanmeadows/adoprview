@@ -386,6 +386,8 @@ They render locally in the completed explanation and its attached-context previe
 without a CDN or external resources. Diagram source remains available in a collapsed
 disclosure. Unsupported, invalid or unsafe diagrams show an explicit error and
 their escaped source instead; the completed prose remains readable.
+Screen readers receive the diagram's title and description when provided, or a
+plain-text summary of its connections. Open source disclosures retain the rendered diagram.
 The viewer rejects diagram HTML, links, images, configuration and custom styles,
 and limits each diagram to 6,000 characters and 80 connections. The answer scales
 to the change rather than filling a fixed template. A dependency update should identify whether its module

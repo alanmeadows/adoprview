@@ -23,7 +23,7 @@ function explanationDiagramProblem(source) {
   return '';
 }
 
-function safeExplanationDiagram(svg) {
+function safeExplanationDiagram(svg, description = '') {
   const clean = DOMPurify.sanitize(svg, {
     ALLOWED_TAGS: ['svg', 'g', 'defs', 'marker', 'path', 'rect', 'circle', 'ellipse', 'polygon', 'polyline',
       'line', 'text', 'tspan', 'title', 'desc'],
@@ -54,7 +54,21 @@ function safeExplanationDiagram(svg) {
     }
   }
   root.setAttribute('role', 'img');
-  root.setAttribute('aria-label', 'PR explanation diagram; Mermaid source follows');
+  const title = root.querySelector('title');
+  let desc = root.querySelector('desc');
+  if (title?.textContent.trim()) {
+    title.id ||= prefix + 'title';
+    root.setAttribute('aria-labelledby', title.id);
+    if (!desc && description) {
+      desc = document.createElementNS('http://www.w3.org/2000/svg', 'desc');
+      desc.textContent = description;
+      root.prepend(desc);
+    }
+  } else root.setAttribute('aria-label', `PR explanation diagram. ${description || root.textContent.trim()}`);
+  if (desc?.textContent.trim()) {
+    desc.id ||= prefix + 'description';
+    root.setAttribute('aria-describedby', desc.id);
+  }
   return root;
 }
 
@@ -90,21 +104,34 @@ async function renderExplanationDiagram(figure, output) {
       });
       explanationDiagramsInitialized = true;
     }
+    const diagram = await mermaid.mermaidAPI.getDiagramFromText(source);
+    let description;
     if (/^\s*sequenceDiagram\b/.test(source)) {
-      const diagram = await mermaid.mermaidAPI.getDiagramFromText(source);
       const signals = new Set(Object.entries(diagram.db.LINETYPE)
         .filter(([name]) => /SOLID|DOTTED/.test(name)).map(([, type]) => type));
-      if (diagram.db.getMessages().filter(message => signals.has(message.type)).length > 80)
+      const messages = diagram.db.getMessages().filter(message => signals.has(message.type));
+      if (messages.length > 80)
         throw new Error('The diagram exceeds the 80-connection rendering limit.');
+      const actors = diagram.db.getActors(), name = id => actors.get(id)?.description || id;
+      const bidirectional = new Set([diagram.db.LINETYPE.BIDIRECTIONAL_SOLID, diagram.db.LINETYPE.BIDIRECTIONAL_DOTTED]);
+      description = messages.map(message => bidirectional.has(message.type)
+        ? `${name(message.from)} exchanges ${message.message} with ${name(message.to)}.`
+        : `${name(message.from)} sends ${message.message} to ${name(message.to)}.`).join(' ') ||
+        `Participants: ${[...actors.keys()].map(name).join(', ')}.`;
+    } else {
+      const vertices = diagram.db.getVertices(), name = id => vertices.get(id)?.text || id;
+      description = diagram.db.getEdges().map(edge =>
+        `${name(edge.start)} connects ${edge.type?.startsWith('double_') ? 'in both directions ' : ''}to ${name(edge.end)}${edge.text ? ': ' + edge.text : ''}.`).join(' ') ||
+        `Nodes: ${[...vertices.keys()].map(name).join(', ')}.`;
     }
     if (!figure.isConnected || !output.contains(figure)) return;
     figure.appendChild(work);
     const { svg } = await mermaid.render(`explanation-diagram-${++explanationDiagramId}`, source, work);
     if (!figure.isConnected || !output.contains(figure)) return;
-    const diagram = safeExplanationDiagram(svg);
+    const rendered = safeExplanationDiagram(svg, description);
     const main = document.querySelector('main'), top = main?.scrollTop;
     const outputTop = output.scrollTop, outputLeft = output.scrollLeft;
-    drawing.replaceChildren(diagram);
+    drawing.replaceChildren(rendered);
     figure.dataset.diagramState = 'completed';
     status.hidden = true;
     output.scrollTop = outputTop;

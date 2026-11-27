@@ -233,9 +233,9 @@ function renderInvestigation(key = investigationKey) {
   const focused = content.contains(document.activeElement) ? document.activeElement : null;
   const role = focused?.dataset.inv;
   const start = focused?.selectionStart, end = focused?.selectionEnd;
-  const openDetails = [...content.querySelectorAll('details')].filter(x => x.open).map(x => x.querySelector('summary')?.textContent);
+  const openDetails = [...content.querySelectorAll('details')].filter(x => x.open && !x.closest('.explain-output')).map(x => x.querySelector('summary')?.textContent);
   content.innerHTML = renderAssistanceContent(key);
-  for (const details of content.querySelectorAll('details')) if (openDetails.includes(details.querySelector('summary')?.textContent)) details.open = true;
+  for (const details of content.querySelectorAll('details')) if (!details.closest('.explain-output') && openDetails.includes(details.querySelector('summary')?.textContent)) details.open = true;
   restoreExplanationOutputs(outputs);
   const position = assistanceDraft(key).positions.get(assistanceSelection(key)?.id || assistanceDraft(key).selected);
   const output = content.querySelector(':scope > .assistance-explanation > .explain-output, :scope > .investigation-transcript');

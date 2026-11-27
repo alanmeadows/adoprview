@@ -533,7 +533,7 @@ test('real row hit testing and action identity across refreshes', { timeout: 900
 
     await t.test('Explain optional Mermaid diagrams render offline and retain completed reading state across async rerenders', async sub => {
       const key = 'sample-service-id:101';
-      const output = 'The reader receives pinned evidence before producing the explanation.\n\n```mermaid\nflowchart LR\n  Class["PR reader $& $$"]:::explain-diagram <--> Link["Pinned evidence"]\n  Link -.-> Result["Completed explanation"]\n```\n\n```mermaid\nsequenceDiagram\n  participant Reader\n  participant Host\n  Reader->>Host: Read pinned source\n  Host<<-->>Reader: Evidence\n```';
+      const output = 'The reader receives pinned evidence before producing the explanation.\n\n```mermaid\nflowchart LR\n  accTitle: Evidence flow\n  accDescr: The reader and pinned evidence exchange context, which produces the explanation.\n  Class["PR reader $& $$"]:::explain-diagram <--> Link["Pinned evidence"]:::explain-diagram-work\n  Link -.-> Result["Completed explanation"]\n```\n\n```mermaid\nsequenceDiagram\n  participant Reader\n  participant Host\n  Reader->>Host: Read pinned source\n  Host<<-->>Reader: Evidence\n```';
       await reset(true);
       sub.after(async () => {
         await evaluate('mermaid.render=window.realDiagramRender;window.releaseDiagram?.();');
@@ -590,6 +590,22 @@ test('real row hit testing and action identity across refreshes', { timeout: 900
       assert.ok(labelsFit.every(x=>x.fits), JSON.stringify(labelsFit));
       assert.equal(rendered.unsafe, false);
       assert.equal(rendered.localMarkers, true);
+      assert.equal(await evaluate(`([...window.diagramOutput.querySelectorAll('svg .node text')]
+        .every(label=>getComputedStyle(label).visibility==='visible'))`), true, 'Diagram classes cannot hide evidence labels');
+      assert.deepEqual(await evaluate(`(()=>{
+        const [flow,sequence]=window.diagramOutput.querySelectorAll('.explain-diagram-drawing svg');
+        const title=flow.querySelector('title'),description=flow.querySelector('desc');
+        return {title:title?.textContent,description:description?.textContent,
+          owned:flow.getAttribute('aria-labelledby')===title?.id && flow.getAttribute('aria-describedby')===description?.id &&
+            title?.id.startsWith('explanation-svg-') && description?.id.startsWith('explanation-svg-'),
+          sequence:sequence.getAttribute('aria-label')};
+      })()`), {title:'Evidence flow',description:'The reader and pinned evidence exchange context, which produces the explanation.',
+        owned:true,sequence:'PR explanation diagram. Reader sends Read pinned source to Host. Host exchanges Evidence with Reader.'});
+      const documentNode = (await send('DOM.getDocument')).root.nodeId;
+      const diagramNode = await send('DOM.querySelector', {nodeId:documentNode,selector:`[data-key="${key}"] .explain-diagram-drawing svg`});
+      const accessible = (await send('Accessibility.getPartialAXTree', {nodeId:diagramNode.nodeId,fetchRelatives:false})).nodes[0];
+      assert.equal(accessible.name.value, 'Evidence flow');
+      assert.equal(accessible.description.value, 'The reader and pinned evidence exchange context, which produces the explanation.');
       assert.deepEqual(await evaluate(`(()=>{
         const out=window.diagramOutput;
         return {solid:getComputedStyle(out.querySelector('.messageLine0')).strokeDasharray,
@@ -600,6 +616,7 @@ test('real row hit testing and action identity across refreshes', { timeout: 900
         window.getSelection().toString()===window.diagramSelection &&
         document.querySelector('main').scrollTop===window.diagramViewport`), true);
       await evaluate(`window.diagramSvg=window.diagramOutput.querySelector('svg');
+        window.diagramSource=window.diagramOutput.querySelector('.explain-diagram-source');window.diagramSource.open=true;
         updateExplanation({...S.explanations.get('${key}'),sequence:++window.explainSequence,message:'Still ready'});
         renderInvestigation('${key}');renderRows();`);
       await frame();
@@ -608,7 +625,8 @@ test('real row hit testing and action identity across refreshes', { timeout: 900
         !window.diagramOutput.querySelector('svg .explain-diagram').dataset.diagramState`), true);
       assert.equal(await evaluate(`window.diagramOutput===document.querySelector('[data-key="${key}"] .explain-output') &&
         window.diagramSvg===window.diagramOutput.querySelector('svg') && window.diagramCalls===2 &&
-        window.getSelection().anchorNode===window.diagramParagraph`), true);
+        window.getSelection().anchorNode===window.diagramParagraph &&
+        window.diagramSource===window.diagramOutput.querySelector('.explain-diagram-source') && window.diagramSource.open`), true);
       await send('Emulation.setDeviceMetricsOverride', {width:900,height:1000,deviceScaleFactor:1,mobile:false});
       await evaluate("S.settings.theme='dark';applySavedTheme();");
       await frame();
@@ -643,8 +661,9 @@ test('real row hit testing and action identity across refreshes', { timeout: 900
 
     await t.test('Explain diagrams completed in closed assistance hydrate immediately on both reopen paths', async () => {
       const key = 'sample-service-id:101';
-      const output = 'Completed evidence.\n\n```mermaid\nflowchart LR\n A --> B\n```';
       for (const reopen of ['button', 'openInvestigation']) {
+        const output = 'Completed evidence.\n\n```mermaid\nflowchart LR\n' +
+          (reopen === 'openInvestigation' ? ' accTitle: Evidence connection\n' : '') + ' A --> B\n```';
         await reset(true);
         await evaluate(`S.expanded.add('${key}');renderRows();
           updateExplanation({key:'${key}',requestId:'closed-diagram',sequence:++window.explainSequence,
@@ -666,6 +685,13 @@ test('real row hit testing and action identity across refreshes', { timeout: 900
         assert.equal(await evaluate(`window.closedDiagram===document.querySelector('[data-key="${key}"] .explain-diagram') &&
           !document.querySelector('[data-key="${key}"] .assistance-body').hidden &&
           !!window.closedDiagram.querySelector('.explain-diagram-drawing svg')`), true, reopen);
+        if (reopen === 'button')
+          assert.equal(await evaluate(`window.closedDiagram.querySelector('svg').getAttribute('aria-label')`), 'PR explanation diagram. A connects to B.');
+        else assert.equal(await evaluate(`(()=>{
+          const diagram=window.closedDiagram.querySelector('svg'),description=diagram.querySelector('desc');
+          return description.textContent==='A connects to B.' && diagram.getAttribute('aria-describedby')===description.id &&
+            description.id.startsWith('explanation-svg-');
+        })()`), true, 'Missing authored description receives an owned connection summary');
       }
       assert.deepEqual(await calls(), []);
     });
@@ -682,7 +708,7 @@ test('real row hit testing and action identity across refreshes', { timeout: 900
       assert.equal(await evaluate(`window.diagramCalls===0 && !document.querySelector('.explain-diagram') &&
         document.querySelector('[data-key="${key}"] .explain-output').textContent.includes('only prose')`), true);
       for (const [source, permitted] of [
-        ['flowchart LR\n A -->', true],
+        ['flowchart LR\n A -->', false],
         ['flowchart LR\n A --> B\n click A "https://evil.invalid/"', false],
         ['%%{init: {"securityLevel":"loose"}}%%\nflowchart LR\n A --> B', false],
         ['flowchart LR\n A["<img src=x onerror=window.diagramInjected=true>"] --> B', false],
@@ -704,6 +730,12 @@ test('real row hit testing and action identity across refreshes', { timeout: 900
             unsafe:!!out.querySelector('script,img,a,iframe')||window.diagramInjected===true};
         })()`), {source,open:true,prose:true,unsafe:false});
         assert.match(await evaluate(`document.querySelector('[data-key="${key}"] .explain-diagram-status').textContent`), /Diagram could not be rendered/);
+        await evaluate(`window.failedDiagram=document.querySelector('[data-key="${key}"] figure.explain-diagram');
+          window.failedDiagramCalls=window.diagramCalls;renderInvestigation('${key}');renderRows();`);
+        await frame();
+        assert.equal(await evaluate(`window.failedDiagram===document.querySelector('[data-key="${key}"] figure.explain-diagram') &&
+          window.failedDiagram.querySelector('details').open && window.diagramCalls===window.failedDiagramCalls`), true,
+        'Failed diagrams retain their opened source without restarting');
       }
       await evaluate(`mermaid.render=window.realDiagramRender;
         { const safeSvg=safeExplanationDiagram('<svg xmlns="http://www.w3.org/2000/svg"><style>body{display:none}</style><script>window.diagramInjected=true</script><foreignObject><img src="https://evil.invalid/"></foreignObject><image href="https://evil.invalid/"/><a href="javascript:alert(1)"><text onload="alert(1)">Safe label</text></a><path marker-end="url(https://evil.invalid/x)"/></svg>');
@@ -745,16 +777,23 @@ test('real row hit testing and action identity across refreshes', { timeout: 900
       assert.deepEqual(await calls(), []);
     });
 
-    await t.test('Explain discarded async diagram results cannot replace a cancelled or newer explanation', async () => {
+    await t.test('Explain discarded async diagram results cannot replace a cancelled or newer explanation', async sub => {
       const key = 'sample-service-id:101';
       const output = '```mermaid\nflowchart LR\n A --> B\n```';
       await reset(true);
+      sub.after(() => evaluate('mermaid.render=window.realDiagramRender;'));
       await evaluate(`S.expanded.add('${key}');renderRows();
         window.realDiagramRender=mermaid.render.bind(mermaid);
         mermaid.render=()=>new Promise(resolve=>window.resolveStaleDiagram=resolve);
         updateExplanation({key:'${key}',requestId:'old-diagram',sequence:++window.explainSequence,status:'completed',
           message:'Ready',output:${JSON.stringify(output)},coverage:[]});
-        window.oldDiagram=document.querySelector('[data-key="${key}"] .explain-diagram');
+        window.oldDiagram=document.querySelector('[data-key="${key}"] .explain-diagram');`);
+      await evaluate(`new Promise((resolve,reject)=>{
+        const deadline=Date.now()+10000;
+        const check=()=>window.resolveStaleDiagram?resolve():
+          Date.now()>deadline?reject(Error('Diagram did not reach async renderer')):setTimeout(check,20);check();
+      })`);
+      await evaluate(`
         updateExplanation({key:'${key}',requestId:'new-request',sequence:++window.explainSequence,status:'running',
           message:'Reading',output:${JSON.stringify(output)},coverage:[]});
         updateExplanation({...S.explanations.get('${key}'),sequence:++window.explainSequence,status:'cancelled',

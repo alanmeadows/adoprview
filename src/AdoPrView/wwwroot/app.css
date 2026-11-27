@@ -333,7 +333,7 @@ main { flex: 1; overflow: auto; padding: 0 20px 28px; container-type: inline-siz
 .explain-waiting .video-spinner { display: inline-block; width: 16px; height: 16px; vertical-align: middle; border-width: 2px; margin-right: 6px; }
 .explain-diagram { position: relative; margin: 16px 0; }
 .explain-diagram-status .video-spinner { display: inline-block; width: 16px; height: 16px; vertical-align: middle; border-width: 2px; margin-right: 6px; }
-.explain-diagram-work { position: absolute; visibility: hidden; pointer-events: none; }
+div.explain-diagram-work { position: absolute; visibility: hidden; pointer-events: none; }
 .explain-diagram-drawing { overflow-x: auto; }
 .explain-diagram-drawing svg { display: block; width: 100%; max-width: 100%; height: auto; stroke: none; stroke-width: 0; }
 .explain-diagram-drawing text { fill: var(--text); stroke: none; font: 14px "Segoe UI", sans-serif; }
