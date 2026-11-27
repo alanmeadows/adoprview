@@ -536,7 +536,7 @@ test('real row hit testing and action identity across refreshes', { timeout: 900
       const output = '## Evidence flow\n\nThe reader receives pinned evidence before producing the explanation.\n\n```mermaid\nflowchart LR\n  accTitle: Evidence flow\n  accDescr: The reader and pinned evidence exchange context, which produces the explanation.\n  Class["PR reader $& $$"]:::explain-diagram <--> Link["Pinned evidence"]:::explain-diagram-work\n  Link -.-> Result["Completed explanation"]\n```\n\n```mermaid\nsequenceDiagram\n  participant Reader\n  participant Host\n  Reader->>Host: Read pinned source\n  Host<<-->>Reader: Evidence\n```';
       await reset(true);
       sub.after(async () => {
-        await evaluate('mermaid.render=window.realDiagramRender;window.releaseDiagram?.();');
+        await evaluate('mermaid.render=window.realDiagramRender;window.releaseDiagram?.();window.releaseImportedDiagram?.();');
         await evaluate(`S.investigations.delete('${key}');`);
         await evaluate('window.removeEventListener("unhandledrejection",window.diagramRejectHandler);');
         await send('Network.setBlockedURLs', { urls: [] });
@@ -671,6 +671,8 @@ test('real row hit testing and action identity across refreshes', { timeout: 900
       'Choosing an unchanged context package preserves preview SVG, source disclosure and selection');
       await evaluate(`{
         const explanation=S.explanations.get('${key}'),draft=assistanceDraft('${key}');draft.sectionIndex=null;
+        window.importedCalls=0;window.importedGate=new Promise(resolve=>window.releaseImportedDiagram=resolve);
+        mermaid.render=(render=>async(...args)=>{window.importedCalls++;await window.importedGate;return render(...args);})(window.realDiagramRender);
         updateInvestigation({key:'${key}',conversationId:'diagram-context',requestId:'diagram-context-update',sequence:1,
           status:'completed',message:'Ready',revision:explanation.revision,evidence:[],coverage:[],
           explanationContexts:[{requestId:explanation.requestId,output:explanation.output,revision:explanation.revision,coverage:[],sectionIndex:null}],
@@ -678,8 +680,15 @@ test('real row hit testing and action identity across refreshes', { timeout: 900
             findings:[],outcomes:[],explanationRequestIds:[explanation.requestId],referencePrUrls:[]}]});
         const imported=[...document.querySelectorAll('[data-key="${key}"] details')]
           .find(d=>d.querySelector('summary')?.textContent.startsWith('View actual imported explanation'));
-        imported.open=true;window.importedPreview=imported.querySelector('.explain-output');
+        imported.open=true;window.importedPreview=imported.querySelector('.explain-output');renderExplanationDiagrams();
       }`);
+      await evaluate(`new Promise((resolve,reject)=>{
+        const deadline=Date.now()+15000;
+        const check=()=>window.importedCalls===2?resolve():
+          Date.now()>deadline?reject(Error('Imported diagrams did not reach async renderer')):setTimeout(check,20);check();
+      })`);
+      await evaluate(`updateInvestigation({...S.investigations.get('${key}'),sequence:2,message:'Pending context receipt refreshed'});
+        renderRows();window.releaseImportedDiagram();`);
       await evaluate(`new Promise((resolve,reject)=>{
         const deadline=Date.now()+15000;
         const check=()=>window.importedPreview.querySelectorAll('figure[data-diagram-state="completed"]').length===2?resolve():
@@ -689,7 +698,7 @@ test('real row hit testing and action identity across refreshes', { timeout: 900
         window.importedSource=window.importedPreview.querySelector('.explain-diagram-source');window.importedSource.open=true;
         window.importedText=window.importedSource.querySelector('code').firstChild;
         window.getSelection().setBaseAndExtent(window.importedText,0,window.importedText,12);
-        updateInvestigation({...S.investigations.get('${key}'),sequence:2,message:'Context receipt refreshed'});renderRows();`);
+        updateInvestigation({...S.investigations.get('${key}'),sequence:3,message:'Context receipt refreshed'});renderRows();`);
       await frame();
       assert.equal(await evaluate(`window.importedPreview.isConnected && window.importedSvg===window.importedPreview.querySelector('svg') &&
         window.importedPreview.closest('details').open && window.importedSource.open &&

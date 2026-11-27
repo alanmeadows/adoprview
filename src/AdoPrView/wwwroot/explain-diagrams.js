@@ -73,7 +73,7 @@ function safeExplanationDiagram(svg, description = '') {
 }
 
 function renderExplanationDiagrams() {
-  for (const output of document.querySelectorAll('.explain-output')) {
+  for (const output of document.querySelectorAll('.explain-output[data-explanation-result]')) {
     if (!output.querySelector('figure.explain-diagram')) continue;
     if (!explanationBodies.has(output)) explanationBodies.set(output, output.innerHTML);
     for (const figure of output.querySelectorAll('figure.explain-diagram')) {
