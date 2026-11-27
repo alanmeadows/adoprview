@@ -533,10 +533,11 @@ test('real row hit testing and action identity across refreshes', { timeout: 900
 
     await t.test('Explain optional Mermaid diagrams render offline and retain completed reading state across async rerenders', async sub => {
       const key = 'sample-service-id:101';
-      const output = 'The reader receives pinned evidence before producing the explanation.\n\n```mermaid\nflowchart LR\n  accTitle: Evidence flow\n  accDescr: The reader and pinned evidence exchange context, which produces the explanation.\n  Class["PR reader $& $$"]:::explain-diagram <--> Link["Pinned evidence"]:::explain-diagram-work\n  Link -.-> Result["Completed explanation"]\n```\n\n```mermaid\nsequenceDiagram\n  participant Reader\n  participant Host\n  Reader->>Host: Read pinned source\n  Host<<-->>Reader: Evidence\n```';
+      const output = '## Evidence flow\n\nThe reader receives pinned evidence before producing the explanation.\n\n```mermaid\nflowchart LR\n  accTitle: Evidence flow\n  accDescr: The reader and pinned evidence exchange context, which produces the explanation.\n  Class["PR reader $& $$"]:::explain-diagram <--> Link["Pinned evidence"]:::explain-diagram-work\n  Link -.-> Result["Completed explanation"]\n```\n\n```mermaid\nsequenceDiagram\n  participant Reader\n  participant Host\n  Reader->>Host: Read pinned source\n  Host<<-->>Reader: Evidence\n```';
       await reset(true);
       sub.after(async () => {
         await evaluate('mermaid.render=window.realDiagramRender;window.releaseDiagram?.();');
+        await evaluate(`S.investigations.delete('${key}');`);
         await evaluate('window.removeEventListener("unhandledrejection",window.diagramRejectHandler);');
         await send('Network.setBlockedURLs', { urls: [] });
       });
@@ -552,6 +553,7 @@ test('real row hit testing and action identity across refreshes', { timeout: 900
           message:'Reading',output:${JSON.stringify(output)},coverage:[]});`);
       assert.equal(await evaluate(`!document.querySelector('[data-key="${key}"] .explain-diagram') && window.diagramCalls===0`), true);
       await evaluate(`updateExplanation({...S.explanations.get('${key}'),sequence:++window.explainSequence,status:'completed',message:'Ready',
+          explanationSections:[{index:0,title:'Evidence flow',characters:${output.length},includesArm:false}],
           revision:{iteration:4,sourceCommit:'a'.repeat(40),baseCommit:'b'.repeat(40)}});
         window.diagramOutput=document.querySelector('[data-key="${key}"] .explain-output');
         window.diagramParagraph=window.diagramOutput.querySelector('p').firstChild;
@@ -655,6 +657,44 @@ test('real row hit testing and action identity across refreshes', { timeout: 900
           ?.querySelectorAll('.explain-diagram[data-diagram-state="completed"]').length===2?resolve():
           Date.now()>deadline?reject(Error('Attached diagram preview timed out')):setTimeout(check,20);check();
       })`);
+      await evaluate(`window.attachedPreview=[...document.querySelectorAll('[data-key="${key}"] details')]
+          .find(d=>d.querySelector('summary')?.textContent==='View attached context').querySelector('.explain-output');
+        window.attachedSvg=window.attachedPreview.querySelector('svg');
+        window.attachedSource=window.attachedPreview.querySelector('.explain-diagram-source');window.attachedSource.open=true;
+        window.attachedText=window.attachedSource.querySelector('code').firstChild;
+        window.getSelection().setBaseAndExtent(window.attachedText,0,window.attachedText,12);
+        const packageSelect=document.querySelector('[data-key="${key}"] [data-assistance-section]');
+        packageSelect.value='0';packageSelect.dispatchEvent(new Event('change',{bubbles:true}));renderRows();`);
+      await frame();
+      assert.equal(await evaluate(`window.attachedPreview.isConnected && window.attachedSvg===window.attachedPreview.querySelector('svg') &&
+        window.attachedSource.open && window.getSelection().anchorNode===window.attachedText`), true,
+      'Choosing an unchanged context package preserves preview SVG, source disclosure and selection');
+      await evaluate(`{
+        const explanation=S.explanations.get('${key}'),draft=assistanceDraft('${key}');draft.sectionIndex=null;
+        updateInvestigation({key:'${key}',conversationId:'diagram-context',requestId:'diagram-context-update',sequence:1,
+          status:'completed',message:'Ready',revision:explanation.revision,evidence:[],coverage:[],
+          explanationContexts:[{requestId:explanation.requestId,output:explanation.output,revision:explanation.revision,coverage:[],sectionIndex:null}],
+          turns:[{id:'diagram-context-turn',kind:'question',question:'How does the evidence flow?',answer:'Pinned evidence feeds the explanation.',
+            findings:[],outcomes:[],explanationRequestIds:[explanation.requestId],referencePrUrls:[]}]});
+        const imported=[...document.querySelectorAll('[data-key="${key}"] details')]
+          .find(d=>d.querySelector('summary')?.textContent.startsWith('View actual imported explanation'));
+        imported.open=true;window.importedPreview=imported.querySelector('.explain-output');
+      }`);
+      await evaluate(`new Promise((resolve,reject)=>{
+        const deadline=Date.now()+15000;
+        const check=()=>window.importedPreview.querySelectorAll('figure[data-diagram-state="completed"]').length===2?resolve():
+          Date.now()>deadline?reject(Error('Imported diagram preview timed out')):setTimeout(check,20);check();
+      })`);
+      await evaluate(`window.importedSvg=window.importedPreview.querySelector('svg');
+        window.importedSource=window.importedPreview.querySelector('.explain-diagram-source');window.importedSource.open=true;
+        window.importedText=window.importedSource.querySelector('code').firstChild;
+        window.getSelection().setBaseAndExtent(window.importedText,0,window.importedText,12);
+        updateInvestigation({...S.investigations.get('${key}'),sequence:2,message:'Context receipt refreshed'});renderRows();`);
+      await frame();
+      assert.equal(await evaluate(`window.importedPreview.isConnected && window.importedSvg===window.importedPreview.querySelector('svg') &&
+        window.importedPreview.closest('details').open && window.importedSource.open &&
+        window.getSelection().anchorNode===window.importedText`), true,
+      'Investigation updates preserve imported preview SVG, both disclosures and selection');
       assert.deepEqual(await calls(), [], 'Diagram rendering never calls the native bridge');
       await send('Network.setBlockedURLs', { urls: [] });
     });
