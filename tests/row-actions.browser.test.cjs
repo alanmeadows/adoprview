@@ -119,6 +119,10 @@ test('Additional Fix fields are independently editable and restored in the real 
       new Promise(resolve=>setTimeout(resolve,100));
     `);
     assert.equal(await evaluate(`document.querySelector('[data-fix-settings="windows-native"]').hidden&&!document.querySelector('[data-fix-settings="wsl"]').hidden`), true);
+    assert.equal(await evaluate(`[...document.querySelectorAll('[data-wsl-repo]')].every(el=>{
+      const r=S.settings.repos.find(r=>repoKey(r)===el.dataset.wslRepo);
+      return el.getAttribute('aria-label')==='WSL checkout for '+r.org+' / '+r.project+' / '+r.repo;
+    })`), true);
     await evaluate(`
       document.querySelector('#wslDistro').value='Fixture-Debian';
       document.querySelector('[data-wsl-repo]').value='/home/fixture/repo';

@@ -957,6 +957,12 @@ supervisor. This avoids `CreateProcess` error 5 when the dashboard's host
 uses a kill-on-close job without breakaway permission. It does not weaken
 survival by inheriting the app's lifetime job or switch to WSL.
 
+Preparation captures only the native environment allowlist, including the
+dashboard's PATH, in the owned specification. Scheduled Copilot runs therefore
+keep dashboard-local Git/build tool paths without forwarding credential or
+arbitrary environment overrides. Older specifications retain their original
+environment behavior.
+
 The task uses the current user's interactive Windows token at least privilege:
 no stored password, administrator elevation or service installation. It has no
 triggers, no restart rule and no runtime/battery time limit. Its only action is
@@ -965,7 +971,8 @@ created once, never updated/reused, and dispatch is attempted once. An uncertain
 Scheduler result preserves the run reservation and work; it is never retried.
 The supervisor removes its own verified task registration on exit, including
 when the dashboard is closed. Cleanup failures are reported in the receipt/log;
-removing a registration is not a substitute for Stop of the owned process job.
+the dashboard waits for supervisor exit and rereads both before finalizing.
+Removing a registration is not a substitute for Stop of the owned process job.
 Logging out ends the interactive-user environment; survival across logout or
 machine shutdown is not promised and never causes a crash replay.
 

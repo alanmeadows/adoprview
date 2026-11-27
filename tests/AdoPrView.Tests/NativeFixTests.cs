@@ -21,6 +21,21 @@ internal static class NativeFixTests
 
     static bool Fixture(string[] args)
     {
+        if (args is ["--native-fix-delayed-cleanup", var delayedOwnership])
+        {
+            var owned = NativeFixSupervisor.Read<NativeFixSupervisor.Specification>(delayedOwnership);
+            NativeFixSupervisor.Verify(owned);
+            using var self = Process.GetCurrentProcess();
+            var early = new NativeFixSupervisor.Receipt(owned.RunId, owned.Token, owned.SessionId, self.Id,
+                self.StartTime.ToUniversalTime().Ticks, 0, null, true);
+            NativeFixSupervisor.Write(NativeFixSupervisor.FilePath(owned, "receipt.json"), early);
+            while (!File.Exists(NativeFixSupervisor.FilePath(owned, "release-cleanup")) &&
+                !File.Exists(NativeFixSupervisor.FilePath(owned, "cancel.json"))) Thread.Sleep(20);
+            const string warning = "Synthetic delayed Scheduler cleanup failed; retained registration needs inspection.";
+            File.AppendAllText(NativeFixSupervisor.FilePath(owned, "supervisor.stderr.log"), warning);
+            NativeFixSupervisor.Write(NativeFixSupervisor.FilePath(owned, "receipt.json"), early with { Error = warning });
+            return true;
+        }
         if (args is ["--native-fix-broker-cleanup", var cleanupOwnership])
         {
             NativeFixTaskBroker.Cleanup(NativeFixSupervisor.Read<NativeFixSupervisor.Specification>(cleanupOwnership));
@@ -80,6 +95,7 @@ internal static class NativeFixTests
             var prompt = reader.ReadToEnd();
             File.WriteAllText("fixture-parent.pid", Environment.ProcessId.ToString());
             File.WriteAllText("fixture-prompt.txt", prompt);
+            File.WriteAllText("fixture-path.txt", Environment.GetEnvironmentVariable("PATH") ?? "");
             Console.WriteLine("synthetic native Fix started");
             Console.Error.WriteLine("synthetic stderr evidence");
             if (File.ReadAllText("native-fixture.marker") == "new-start")

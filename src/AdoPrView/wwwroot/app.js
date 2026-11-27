@@ -2142,7 +2142,7 @@ function renderDrawer() {
         <button class="btn" data-dact="wslDistros">Refresh distros</button></div>
       ${S.wslDistrosError ? `<p class="help" role="alert">${esc(S.wslDistrosError)}</p>` : ''}
       ${st.repos.map(r => `<div class="field"><label>${esc(r.repo)}<small>${esc(r.org)} / ${esc(r.project)}</small></label>
-        <input type="text" data-wsl-repo="${esc(repoKey(r))}" value="${esc(st.wslRepoDirectories?.[repoKey(r)] || '')}" placeholder="/home/user/repos/${esc(r.repo)}" /></div>`).join('')}
+        <input type="text" data-wsl-repo="${esc(repoKey(r))}" aria-label="WSL checkout for ${esc(r.org)} / ${esc(r.project)} / ${esc(r.repo)}" value="${esc(st.wslRepoDirectories?.[repoKey(r)] || '')}" placeholder="/home/user/repos/${esc(r.repo)}" /></div>`).join('')}
       <p class="help">Required: an explicit installed distro and absolute Linux Git checkout path for each repository you Fix. Git, authenticated full Copilot CLI, bgtask and ownership prerequisites are checked inside that distro. No default distro or ~/clones path is inferred for new WSL runs.</p></div>
       <p class="help">Switching retains both backends' settings. Legacy WSL runs keep their original host and work. Use each run's exact Cancel control; unavailable tools leave a recovery warning, never a replay on a different backend.</p>
     </div>

@@ -208,7 +208,8 @@ public sealed partial class CopilotRunService
         var specification = new NativeFixSupervisor.Specification(e.State.RunId, e.OwnershipToken, e.State.SessionId!,
             runDirectory, root, common, worktree, branch, commit, git, cli, remote, fetch, push, request.PushToSource)
         { SupervisorBundleId = deployment.BundleId, SupervisorExecutable = deployment.Executable,
-            SupervisorLauncher = "task-scheduler", SupervisorUserSid = NativeFixTaskBroker.CurrentSid() };
+            SupervisorLauncher = "task-scheduler", SupervisorUserSid = NativeFixTaskBroker.CurrentSid(),
+            CliEnvironment = NativeFixEnvironment.Create() };
         NativeFixSupervisor.Write(Path.Combine(runDirectory, "ownership.json"), specification);
         e.Native = specification; e.RunDirectory = runDirectory;
         Update(e, s => s with { SourcePath = root, WorktreeStatus = "preparing", SupervisorDeployment = "stable:" + deployment.BundleId,
@@ -383,8 +384,13 @@ public sealed partial class CopilotRunService
             Append(e, supervisionError, true, history: true, token: token);
             var receipt = NativeFixSupervisor.Status(s);
             var active = NativeFixSupervisor.ActiveProcesses(s);
-            if (receipt is { DescendantsStopped: true, ExitCode: not null } && active is null or 0)
+            if (receipt is { DescendantsStopped: true, ExitCode: not null } && active is null or 0 &&
+                !NativeFixSupervisor.SupervisorAlive(receipt))
             {
+                receipt = NativeFixSupervisor.Status(s)
+                    ?? throw new RunSetupException("The native completion receipt disappeared after supervisor exit; work is retained.");
+                if (receipt is not { DescendantsStopped: true, ExitCode: not null })
+                    throw new RunSetupException("The native completion receipt changed after supervisor exit; work and its reservation are retained.");
                 e.TaskConfirmedStopped = true;
                 DrainNativeLog(e, stdout, false, token);
                 DrainNativeLog(e, stderr, true, token);

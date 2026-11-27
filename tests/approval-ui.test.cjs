@@ -209,6 +209,7 @@ test('Fix backend settings preserve both checkouts and label each captured run h
   assert.match(drawer, /Ask and focused reviews always use Windows independently/);
   assert.match(drawer, /id="wslDistro"/);
   assert.match(drawer, /data-wsl-repo/);
+  assert.match(drawer, /aria-label="WSL checkout for contoso \/ Sample \/ sample-service"/);
   assert.doesNotMatch(drawer, /placeholder="~\/clones/);
   for (const id of ['refreshSeconds', 'mergeCheckMinutes', 'triageInstructions', 'additionalTriageInstructions',
     'mergeStrategy', 'notifications', 'sound', 'deleteSourceBranch', 'transitionWorkItems'])

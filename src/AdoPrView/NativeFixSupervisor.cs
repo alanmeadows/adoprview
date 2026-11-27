@@ -37,6 +37,7 @@ internal static class NativeFixSupervisor
         public string? SupervisorExecutable { get; init; }
         public string? SupervisorLauncher { get; init; }
         public string? SupervisorUserSid { get; init; }
+        public Dictionary<string, string>? CliEnvironment { get; init; }
     }
     internal sealed record Receipt(string RunId, string Token, string SessionId, int SupervisorPid,
         long SupervisorStartedTicks, int? ExitCode, string? Error, bool DescendantsStopped);
@@ -66,6 +67,9 @@ internal static class NativeFixSupervisor
             !Path.GetFullPath(s.Worktree).Equals(Path.Combine(s.RunDirectory, "worktree"), StringComparison.OrdinalIgnoreCase))
             throw new OwnershipException("The native run ownership record is invalid; work is preserved.");
         SafePath(s.RunDirectory);
+        if (s.CliEnvironment is not null && s.CliEnvironment.Any(pair =>
+            !NativeFixEnvironment.IsAllowed(pair.Key) || pair.Value is null || pair.Value.Contains('\0')))
+            throw new OwnershipException("The captured native CLI environment contains unsupported variables or values.");
         if (s.SupervisorLauncher is not (null or "task-scheduler") ||
             s.SupervisorLauncher == "task-scheduler" && (s.SupervisorExecutable is null ||
                 s.SupervisorUserSid is null || !s.SupervisorUserSid.StartsWith("S-1-", StringComparison.Ordinal)))
@@ -260,7 +264,7 @@ internal static class NativeFixSupervisor
             var startup = new StartupInfo { Size = Marshal.SizeOf<StartupInfo>(), Flags = 0x00000100,
                 StdInput = input.DangerousGetHandle(), StdOutput = output.DangerousGetHandle(), StdError = error.DangerousGetHandle() };
             var command = new StringBuilder(Quote(s.Cli) + " " + string.Join(" ", Arguments(s).Select(Quote)));
-            var environment = NativeFixEnvironment.Create();
+            var environment = NativeFixEnvironment.Create(s.CliEnvironment);
             environment["COPILOT_ASSISTED_APPROVAL"] = "false";
             environment["NO_COLOR"] = "1";
             environment["GIT_NO_REPLACE_OBJECTS"] = "1";
