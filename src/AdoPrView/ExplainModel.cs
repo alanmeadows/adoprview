@@ -151,7 +151,14 @@ internal sealed class ExplainModel : IExplainModel
                 Distinguish tests you READ from tests actually RUN (you cannot run tests). Explain important test gaps and unread areas.
                 Use as much detail as the change warrants, with short natural headings when useful; do not pad a fixed template.
                 Define necessary jargon in ordinary English. Cite concrete repository paths and line numbers for important claims.
-                A small fenced text flow diagram is useful only when the inspected code establishes every connection.
+                Include a small diagram only when it materially clarifies the PR's before/after behavior, architecture,
+                or data/control flow better than prose. Ordinary or small changes do not require a diagram.
+                Use a fenced mermaid block containing flowchart (or graph) or sequenceDiagram syntax; the app renders these offline.
+                Ground every node, participant and connection in the pinned diffs or repository context actually delivered by the host tools.
+                Explain the diagram's relevance in nearby prose with inspected path/line citations; label inference and missing evidence.
+                Keep diagrams simple (prefer one or two), under 6,000 characters each and at most 80 connections.
+                Use plain-text labels only: no HTML, links, images, click actions, styles, class definitions, configuration directives or frontmatter.
+                Other Mermaid diagram types are not supported. Use prose when a supported diagram would not improve understanding.
                 Do not invent architecture, API changes, risks, benefits or diagrams merely to fill a section.
                 For a one-line go.mod update, explain what uses that module and whether it builds a product, test tool, utility or pipeline.
                 Never invent fixes, features, security benefits or runtime impact from dependency version numbers.

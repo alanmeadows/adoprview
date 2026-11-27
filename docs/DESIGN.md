@@ -28,6 +28,11 @@ enough detail inline that you rarely need to click into ADO.
   still follows tray notifications. Full refresh and single-PR refresh share transition detection.
 * **UI:** plain HTML/CSS/JS (no build step) served from a WebView2 virtual host.
   `marked` + `DOMPurify` are vendored for safe Markdown descriptions.
+  Explain additionally uses vendored Mermaid 11.12.2 for optional evidence-grounded
+  flowcharts and sequence diagrams. Only completed Explain fences are hydrated;
+  strict rendering uses app-scoped containers and a second SVG allowlist removes
+  HTML, links, resources and renderer CSS. App CSS supplies theme-aware colors.
+  Invalid/unsafe diagrams expose their escaped source and an error, not a stuck spinner.
   `?mock=1` runs the UI in any browser against fixture data for fast iteration.
   Semantic CSS palettes provide Light Mode (default, Primer-inspired) and Dark
   Mode. Native settings own the selection; a derived navigation hint applies

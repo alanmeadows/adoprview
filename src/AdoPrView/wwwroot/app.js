@@ -565,12 +565,18 @@ function explanationRevision(r) {
   return v ? `Iteration ${v.iteration} · source ${v.sourceCommit.slice(0, 12)} · merge base ${v.baseCommit.slice(0, 12)}${v.targetCommit ? ` · target ${v.targetCommit.slice(0, 12)}` : ''}` : '';
 }
 
-function explanationBody(r) {
+function explanationBody(r, diagrams = false) {
   if (r?.status !== 'completed' || !r.output) return '';
+  const diagramBlocks = [];
   const renderer = window.marked ? new marked.Renderer() : undefined;
   if (renderer) {
     renderer.code = ({ text, lang }) => {
       const label = lang?.split(/\s/)[0].toLowerCase();
+      if (diagrams && label === 'mermaid') {
+        const marker = `explanation-diagram-${crypto.randomUUID()}`;
+        diagramBlocks.push({ marker, text });
+        return `<p>${marker}</p>`;
+      }
       const title = label === 'bicep' ? 'Bicep' : label === 'diff' ? 'Diff (- removed, + added)' : 'Code';
       const body = text.split('\n').map(line => {
         const safe = esc(line);
@@ -582,11 +588,16 @@ function explanationBody(r) {
   }
   const html = window.marked ? marked.parse(r.output, { gfm: true, breaks: true, renderer }) : esc(r.output);
   // Model output cannot load remote media, navigate links or inject interactive controls.
-  return window.DOMPurify ? DOMPurify.sanitize(html, {
+  let safe = window.DOMPurify ? DOMPurify.sanitize(html, {
     ALLOWED_TAGS: ['p', 'br', 'strong', 'em', 'ul', 'ol', 'li', 'code', 'pre', 'h1', 'h2', 'h3', 'h4',
       'table', 'thead', 'tbody', 'tr', 'th', 'td', 'blockquote', 'hr', 'del', 'ins'],
     ALLOWED_ATTR: [],
   }) : esc(r.output);
+  for (const { marker, text } of diagramBlocks)
+    safe = safe.replace(`<p>${marker}</p>`, explanationDiagramPlaceholder(text));
+  const template = document.createElement('template');
+  template.innerHTML = safe;
+  return template.innerHTML;
 }
 
 function renderExplanation(key) {
@@ -628,8 +639,11 @@ function updateExplanation(r) {
     $('.explain-revision', card).textContent = explanationRevision(r);
     const output = $('.explain-output', card);
     output.hidden = r.status !== 'completed' || !r.output;
-    const body = explanationBody(r);
-    if (output.innerHTML !== body) output.innerHTML = body;
+    const body = explanationBody(r, true);
+    if ((explanationBodies.get(output) ?? output.innerHTML) !== body) {
+      output.innerHTML = body;
+      explanationBodies.delete(output);
+    }
     const waiting = $('.explain-waiting', result);
     if (waiting) waiting.hidden = !active;
     const start = $('[data-act="explainPr"]', card);
@@ -644,6 +658,7 @@ function updateExplanation(r) {
       cancel.dataset.requestId = r.requestId;
     }
   }
+  renderExplanationDiagrams();
   renderExplanationShelf();
 }
 

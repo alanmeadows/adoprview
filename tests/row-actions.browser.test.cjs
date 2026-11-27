@@ -531,6 +531,171 @@ test('real row hit testing and action identity across refreshes', { timeout: 900
         await evaluate('window.expandedEvidenceTop'), 'Reopening evidence precedes output scroll restoration so the viewport is not clamped');
     });
 
+    await t.test('Explain optional Mermaid diagrams render offline and retain completed reading state across async rerenders', async sub => {
+      const key = 'sample-service-id:101';
+      const output = 'The reader receives pinned evidence before producing the explanation.\n\n```mermaid\nflowchart LR\n  Reader["PR reader"] --> Evidence["Pinned evidence"]\n  Evidence --> Result["Completed explanation"]\n```\n\n```mermaid\nsequenceDiagram\n  participant Reader\n  participant Host\n  Reader->>Host: Read pinned source\n  Host-->>Reader: Evidence\n```';
+      await reset(true);
+      sub.after(async () => {
+        await evaluate('mermaid.render=window.realDiagramRender;window.releaseDiagram?.();');
+        await send('Network.setBlockedURLs', { urls: [] });
+      });
+      await send('Network.enable');
+      await send('Network.setBlockedURLs', { urls: ['http://*', 'https://*'] });
+      await evaluate(`S.expanded.add('${key}');renderRows();
+        window.realDiagramRender=mermaid.render.bind(mermaid);window.diagramCalls=0;
+        window.diagramGate=new Promise(resolve=>window.releaseDiagram=resolve);
+        mermaid.render=(render=>async(...args)=>{window.diagramCalls++;await window.diagramGate;return render(...args);})(window.realDiagramRender);
+        updateExplanation({key:'${key}',requestId:'diagram-final',sequence:++window.explainSequence,status:'running',
+          message:'Reading',output:${JSON.stringify(output)},coverage:[]});`);
+      assert.equal(await evaluate(`!document.querySelector('[data-key="${key}"] .explain-diagram') && window.diagramCalls===0`), true);
+      await evaluate(`updateExplanation({...S.explanations.get('${key}'),sequence:++window.explainSequence,status:'completed',message:'Ready',
+          revision:{iteration:4,sourceCommit:'a'.repeat(40),baseCommit:'b'.repeat(40)}});
+        window.diagramOutput=document.querySelector('[data-key="${key}"] .explain-output');
+        window.diagramParagraph=window.diagramOutput.querySelector('p').firstChild;
+        window.getSelection().setBaseAndExtent(window.diagramParagraph,0,window.diagramParagraph,10);
+        window.diagramSelection=window.getSelection().toString();
+        renderInvestigation('${key}');renderRows();`);
+      const pendingDiagrams = await evaluate(`({same:window.diagramOutput===document.querySelector('[data-key="${key}"] .explain-output'),
+        calls:window.diagramCalls,states:[...window.diagramOutput.querySelectorAll('.explain-diagram')].map(x=>x.dataset.diagramState)})`);
+      await evaluate('window.releaseDiagram();');
+      assert.deepEqual(pendingDiagrams, {same:true,calls:2,states:['rendering','rendering']});
+      await evaluate(`window.diagramViewport=document.querySelector('main').scrollTop;window.releaseDiagram();`);
+      await evaluate(`new Promise((resolve,reject)=>{
+        const deadline=Date.now()+15000;
+        const check=()=>document.querySelectorAll('.explain-diagram[data-diagram-state="rendering"]').length===0?resolve():
+          Date.now()>deadline?reject(Error('Diagram rendering timed out')):setTimeout(check,20);check();
+      })`);
+      const rendered = await evaluate(`(()=>{
+        const out=window.diagramOutput,svg=[...out.querySelectorAll('.explain-diagram-drawing svg')];
+        return {count:svg.length,labels:svg.map(x=>x.textContent),errors:[...out.querySelectorAll('.explain-diagram-status:not([hidden])')].map(x=>x.textContent),
+          unsafe:!!out.querySelector('svg script,svg foreignObject,svg image,svg a,svg style,svg [style],svg [href],svg [onload]'),
+          sizes:svg.map(x=>({width:x.getBoundingClientRect().width,height:x.getBoundingClientRect().height})),
+          localMarkers:[...out.querySelectorAll('svg [marker-end]')].every(x=>/^url\\(#[\\w-]+\\)$/.test(x.getAttribute('marker-end')))};
+      })()`);
+      assert.deepEqual(rendered.errors, []);
+      assert.equal(rendered.count, 2);
+      assert.match(rendered.labels[0], /PR reader.*Pinned evidence.*Completed explanation/s);
+      assert.match(rendered.labels[1], /Read pinned source.*Evidence/s);
+      assert.ok(rendered.sizes.every(x=>x.width>100&&x.height>30), JSON.stringify(rendered));
+      const labelsFit = await evaluate(`([...window.diagramOutput.querySelectorAll('svg .node')].map(node=>{
+        const label=node.querySelector('text'),box=node.querySelector('rect');
+        if(!label||!box)return null;
+        const a=label.getBoundingClientRect(),b=box.getBoundingClientRect();
+        return {fits:a.left>=b.left-1&&a.right<=b.right+1,label:label.textContent};
+      }).filter(Boolean))`);
+      assert.ok(labelsFit.every(x=>x.fits), JSON.stringify(labelsFit));
+      assert.equal(rendered.unsafe, false);
+      assert.equal(rendered.localMarkers, true);
+      assert.equal(await evaluate(`window.getSelection().anchorNode===window.diagramParagraph &&
+        window.getSelection().toString()===window.diagramSelection &&
+        document.querySelector('main').scrollTop===window.diagramViewport`), true);
+      await evaluate(`window.diagramSvg=window.diagramOutput.querySelector('svg');
+        updateExplanation({...S.explanations.get('${key}'),sequence:++window.explainSequence,message:'Still ready'});
+        renderInvestigation('${key}');renderRows();`);
+      assert.equal(await evaluate(`window.diagramOutput===document.querySelector('[data-key="${key}"] .explain-output') &&
+        window.diagramSvg===window.diagramOutput.querySelector('svg') && window.diagramCalls===2 &&
+        window.getSelection().anchorNode===window.diagramParagraph`), true);
+      await send('Emulation.setDeviceMetricsOverride', {width:900,height:1000,deviceScaleFactor:1,mobile:false});
+      await evaluate("S.settings.theme='dark';applySavedTheme();");
+      await frame();
+      assert.equal(await evaluate(`(()=>{
+        const drawing=window.diagramOutput.querySelector('.explain-diagram-drawing');
+        const labels=[...drawing.querySelectorAll('.node text')];
+        return drawing.scrollWidth<=drawing.clientWidth+1 && labels.every(label=>{
+          const a=label.getBoundingClientRect(),b=label.closest('.node').querySelector('rect').getBoundingClientRect();
+          return a.left>=b.left-1&&a.right<=b.right+1;
+        }) && getComputedStyle(labels[0]).fill===getComputedStyle(document.body).color;
+      })()`), true, 'Narrow dark-mode diagrams fit and use the app text color');
+      await send('Emulation.setDeviceMetricsOverride', {width:1600,height:1000,deviceScaleFactor:1,mobile:false});
+      await evaluate("S.settings.theme='light';applySavedTheme();");
+      if (process.env.ADOPRVIEW_DIAGRAM_SCREENSHOT) {
+        await evaluate('window.diagramOutput.scrollIntoView({block:"start"});');
+        const screenshot = await send('Page.captureScreenshot', { format: 'png' });
+        await writeFile(process.env.ADOPRVIEW_DIAGRAM_SCREENSHOT, Buffer.from(screenshot.data, 'base64'));
+      }
+      await evaluate(`window.getSelection().removeAllRanges();mermaid.render=window.realDiagramRender;
+        const draft=assistanceDraft('${key}');draft.kind='question';draft.attachedId='diagram-final';renderInvestigation('${key}');
+        const preview=[...document.querySelectorAll('[data-key="${key}"] details')].find(d=>d.querySelector('summary')?.textContent==='View attached context');
+        preview.open=true;`);
+      await evaluate(`new Promise((resolve,reject)=>{
+        const deadline=Date.now()+15000;
+        const check=()=>[...document.querySelectorAll('[data-key="${key}"] details')].find(d=>d.querySelector('summary')?.textContent==='View attached context')
+          ?.querySelectorAll('.explain-diagram[data-diagram-state="completed"]').length===2?resolve():
+          Date.now()>deadline?reject(Error('Attached diagram preview timed out')):setTimeout(check,20);check();
+      })`);
+      assert.deepEqual(await calls(), [], 'Diagram rendering never calls the native bridge');
+      await send('Network.setBlockedURLs', { urls: [] });
+    });
+
+    await t.test('Explain diagram failures expose safe source and prose while plain explanations never invoke Mermaid', async sub => {
+      const key = 'sample-service-id:101';
+      await reset(true);
+      sub.after(() => evaluate('mermaid.render=window.realDiagramRender;'));
+      await evaluate(`S.expanded.add('${key}');renderRows();window.diagramCalls=0;
+        window.realDiagramRender=mermaid.render.bind(mermaid);
+        mermaid.render=(render=>(...args)=>{window.diagramCalls++;return render(...args);})(window.realDiagramRender);
+        updateExplanation({key:'${key}',requestId:'plain-final',sequence:++window.explainSequence,status:'completed',
+          message:'Ready',output:'A small dependency update needs only prose.',coverage:[]});`);
+      assert.equal(await evaluate(`window.diagramCalls===0 && !document.querySelector('.explain-diagram') &&
+        document.querySelector('[data-key="${key}"] .explain-output').textContent.includes('only prose')`), true);
+      for (const [source, permitted] of [
+        ['flowchart LR\n A -->', true],
+        ['flowchart LR\n A --> B\n click A "https://evil.invalid/"', false],
+        ['%%{init: {"securityLevel":"loose"}}%%\nflowchart LR\n A --> B', false],
+        ['flowchart LR\n A["<img src=x onerror=window.diagramInjected=true>"] --> B', false],
+      ]) {
+        const output = `Completed prose remains readable.\n\n\`\`\`mermaid\n${source}\n\`\`\``;
+        const before = await evaluate('window.diagramCalls');
+        await evaluate(`updateExplanation({key:'${key}',requestId:'invalid-'+window.explainSequence,sequence:++window.explainSequence,
+          status:'completed',message:'Ready',output:${JSON.stringify(output)},coverage:[]});`);
+        await evaluate(`new Promise((resolve,reject)=>{
+          const deadline=Date.now()+10000;
+          const check=()=>document.querySelector('[data-key="${key}"] .explain-diagram')?.dataset.diagramState==='failed'?resolve():
+            Date.now()>deadline?reject(Error('Diagram failure stayed pending')):setTimeout(check,20);check();
+        })`);
+        assert.equal(await evaluate('window.diagramCalls'), before + (permitted ? 1 : 0));
+        assert.deepEqual(await evaluate(`(()=>{
+          const out=document.querySelector('[data-key="${key}"] .explain-output'),figure=out.querySelector('.explain-diagram');
+          return {source:figure.querySelector('code').textContent,open:figure.querySelector('details').open,
+            prose:out.textContent.includes('Completed prose remains readable.'),
+            unsafe:!!out.querySelector('script,img,a,iframe')||window.diagramInjected===true};
+        })()`), {source,open:true,prose:true,unsafe:false});
+        assert.match(await evaluate(`document.querySelector('[data-key="${key}"] .explain-diagram-status').textContent`), /Diagram could not be rendered/);
+      }
+      await evaluate(`mermaid.render=window.realDiagramRender;
+        { const safeSvg=safeExplanationDiagram('<svg xmlns="http://www.w3.org/2000/svg"><style>body{display:none}</style><script>window.diagramInjected=true</script><foreignObject><img src="https://evil.invalid/"></foreignObject><image href="https://evil.invalid/"/><a href="javascript:alert(1)"><text onload="alert(1)">Safe label</text></a><path marker-end="url(https://evil.invalid/x)"/></svg>');
+        document.querySelector('[data-key="${key}"] .explain-diagram-drawing').replaceChildren(safeSvg); }`);
+      assert.deepEqual(await evaluate(`(()=>{
+        const diagram=document.querySelector('[data-key="${key}"] .explain-diagram-drawing svg');
+        return {unsafe:!!diagram.querySelector('script,style,foreignObject,image,a,[href],[onload],[marker-end]'),
+          injected:window.diagramInjected===true,text:diagram.textContent};
+      })()`), {unsafe:false,injected:false,text:'Safe label'});
+      assert.deepEqual(await calls(), []);
+    });
+
+    await t.test('Explain discarded async diagram results cannot replace a cancelled or newer explanation', async () => {
+      const key = 'sample-service-id:101';
+      const output = '```mermaid\nflowchart LR\n A --> B\n```';
+      await reset(true);
+      await evaluate(`S.expanded.add('${key}');renderRows();
+        window.realDiagramRender=mermaid.render.bind(mermaid);
+        mermaid.render=()=>new Promise(resolve=>window.resolveStaleDiagram=resolve);
+        updateExplanation({key:'${key}',requestId:'old-diagram',sequence:++window.explainSequence,status:'completed',
+          message:'Ready',output:${JSON.stringify(output)},coverage:[]});
+        window.oldDiagram=document.querySelector('[data-key="${key}"] .explain-diagram');
+        updateExplanation({key:'${key}',requestId:'new-request',sequence:++window.explainSequence,status:'running',
+          message:'Reading',output:${JSON.stringify(output)},coverage:[]});
+        updateExplanation({...S.explanations.get('${key}'),sequence:++window.explainSequence,status:'cancelled',
+          message:'Cancelled',output:${JSON.stringify(output)}});
+        window.resolveStaleDiagram({svg:'<svg><text>Stale result</text></svg>'});`);
+      await frame();
+      assert.equal(await evaluate(`!window.oldDiagram.isConnected &&
+        !document.querySelector('[data-key="${key}"] .explain-output svg') &&
+        document.querySelector('[data-key="${key}"] .explain-output').hidden &&
+        !document.querySelector('[data-key="${key}"] .explanation').textContent.includes('Stale result')`), true);
+      await evaluate('mermaid.render=window.realDiagramRender;');
+    });
+
     await t.test('Explain ARM Bicep preserves indentation, safe labels and highlighted differences through retained output', async () => {
       const key = 'sample-service-id:101';
       const before = "resource account 'Microsoft.Storage/storageAccounts@2023-05-01' = {\n  name: 'sample'\n  properties: {\n    allowBlobPublicAccess: true\n  }\n}";

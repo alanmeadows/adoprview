@@ -379,8 +379,15 @@ remains separate from the AI explanation. Copilot
 reads the actual changes and surrounding code, then presents a plain-spoken,
 technically deep explanation: what genuinely improves, concrete before/after
 behavior, architectural/data-flow changes, externally meaningful API or schema
-changes, compatibility risks, and relevant tests and gaps. Small text diagrams
-are used only when inspected code establishes the connections. The answer scales
+changes, compatibility risks, and relevant tests and gaps. Small Mermaid flowcharts
+or sequence diagrams appear only when they clarify the change better than prose
+and inspected evidence establishes the connections; diagrams are not mandatory.
+They render locally in the completed explanation and its attached-context previews,
+without a CDN or external resources. Diagram source remains available in a collapsed
+disclosure. Unsupported, invalid or unsafe diagrams show an explicit error and
+their escaped source instead; the completed prose remains readable.
+The viewer rejects diagram HTML, links, images, configuration and custom styles,
+and limits each diagram to 6,000 characters and 80 connections. The answer scales
 to the change rather than filling a fixed template. A dependency update should identify whether its module
 belongs to the product, a developer utility, test infrastructure or a pipeline.
 The model inspects relevant README files, consumers and build context rather than

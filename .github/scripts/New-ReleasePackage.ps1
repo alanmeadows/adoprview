@@ -109,6 +109,8 @@ This package redistributes the following components under their own licenses:
 $($index -join "`n")
 - marked and DOMPurify: wwwroot/vendor/marked.min.js and purify.min.js keep
   their original license headers.
+- Mermaid 11.12.2: wwwroot/vendor/mermaid.min.js retains bundled dependency
+  notices; see licenses/Mermaid/LICENSE for its MIT license.
 - Real cat photographs: CC0 1.0 and the free Unsplash License, with authors,
   source URLs and license/provenance notices in licenses/cat-photos.txt;
   redistributed JPEG hashes in VideoAssets/cats.json. These assets are not MIT.
