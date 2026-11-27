@@ -533,7 +533,7 @@ test('real row hit testing and action identity across refreshes', { timeout: 900
 
     await t.test('Explain optional Mermaid diagrams render offline and retain completed reading state across async rerenders', async sub => {
       const key = 'sample-service-id:101';
-      const output = 'The reader receives pinned evidence before producing the explanation.\n\n```mermaid\nflowchart LR\n  Reader["PR reader"] --> Evidence["Pinned evidence"]\n  Evidence --> Result["Completed explanation"]\n```\n\n```mermaid\nsequenceDiagram\n  participant Reader\n  participant Host\n  Reader->>Host: Read pinned source\n  Host-->>Reader: Evidence\n```';
+      const output = 'The reader receives pinned evidence before producing the explanation.\n\n```mermaid\nflowchart LR\n  Reader["PR reader $& $$"] <--> Evidence["Pinned evidence"]\n  Evidence -.-> Result["Completed explanation"]\n```\n\n```mermaid\nsequenceDiagram\n  participant Reader\n  participant Host\n  Reader->>Host: Read pinned source\n  Host-->>Reader: Evidence\n```';
       await reset(true);
       sub.after(async () => {
         await evaluate('mermaid.render=window.realDiagramRender;window.releaseDiagram?.();');
@@ -575,6 +575,7 @@ test('real row hit testing and action identity across refreshes', { timeout: 900
       assert.deepEqual(rendered.errors, []);
       assert.equal(rendered.count, 2);
       assert.match(rendered.labels[0], /PR reader.*Pinned evidence.*Completed explanation/s);
+      assert.ok(rendered.labels[0].includes('$& $$'), 'Dollar tokens remain literal diagram labels');
       assert.match(rendered.labels[1], /Read pinned source.*Evidence/s);
       assert.ok(rendered.sizes.every(x=>x.width>100&&x.height>30), JSON.stringify(rendered));
       const labelsFit = await evaluate(`([...window.diagramOutput.querySelectorAll('svg .node')].map(node=>{
@@ -586,6 +587,12 @@ test('real row hit testing and action identity across refreshes', { timeout: 900
       assert.ok(labelsFit.every(x=>x.fits), JSON.stringify(labelsFit));
       assert.equal(rendered.unsafe, false);
       assert.equal(rendered.localMarkers, true);
+      assert.deepEqual(await evaluate(`(()=>{
+        const out=window.diagramOutput;
+        return {solid:getComputedStyle(out.querySelector('.messageLine0')).strokeDasharray,
+          dashed:getComputedStyle(out.querySelector('.messageLine1')).strokeDasharray,
+          dotted:getComputedStyle(out.querySelector('.edge-pattern-dotted')).strokeDasharray};
+      })()`), {solid:'none',dashed:'2px, 2px',dotted:'2px, 2px'}, 'Connection types retain their visual distinction');
       assert.equal(await evaluate(`window.getSelection().anchorNode===window.diagramParagraph &&
         window.getSelection().toString()===window.diagramSelection &&
         document.querySelector('main').scrollTop===window.diagramViewport`), true);
@@ -625,6 +632,35 @@ test('real row hit testing and action identity across refreshes', { timeout: 900
       })`);
       assert.deepEqual(await calls(), [], 'Diagram rendering never calls the native bridge');
       await send('Network.setBlockedURLs', { urls: [] });
+    });
+
+    await t.test('Explain diagrams completed in closed assistance hydrate immediately on both reopen paths', async () => {
+      const key = 'sample-service-id:101';
+      const output = 'Completed evidence.\n\n```mermaid\nflowchart LR\n A --> B\n```';
+      for (const reopen of ['button', 'openInvestigation']) {
+        await reset(true);
+        await evaluate(`S.expanded.add('${key}');renderRows();
+          updateExplanation({key:'${key}',requestId:'closed-diagram',sequence:++window.explainSequence,
+            status:'running',message:'Reading',output:'',coverage:[]});
+          document.querySelector('[data-key="${key}"] [data-assistance-close]').click();
+          updateExplanation({...S.explanations.get('${key}'),sequence:++window.explainSequence,
+            status:'completed',message:'Ready',output:${JSON.stringify(output)}});
+          window.closedDiagram=document.querySelector('[data-key="${key}"] .explain-diagram');`);
+        assert.equal(await evaluate(`document.querySelector('[data-key="${key}"] .assistance-body').hidden &&
+          !window.closedDiagram.dataset.diagramState && !window.closedDiagram.querySelector('svg')`), true);
+        await evaluate(reopen === 'button'
+          ? `document.querySelector('[data-key="${key}"] [data-assistance-close]').click();`
+          : `openInvestigation('${key}', 'explain');`);
+        await evaluate(`new Promise((resolve,reject)=>{
+          const deadline=Date.now()+15000;
+          const check=()=>window.closedDiagram.dataset.diagramState==='completed'?resolve():
+            Date.now()>deadline?reject(Error('Reopened diagram stayed pending')):setTimeout(check,20);check();
+        })`);
+        assert.equal(await evaluate(`window.closedDiagram===document.querySelector('[data-key="${key}"] .explain-diagram') &&
+          !document.querySelector('[data-key="${key}"] .assistance-body').hidden &&
+          !!window.closedDiagram.querySelector('.explain-diagram-drawing svg')`), true, reopen);
+      }
+      assert.deepEqual(await calls(), []);
     });
 
     await t.test('Explain diagram failures expose safe source and prose while plain explanations never invoke Mermaid', async sub => {

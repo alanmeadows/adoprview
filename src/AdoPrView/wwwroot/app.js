@@ -594,7 +594,7 @@ function explanationBody(r, diagrams = false) {
     ALLOWED_ATTR: [],
   }) : esc(r.output);
   for (const { marker, text } of diagramBlocks)
-    safe = safe.replace(`<p>${marker}</p>`, explanationDiagramPlaceholder(text));
+    safe = safe.replace(`<p>${marker}</p>`, () => explanationDiagramPlaceholder(text));
   const template = document.createElement('template');
   template.innerHTML = safe;
   return template.innerHTML;

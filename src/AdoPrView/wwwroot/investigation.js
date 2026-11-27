@@ -326,6 +326,7 @@ function openInvestigation(key, kind = 'question', attachedId) {
   else renderInvestigation(key);
   const card = assistanceCard(key);
   card?.querySelector('.assistance-body')?.removeAttribute('hidden');
+  renderExplanationDiagrams();
   card?.querySelector('[data-assistance-close]')?.setAttribute('aria-expanded', 'true');
   if (card?.querySelector('[data-assistance-close]')) card.querySelector('[data-assistance-close]').textContent = 'Close assistance';
   card?.scrollIntoView({ block: 'nearest' });
@@ -456,6 +457,7 @@ function wireInvestigation() {
     if (close) {
       rememberAssistancePosition(key); d.closed = !d.closed;
       card.querySelector('.assistance-body').hidden = d.closed; close.textContent = d.closed ? 'Reopen assistance' : 'Close assistance';
+      if (!d.closed) renderExplanationDiagrams();
       close.setAttribute('aria-expanded', String(!d.closed)); renderExplanationShelf(); return;
     }
     const action = e.target.closest('[data-investigation-action]');

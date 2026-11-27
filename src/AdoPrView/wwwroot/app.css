@@ -340,6 +340,8 @@ main { flex: 1; overflow: auto; padding: 0 20px 28px; container-type: inline-siz
 .explain-diagram-drawing .node text, .explain-diagram-drawing .edgeLabel text, .explain-diagram-drawing .cluster-label text { text-anchor: middle; }
 .explain-diagram-drawing rect, .explain-diagram-drawing circle, .explain-diagram-drawing ellipse, .explain-diagram-drawing polygon { fill: var(--surface); stroke: var(--border2); stroke-width: 1.5px; }
 .explain-diagram-drawing path, .explain-diagram-drawing line, .explain-diagram-drawing polyline { fill: none; stroke: var(--text2); stroke-width: 1.5px; }
+.explain-diagram-drawing .messageLine1, .explain-diagram-drawing .edge-pattern-dotted { stroke-dasharray: 2, 2; }
+.explain-diagram-drawing .edge-pattern-dashed { stroke-dasharray: 8, 8; }
 .explain-diagram-drawing marker path { fill: var(--text2); stroke: var(--text2); }
 .explain-diagram-source summary { cursor: pointer; font-size: 12px; color: var(--text2); }
 .explain-revision { overflow-wrap: anywhere; }

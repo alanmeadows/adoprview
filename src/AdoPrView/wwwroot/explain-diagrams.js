@@ -17,7 +17,7 @@ function explanationDiagramProblem(source) {
   if (!/^\s*(?:flowchart\s+(?:TB|TD|BT|RL|LR)|graph\s+(?:TB|TD|BT|RL|LR)|sequenceDiagram)\b/.test(source))
     return 'Only Mermaid flowcharts and sequence diagrams are supported.';
   // Keep model-supplied configuration, HTML, links, images and CSS out of the renderer itself.
-  if (/%%\s*\{|^\s*---|<|@\{|https?:|javascript:|data:|(?:^|[;\n])\s*(?:click|link|links|style|classDef|class|linkStyle)\b/im.test(source))
+  if (/%%\s*\{|^\s*---|<(?![-=])|@\{|https?:|javascript:|data:|(?:^|[;\n])\s*(?:click|link|links|style|classDef|class|linkStyle)\b/im.test(source))
     return 'Diagram configuration, HTML, links, images and custom styles are not allowed.';
   return '';
 }

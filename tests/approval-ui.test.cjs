@@ -637,11 +637,12 @@ test('Explain recognizes optional completed Mermaid fences without forcing diagr
   const { hooks, window, context } = setup();
   context.marked = window.marked = require('../src/AdoPrView/wwwroot/vendor/marked.min.js');
   context.DOMPurify = window.DOMPurify = { sanitize: html => html };
-  const output = 'A code-grounded flow.\n\n```mermaid\nflowchart LR\n  Reader --> Result\n```\n\n```bicep\n  name: \'sample\'\n```';
+  const output = 'A code-grounded flow.\n\n```mermaid\nflowchart LR\n  Reader --> Result["$& $$"]\n```\n\n```bicep\n  name: \'sample\'\n```';
   assert.equal(hooks.explanationBody({ output, status: 'running' }, true), '');
   const html = hooks.explanationBody({ output, status: 'completed' }, true);
   assert.match(html, /class="explain-diagram"/);
   assert.match(html, /Reader --&gt; Result/);
+  assert.match(html, /\$&amp; \$\$/);
   assert.match(html, /<strong>Bicep<\/strong>.*<code>  name: &#39;sample&#39;/s);
   assert.equal(html, hooks.explanationBody({ output, status: 'completed' }, true), 'Placeholder HTML stays stable across rerenders');
   assert.doesNotMatch(hooks.explanationBody({ output: 'Plain prose.', status: 'completed' }, true), /explain-diagram/);
@@ -652,12 +653,14 @@ test('Explain diagram guard rejects unsafe configuration resources styles and ov
   const { context } = setup();
   const problem = source => vm.runInContext(`explanationDiagramProblem(${JSON.stringify(source)})`, context);
   assert.equal(problem('flowchart LR\n  Reader --> Result'), '');
+  assert.equal(problem('flowchart LR\n  Reader <--> Result\n  Result <-.-> Evidence'), '');
   assert.equal(problem('sequenceDiagram\n  Reader->>Host: Read pinned source\n  Host-->>Reader: Evidence'), '');
   for (const source of [
     'pie\n  "Other" : 1',
     '%%{init: {"securityLevel": "loose"}}%%\nflowchart LR\n A --> B',
     '---\nconfig:\n  securityLevel: loose\n---\nflowchart LR\n A --> B',
     'flowchart LR\n A["<img src=x onerror=alert(1)>"] --> B',
+    'flowchart LR\n A <--> B["<script>alert(1)</script>"]',
     'flowchart LR\n A --> B\n click A "https://evil.invalid/"',
     'flowchart LR\n A --> B; style A fill:red',
     'flowchart LR\n A@{ img: "https://evil.invalid/x" }',
