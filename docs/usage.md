@@ -376,7 +376,7 @@ after the compact Status summary and before full diagnostic logs. **Explain**,
 video is under **Alternate output**. Generation is deliberate, not automatic.
 The author-written Description
 remains separate from the AI explanation. Copilot
-reads the actual changes and surrounding code, then streams a plain-spoken,
+reads the actual changes and surrounding code, then presents a plain-spoken,
 technically deep explanation: what genuinely improves, concrete before/after
 behavior, architectural/data-flow changes, externally meaningful API or schema
 changes, compatibility risks, and relevant tests and gaps. Small text diagrams
@@ -419,7 +419,10 @@ with Copilot access; `gh` must be on the PATH ADO PR View started with. Exit the
 app from the tray and reopen it after installing `gh`. Your ADO token is never
 used for Copilot. Missing sign-in, model/access failures and ADO errors appear
 inline; see [TROUBLESHOOTING.md](../TROUBLESHOOTING.md#explain-says-copilot-is-not-signed-in). One explanation runs at a time; **Cancel** stops it.
-Partial or failed responses are labeled and must not be treated as completed.
+A waiting spinner, status and exact-request Cancel remain available during generation.
+Only the completed explanation is displayed as formatted Markdown; incremental
+text is not shown or auto-scrolled. Failed or cancelled drafts stay hidden, with
+their terminal status and retry action visible.
 Results stay in memory until the app exits; **Explain again** starts a fresh session
 and a distinct result. **Working result** returns to a retained explanation or
 answer without generating it again. Completed explanations retain their exact

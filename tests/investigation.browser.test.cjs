@@ -129,7 +129,10 @@ test('task-led assistance keeps exact Explain context, private review intent, se
     await screenshot('01-workspace-desktop', 'Actual unified assistance; Explain/Ask/Focused review share one inline destination; video is alternate output.');
     await click('[data-act="explainPr"]');
     assert.equal(await evaluate(`card().querySelector('[data-assistance-attach]').disabled`), true);
-    await screenshot('02-explain-running', 'Actual running Explain with partial output and exact-request Cancel.');
+    assert.equal(await evaluate(`card().querySelector('.explain-output').hidden &&
+      card().querySelector('.explain-output').textContent==='' &&
+      !!card().querySelector('.explain-waiting:not([hidden]) .video-spinner')`), true);
+    await screenshot('02-explain-running', 'Actual running Explain with waiting spinner and exact-request Cancel; partial output hidden.');
     await evaluate('completeExplain()');
     await screenshot('03-explain-arm-desktop', 'Actual completed synthetic ARM explanation, code/diff and next-action composer destination.');
     await evaluate(`card().querySelector('.explain-output').scrollTop=170;`);

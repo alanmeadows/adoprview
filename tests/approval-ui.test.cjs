@@ -520,6 +520,7 @@ test('Explain is available on expanded drafts without changing fixed row actions
   assert.equal(calls.length, 1);
   assert.equal(calls[0].method, 'explainPr');
   assert.deepEqual(Object.keys(calls[0].p), ['key']);
+  assert.match(hooks.renderExplanation(pr.key), /video-spinner.*Requesting explanation/s);
   const state = { key: pr.key, requestId: 'one', sequence: 1, status: 'running', message: 'Reading', output: '', coverage: [], revision: null };
   resolve(state);
   await pending;
@@ -534,19 +535,28 @@ test('Explain is available on expanded drafts without changing fixed row actions
   assert.equal(hooks.S.explanations.get(pr.key).status, 'cancelled');
 });
 
-test('Explain streams only into the captured panel and ignores stale request/sequence events', () => {
+test('Explain hides incremental output without scrolling and ignores stale request/sequence events', () => {
   const { hooks, pr, document, element, elements } = setup();
   const nodes = Object.fromEntries(['.explain-status', '.explain-revision', '.explain-output', '.explain-coverage', '.explain-evidence', '.explain-notices',
     '[data-act="explainPr"]', '[data-act="cancelExplanation"]'].map(s => [s, element()]));
-  nodes['.assistance-explanation'] = { dataset: { resultRequest: 'one' } };
+  nodes['.assistance-explanation'] = { dataset: { resultRequest: 'one' }, querySelector: () => null };
   const card = { dataset: { explainKey: pr.key }, querySelector: s => nodes[s] };
   document.querySelectorAll = s => s === '.explanation' ? [card] : [];
   const sentinel = { innerHTML: 'neighbor stays put' };
   elements.set('#rows', sentinel);
   const state = { key: pr.key, requestId: 'one', sequence: 5, status: 'running', message: 'Reading',
     output: '<script>unsafe</script>', coverage: ['Binary not inspected'], revision: { iteration: 4, sourceCommit: 'a'.repeat(40), baseCommit: 'b'.repeat(40) } };
+  nodes['.explain-output'].scrollTop = 73;
+  nodes['.explain-output'].scrollHeight = 400;
+  nodes['.explain-output'].clientHeight = 340;
+  hooks.updateExplanation({ ...state, sequence: 4, status: 'preparing' });
+  assert.equal(nodes['.explain-output'].innerHTML, '');
+  assert.equal(nodes['.explain-output'].hidden, true);
+  assert.match(hooks.renderExplanation(pr.key), /explain-waiting small" role="status"\s*><span class="video-spinner"/);
   hooks.updateExplanation(state);
-  assert.match(nodes['.explain-output'].innerHTML, /&lt;script&gt;/);
+  assert.equal(nodes['.explain-output'].innerHTML, '');
+  assert.equal(nodes['.explain-output'].scrollTop, 73);
+  assert.doesNotMatch(hooks.renderExplanation(pr.key), /unsafe|explain-stream/);
   assert.equal(nodes['[data-act="cancelExplanation"]'].dataset.requestId, 'one');
   assert.equal(nodes['[data-act="explainPr"]'].disabled, true);
   assert.equal(sentinel.innerHTML, 'neighbor stays put');
@@ -556,7 +566,11 @@ test('Explain streams only into the captured panel and ignores stale request/seq
   assert.equal(hooks.S.explanations.get(pr.key).output, 'finished');
   assert.equal(nodes['[data-act="cancelExplanation"]'].hidden, true);
   assert.equal(nodes['[data-act="explainPr"]'].disabled, false);
-  assert.equal(nodes['.explain-output'].scrollTop, 0);
+  assert.equal(nodes['.explain-output'].scrollTop, 73);
+  assert.equal(nodes['.explain-output'].innerHTML, 'finished');
+  hooks.updateExplanation({ ...state, requestId: 'new', sequence: 9, status: 'running', output: 'late active event' });
+  assert.equal(hooks.S.explanations.get(pr.key).status, 'completed');
+  assert.equal(nodes['.explain-output'].innerHTML, 'finished');
   assert.match(nodes['.explain-revision'].textContent, /merge base bbbbbbbbbbbb/);
 });
 
@@ -605,7 +619,7 @@ test('Explain cancellation needs the exact active request, not current PR member
   assert.equal(calls.length, 1);
 });
 
-test('Explain sanitizes completed Markdown without remote media/links/controls and labels partial errors', () => {
+test('Explain sanitizes completed Markdown and hides failed/cancelled drafts with truthful retry state', () => {
   const { hooks, pr, window, context } = setup();
   let options;
   context.marked = window.marked = { parse: text => text, Renderer: class {} };
@@ -614,15 +628,18 @@ test('Explain sanitizes completed Markdown without remote media/links/controls a
   for (const tag of ['a', 'img', 'script', 'iframe', 'input', 'button', 'style', 'svg'])
     assert.ok(!options.ALLOWED_TAGS.includes(tag));
   assert.equal(options.ALLOWED_ATTR.length, 0);
-  hooks.updateExplanation({ key: pr.key, requestId: 'failed', sequence: 10, status: 'failed',
-    message: 'Sign in required', output: 'partial <b>text</b>', coverage: ['No full diff inspected'], revision: null });
-  const html = hooks.renderExplanation(pr.key);
-  assert.match(html, /Sign in required/);
-  assert.match(html, /No full diff inspected/);
-  assert.match(html, /partial &lt;b&gt;text&lt;\/b&gt;/);
-  assert.match(html, /Retry Explain/);
-  assert.match(html, /<details class="explain-details">/);
-  assert.doesNotMatch(html, /<details[^>]*\bopen\b/);
+  for (const [sequence, status, message] of [[10, 'failed', 'Sign in required'], [11, 'cancelled', 'Cancellation confirmed']]) {
+    hooks.updateExplanation({ key: pr.key, requestId: status, sequence, status,
+      message, output: 'partial <b>text</b>', coverage: ['No full diff inspected'], revision: null });
+    const html = hooks.renderExplanation(pr.key);
+    assert.ok(html.includes(message));
+    assert.match(html, /No full diff inspected/);
+    assert.doesNotMatch(html, /partial &lt;b&gt;text/);
+    assert.match(html, /Retry Explain/);
+    assert.match(html, /explain-waiting small" role="status" hidden/);
+    assert.match(html, /<details class="explain-details">/);
+    assert.doesNotMatch(html, /<details[^>]*\bopen\b/);
+  }
 });
 
 function addReviewVote(pr) {

@@ -404,6 +404,7 @@ function laneVisible(prs) {
 }
 
 function renderRows(whenIdle = false) {
+  const assistanceOutputs = captureExplanationOutputs();
   const assistanceFocus = document.activeElement?.closest('.explanation') ? {
     key: document.activeElement.closest('.explanation').dataset.explainKey,
     role: document.activeElement.dataset.inv,
@@ -421,6 +422,7 @@ function renderRows(whenIdle = false) {
   const players = new Map([...document.querySelectorAll('video[data-video-media]')].map(v => [v.dataset.videoMedia, v]));
   renderRowsContent(whenIdle);
   renderExplanationShelf();
+  restoreExplanationOutputs(assistanceOutputs);
   restoreRunOutputs(selection);
   restoreVideoPlayers(players);
   restoreExpansionFocus(focused);
@@ -564,8 +566,7 @@ function explanationRevision(r) {
 }
 
 function explanationBody(r) {
-  if (!r?.output) return '';
-  if (r.status !== 'completed') return `<pre class="explain-stream">${esc(r.output)}</pre>`;
+  if (r?.status !== 'completed' || !r.output) return '';
   const renderer = window.marked ? new marked.Renderer() : undefined;
   if (renderer) {
     renderer.code = ({ text, lang }) => {
@@ -605,17 +606,17 @@ function updateExplanation(r) {
       typeof r.output !== 'string' || !Array.isArray(r.coverage))
     throw new Error('Copilot returned an invalid explanation state.');
   const old = S.explanations.get(r.key);
-  if (old && r.sequence <= old.sequence) return;
+  if (old && (r.sequence <= old.sequence || old.requestId === r.requestId && !explanationActive(old) && explanationActive(r))) return;
   S.explanations.set(r.key, r);
   retainExplanation(r);
   const d = assistanceDraft(r.key);
   if (!old || old.requestId !== r.requestId) {
     if (d.kind === 'explain') d.selected = `explain:${r.requestId}`;
     renderInvestigation(r.key);
-  } else if (explanationActive(r) !== explanationActive(old)) {
+  } else if (explanationActive(r) !== explanationActive(old) || !explanationActive(r) && old.status !== r.status) {
     renderInvestigation(r.key);
   }
-  // Streaming only mutates this panel, preserving neighboring action targets and focus.
+  // Incremental events update status only; completed prose never follows the stream.
   for (const card of document.querySelectorAll('.explanation')) {
     if (card.dataset.explainKey !== r.key) continue;
     const result = $('.assistance-explanation', card);
@@ -626,11 +627,11 @@ function updateExplanation(r) {
     status.classList.toggle('error', r.status === 'failed');
     $('.explain-revision', card).textContent = explanationRevision(r);
     const output = $('.explain-output', card);
-    const bottom = output.scrollHeight - output.clientHeight - output.scrollTop < 30;
-    output.hidden = !r.output;
-    output.innerHTML = explanationBody(r);
-    if (r.status === 'completed' && old?.status !== 'completed') output.scrollTop = 0;
-    else if (bottom) output.scrollTop = output.scrollHeight;
+    output.hidden = r.status !== 'completed' || !r.output;
+    const body = explanationBody(r);
+    if (output.innerHTML !== body) output.innerHTML = body;
+    const waiting = $('.explain-waiting', result);
+    if (waiting) waiting.hidden = !active;
     const start = $('[data-act="explainPr"]', card);
     if (start) {
       start.disabled = active || isBusy(r.key, 'explainPr') || !canExplain(r.key);
@@ -1803,6 +1804,7 @@ async function onAction(act, el, key) {
       if (!canExplain(key) || isBusy(key, act) || explanationActive(S.explanations.get(key))) return;
       S.explanationPrs.set(key, { id: p.id, repo: p.repo, title: p.title });
       S.busy.add(`${key}:${act}`);
+      renderInvestigation(key);
       for (const card of document.querySelectorAll('.explanation')) {
         if (card.dataset.explainKey === key && $('[data-act="explainPr"]', card)) $('[data-act="explainPr"]', card).disabled = true;
       }
@@ -1810,6 +1812,7 @@ async function onAction(act, el, key) {
       catch (e) { toast(e.message || String(e), 'error'); }
       finally {
         S.busy.delete(`${key}:${act}`);
+        renderInvestigation(key);
         const state = S.explanations.get(key);
         for (const card of document.querySelectorAll('.explanation')) {
           if (card.dataset.explainKey === key && $('[data-act="explainPr"]', card)) $('[data-act="explainPr"]', card).disabled = explanationActive(state) || !canExplain(key);
