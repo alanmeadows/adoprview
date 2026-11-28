@@ -7,6 +7,7 @@ const vm = require('node:vm');
 const source = fs.readFileSync(path.join(__dirname, '..', 'src', 'AdoPrView', 'wwwroot', 'app.js'), 'utf8');
 const themeSource = fs.readFileSync(path.join(__dirname, '..', 'src', 'AdoPrView', 'wwwroot', 'theme.js'), 'utf8');
 const investigationSource = fs.readFileSync(path.join(__dirname, '..', 'src', 'AdoPrView', 'wwwroot', 'investigation.js'), 'utf8');
+const diagramSource = fs.readFileSync(path.join(__dirname, '..', 'src', 'AdoPrView', 'wwwroot', 'explain-diagrams.js'), 'utf8');
 
 function setup(search = '?mock=1', native = false) {
   const elements = new Map();
@@ -35,11 +36,12 @@ function setup(search = '?mock=1', native = false) {
   const context = vm.createContext({
     window, document, URL, URLSearchParams, location,
     history: { replaceState(_, __, url) { location.href = url.href; location.search = url.search; } },
-    console, setTimeout() {}, setInterval() {}, queueMicrotask, confirm: text => window.confirm(text),
+    console, crypto: require('node:crypto').webcrypto, setTimeout() {}, setInterval() {}, queueMicrotask, confirm: text => window.confirm(text),
   });
   vm.runInContext(themeSource, context);
   context.AppTheme = window.AppTheme;
   vm.runInContext(investigationSource, context);
+  vm.runInContext(diagramSource, context);
   vm.runInContext(source.replace(/^boot\(\)\.catch.*$/m, '') + '\nglobalThis.hooks = { S, onHostMessage, onAction, actionButtons, renderDetail, setSnapshot, flushRowUpdates, renderHeader, renderRows, undoHide, baseVisible, updateCopilotRun, renderRunShelf, runForPr, runActive, onDrawerAction, loadApprovalSettings, renderDrawer, renderExplanation, updateExplanation, explanationBody, renderVideo, updateVideo, videoContent, openSpeechSetup, onSpeechAction, closeSpeechSetup, changeTheme, applySavedTheme, loadLog, logKey };', context);
   const { hooks } = context;
   const pr = {
@@ -641,6 +643,44 @@ test('Explain sanitizes completed Markdown and hides failed/cancelled drafts wit
     assert.match(html, /<details class="explain-details">/);
     assert.doesNotMatch(html, /<details[^>]*\bopen\b/);
   }
+});
+
+test('Explain recognizes optional completed Mermaid fences without forcing diagrams or changing ordinary code', () => {
+  const { hooks, window, context } = setup();
+  context.marked = window.marked = require('../src/AdoPrView/wwwroot/vendor/marked.min.js');
+  context.DOMPurify = window.DOMPurify = { sanitize: html => html };
+  const output = 'A code-grounded flow.\n\n```mermaid\nflowchart LR\n  Reader --> Result["$& $$"]\n```\n\n```bicep\n  name: \'sample\'\n```';
+  assert.equal(hooks.explanationBody({ output, status: 'running' }, true), '');
+  const html = hooks.explanationBody({ output, status: 'completed' }, true);
+  assert.match(html, /class="explain-diagram"/);
+  assert.match(html, /Reader --&gt; Result/);
+  assert.match(html, /\$&amp; \$\$/);
+  assert.match(html, /<strong>Bicep<\/strong>.*<code>  name: &#39;sample&#39;/s);
+  assert.equal(html, hooks.explanationBody({ output, status: 'completed' }, true), 'Placeholder HTML stays stable across rerenders');
+  assert.doesNotMatch(hooks.explanationBody({ output: 'Plain prose.', status: 'completed' }, true), /explain-diagram/);
+  assert.doesNotMatch(hooks.explanationBody({ output, status: 'completed' }), /class="explain-diagram"/, 'Unrelated Ask Markdown stays unchanged');
+});
+
+test('Explain diagram guard rejects unsafe configuration resources styles and oversized sources before rendering', () => {
+  const { context } = setup();
+  const problem = source => vm.runInContext(`explanationDiagramProblem(${JSON.stringify(source)})`, context);
+  assert.equal(problem('flowchart LR\n  Reader --> Result'), '');
+  assert.equal(problem('flowchart LR\n  Reader <--> Result\n  Result <-.-> Evidence'), '');
+  assert.equal(problem('flowchart LR\n Class["ExplainModel"] --> Link["Native bridge"]\n Link --> Class'), '');
+  assert.equal(problem('sequenceDiagram\n  Reader->>Host: Read pinned source\n  Host-->>Reader: Evidence'), '');
+  assert.equal(problem('sequenceDiagram\n  Reader<<->>Host: Exchange\n  Host<<-->>Reader: Evidence'), '');
+  for (const source of [
+    'pie\n  "Other" : 1',
+    '%%{init: {"securityLevel": "loose"}}%%\nflowchart LR\n A --> B',
+    '---\nconfig:\n  securityLevel: loose\n---\nflowchart LR\n A --> B',
+    'flowchart LR\n A["<img src=x onerror=alert(1)>"] --> B',
+    'flowchart LR\n A <--> B["<script>alert(1)</script>"]',
+    'flowchart LR\n A --> B\n click A "https://evil.invalid/"',
+    'flowchart LR\n A --> B; style A fill:red',
+    'flowchart LR\n A@{ img: "https://evil.invalid/x" }',
+    'flowchart LR\n A --> B\n classDef bad fill:red',
+    'flowchart LR\n' + 'x'.repeat(6000),
+  ]) assert.ok(problem(source), source.slice(0, 80));
 });
 
 function addReviewVote(pr) {

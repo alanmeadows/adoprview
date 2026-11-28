@@ -65,7 +65,7 @@ function renderContextReceipt(r, turn) {
   return `<p class="small">Target PR: ${esc(r.revision?.repo || r.key)} !${esc(r.revision?.id || '')} · ${esc(explanationRevision(r))}. Posting is only to this target.</p>
     ${contexts.length ? `<p class="small">Explanation context used for this result: ${contexts.map(c => `${esc(c.requestId.slice(0, 12))} · source ${esc(c.revision.sourceCommit.slice(0, 12))} · ${esc(c.sectionTitle || 'Entire explanation')}`).join('; ')}.</p>
       ${contexts.map(c => `<details><summary>View actual imported explanation ${esc(c.requestId.slice(0, 12))}</summary><p class="small">${esc(c.receipt || 'Entire completed explanation retained.')}</p>
-        <div class="md explain-output">${explanationBody({ output: c.output, status: 'completed' })}</div>
+        <div class="md explain-output" data-explanation-result="context:imported:${esc(turn.id)}:${esc(c.requestId)}">${explanationBody({ output: c.output, status: 'completed' }, true)}</div>
         ${(c.coverage || []).map(x => `<p class="small">${esc(x)}</p>`).join('')}</details>`).join('')}` : ''}
     ${references.map(c => `<details class="reference-context"><summary>Reference PR: ${esc(c.revision.repo)} !${esc(c.revision.id)} · source ${esc(c.revision.sourceCommit.slice(0, 12))}</summary>
       <p class="small">${esc(c.url)}<br>${esc(explanationRevision(c))}</p>
@@ -148,7 +148,7 @@ function renderAssistanceContent(key) {
       <p class="explain-status small${explanation.status === 'failed' ? ' error' : ''}" role="status">${esc(explanation.message)}</p>
       <p class="explain-revision small">${esc(explanationRevision(explanation))} · result ${esc(explanation.requestId.slice(0, 12))}</p>
       <p class="explain-waiting small" role="status" ${explanationActive(explanation) ? '' : 'hidden'}><span class="video-spinner" aria-hidden="true"></span>Waiting for the completed explanation...</p>
-      <div class="explain-output md" data-explanation-result="${explanation.status === 'completed' ? esc(explanation.requestId) : ''}" tabindex="0" aria-label="PR explanation" ${explanation.status === 'completed' && explanation.output ? '' : 'hidden'}>${explanationBody(explanation)}</div>
+      <div class="explain-output md" data-explanation-result="${explanation.status === 'completed' ? esc(explanation.requestId) : ''}" tabindex="0" aria-label="PR explanation" ${explanation.status === 'completed' && explanation.output ? '' : 'hidden'}>${explanationBody(explanation, true)}</div>
       <details class="explain-details"><summary>Evidence and coverage</summary><p class="small">AI-generated; verify against the code. This does not start Fix or change ADO.</p>
         <div class="explain-evidence">${(explanation.evidence || []).map(x => `<p class="small">${esc(x)}</p>`).join('')}</div>
         <div class="explain-coverage">${(explanation.coverage || []).map(x => `<p class="small">${esc(x)}</p>`).join('')}</div></details>
@@ -164,7 +164,7 @@ function renderAssistanceContent(key) {
             <p>Explicit sections retain their complete heading subtree plus the full host ARM Before/After, diff, risks and original coverage. Character estimates exclude JSON/history overhead; a package may still exceed the safe limit.</p>` : ''}
           ${sectionConflict ? '<p class="error">This explanation already has a different package in the conversation. Start a new conversation before changing it; prior context will not be silently replaced.</p>' : ''}
           <details><summary>View attached context</summary>${attached ? `<p>${esc(imported && !sectionConflict ? imported.receipt || 'Entire completed explanation retained.' : d.sectionIndex === null ? 'Entire completed explanation will be resolved by server-owned reference.' : 'Full source preview below. The server resolves the chosen heading and complete ARM block; the accepted result shows the actual package and omissions.')}</p>
-            <div class="md explain-output">${explanationBody({ ...attached, status: 'completed' })}</div><p>Source identity, evidence and coverage are retained. Later completed investigation turns are also replayed.</p>` : '<p>This explanation expired or is unavailable. It will not be silently replaced.</p>'}</details>
+            <div class="md explain-output" data-explanation-result="context:attached:${esc(attached.requestId)}">${explanationBody({ ...attached, status: 'completed' }, true)}</div><p>Source identity, evidence and coverage are retained. Later completed investigation turns are also replayed.</p>` : '<p>This explanation expired or is unavailable. It will not be silently replaced.</p>'}</details>
           <button class="mini" type="button" data-investigation-action="detach" ${busy ? 'disabled' : ''}>Ask/review without this explanation</button>`
         : '<p>No explanation attached. This request uses the investigation’s pinned source and completed history; a shared PR label is not an Explain handoff.</p>'}
         ${r?.explanationContexts?.length ? `<p>Conversation retains ${r.explanationContexts.map(c => esc(c.requestId.slice(0, 12))).join(', ')}. Changing the primary selection does not remove earlier context. Start a new conversation to clear its history and attachments.</p>` : ''}
@@ -233,9 +233,9 @@ function renderInvestigation(key = investigationKey) {
   const focused = content.contains(document.activeElement) ? document.activeElement : null;
   const role = focused?.dataset.inv;
   const start = focused?.selectionStart, end = focused?.selectionEnd;
-  const openDetails = [...content.querySelectorAll('details')].filter(x => x.open).map(x => x.querySelector('summary')?.textContent);
+  const openDetails = [...content.querySelectorAll('details')].filter(x => x.open && !x.closest('.explain-output[data-explanation-result]')).map(x => x.querySelector('summary')?.textContent);
   content.innerHTML = renderAssistanceContent(key);
-  for (const details of content.querySelectorAll('details')) if (openDetails.includes(details.querySelector('summary')?.textContent)) details.open = true;
+  for (const details of content.querySelectorAll('details')) if (!details.closest('.explain-output[data-explanation-result]') && openDetails.includes(details.querySelector('summary')?.textContent)) details.open = true;
   restoreExplanationOutputs(outputs);
   const position = assistanceDraft(key).positions.get(assistanceSelection(key)?.id || assistanceDraft(key).selected);
   const output = content.querySelector(':scope > .assistance-explanation > .explain-output, :scope > .investigation-transcript');
@@ -251,7 +251,8 @@ function captureExplanationOutputs() {
   const outputs = [...document.querySelectorAll('.explain-output[data-explanation-result]')]
     .filter(el => el.dataset.explanationResult)
     .map(el => ({ el, key: el.closest('.explanation').dataset.explainKey,
-      id: el.dataset.explanationResult, html: el.innerHTML, top: el.scrollTop, left: el.scrollLeft }));
+      id: el.dataset.explanationResult, html: explanationBodies.get(el) ?? el.innerHTML, top: el.scrollTop, left: el.scrollLeft,
+      parentDetailsOpen: el.closest('details')?.open }));
   const selection = window.getSelection();
   const selected = selection?.isCollapsed === false && outputs.some(({ el }) =>
     el.contains(selection.anchorNode) && el.contains(selection.focusNode));
@@ -266,12 +267,15 @@ function restoreExplanationOutputs(saved) {
     const existing = saved.outputs.find(x => x.key === placeholder.closest('.explanation').dataset.explainKey &&
       x.id === placeholder.dataset.explanationResult && x.html === placeholder.innerHTML);
     if (!existing) continue;
+    const details = placeholder.closest('details');
+    if (details && typeof existing.parentDetailsOpen === 'boolean') details.open = existing.parentDetailsOpen;
     if (existing.el !== placeholder) placeholder.replaceWith(existing.el);
     existing.el.scrollTop = existing.top;
     existing.el.scrollLeft = existing.left;
-    if (saved.focus === existing.el) existing.el.focus({ preventScroll: true });
+    if (saved.focus === existing.el || existing.el.contains(saved.focus)) saved.focus.focus({ preventScroll: true });
   }
   restoreRunOutputSelection(saved.selection);
+  renderExplanationDiagrams();
 }
 
 function updateInvestigation(r) {
@@ -325,6 +329,7 @@ function openInvestigation(key, kind = 'question', attachedId) {
   else renderInvestigation(key);
   const card = assistanceCard(key);
   card?.querySelector('.assistance-body')?.removeAttribute('hidden');
+  renderExplanationDiagrams();
   card?.querySelector('[data-assistance-close]')?.setAttribute('aria-expanded', 'true');
   if (card?.querySelector('[data-assistance-close]')) card.querySelector('[data-assistance-close]').textContent = 'Close assistance';
   card?.scrollIntoView({ block: 'nearest' });
@@ -455,6 +460,7 @@ function wireInvestigation() {
     if (close) {
       rememberAssistancePosition(key); d.closed = !d.closed;
       card.querySelector('.assistance-body').hidden = d.closed; close.textContent = d.closed ? 'Reopen assistance' : 'Close assistance';
+      if (!d.closed) renderExplanationDiagrams();
       close.setAttribute('aria-expanded', String(!d.closed)); renderExplanationShelf(); return;
     }
     const action = e.target.closest('[data-investigation-action]');

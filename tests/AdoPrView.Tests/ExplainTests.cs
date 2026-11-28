@@ -456,6 +456,17 @@ static class ExplainTests
             Check(environment.Keys.All(k => !k.Contains("TOKEN", StringComparison.OrdinalIgnoreCase) && !k.Contains("PAT", StringComparison.OrdinalIgnoreCase) || k is "PATH" or "PATHEXT"), "Credentials inherited");
             Check(!environment.ContainsKey("NODE_OPTIONS") && !environment.ContainsKey("COPILOT_HOME"), "Ambient overrides inherited");
         });
+        await test("Explain requests optional evidence-grounded diagrams in the actual viewer supported format", () =>
+        {
+            var instructions = ExplainModel.RestrictedSession("offline", []).SystemMessage!.Content!;
+            Check(instructions.Contains("only when it materially clarifies") &&
+                instructions.Contains("Ordinary or small changes do not require a diagram") &&
+                instructions.Contains("fenced mermaid block") && instructions.Contains("sequenceDiagram") &&
+                instructions.Contains("actually delivered by the host tools") &&
+                instructions.Contains("no HTML, links, images") && instructions.Contains("Other Mermaid diagram types are not supported"),
+                "Diagram guidance lost conditional use, delivered evidence, viewer format or safety constraints");
+            return Task.CompletedTask;
+        });
         await test("Explain not-signed-in message names the GitHub CLI requirement and whether gh.exe is on the app PATH", async () =>
         {
             var dir = Path.Combine(Path.GetTempPath(), "adoprview-gh-" + Guid.NewGuid().ToString("N"));
