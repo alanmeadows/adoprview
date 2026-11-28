@@ -66,7 +66,7 @@ public sealed class MainWindow : Window, IApprovalUi
             _ = RunNativeActionAsync("video-warning-delivery", () => _bridge?.PushToastAsync("error", message) ?? Task.CompletedTask);
         });
         _video = new VideoService(_prs.GetVideoContextAsync, _prs.CheckVideoAvailable, _videoArtifacts, _videoRenderer);
-        _pop = new PopBrowserPane(_prs.RefreshPopAsync);
+        _pop = new PopBrowserPane(_prs.RefreshPopAsync, null, _diagnostics);
 
         Title = "ADO PR View";
         AppTheme.ApplyWindow(this, _web, _store.Current.Theme);

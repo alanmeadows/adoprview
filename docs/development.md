@@ -513,6 +513,28 @@ without real sign-in or PR writes. The fixture emulates close-to-tray so an
 unexpected host close cannot pass merely because the process remains alive.
 These synthetic checks do not establish that the full tenant sign-in flow in
 [#15](https://github.com/alanmeadows/adoprview/issues/15) is resolved; human validation remains outstanding.
+The popup also follows an intercepted HTTP redirect to a synthetic callback,
+returns its opener to a synthetic PR page, and closes. The dashboard must stay
+visible; this return must not infer a satisfied PoP policy. Trace assertions
+require successful HTTP 200 navigation to the exact synthetic callback and
+opener return pages, not just a navigation-completed event. They also
+check deferred close/disposal ordering, stale-selection decisions, safe handled
+exception structure and omission of synthetic auth-query/fragment canaries.
+It also forces a diagnostic rotation write failure inside a real WebView
+website-close callback, exercises the production warning-dispatch helper with
+a synthetic notification sink, and verifies exactly one notification after
+the callback returns while the dashboard stays visible. Trace writes still
+flush synchronously; the modal failure warning is deferred to the UI dispatcher.
+
+The production PoP pane writes `pop-*` events into the same bounded
+`Diagnostics\<session>\events.jsonl` as the main window. Each record identifies
+an opaque pane, numbered surface and selection revision, not a PR identity.
+Events cover initialization, navigation outcomes, popup/website-close requests,
+applied/ignored decisions, disposal, policy-check failures and browser-process
+failure kind/reason/exit code. No URL, page content, headers, cookies or exception
+messages are recorded by this trace. Correlate it with `window-close-requested`,
+`window-visibility` and `close-kept-in-tray`; do not assume a website close caused
+a host hide merely because the events are nearby.
 
 ```powershell
 $env:ADOPRVIEW_TEST_FILTER = 'Native PoP WebView2'

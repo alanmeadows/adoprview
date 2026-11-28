@@ -53,10 +53,13 @@ public sealed class PopBrowserPane : Border, IDisposable
         </Style>
         """);
     readonly string userDataDirectory;
+    readonly AppDiagnostics? diagnostics;
+    readonly string paneId = Guid.NewGuid().ToString("N");
     CoreWebView2Environment? environment;
     Task? initialization;
     WebView2? popup;
     WindowsFormsHost? popupHost;
+    int nextSurface = 1, popupSurface;
     bool browserUsed, disposed;
 
     public event Action<bool>? OpenChanged;
@@ -70,8 +73,12 @@ public sealed class PopBrowserPane : Border, IDisposable
     internal event Action<CoreWebView2>? SurfaceCreated;
 
     public PopBrowserPane(Func<PopTarget, Task<PopPolicyResult>> refresh, string? userDataDirectory = null)
+        : this(refresh, userDataDirectory, null) { }
+
+    internal PopBrowserPane(Func<PopTarget, Task<PopPolicyResult>> refresh, string? userDataDirectory, AppDiagnostics? diagnostics)
     {
         session = new(refresh);
+        this.diagnostics = diagnostics;
         ApplyTheme("light");
         this.userDataDirectory = userDataDirectory ?? Path.Combine(SettingsStore.Dir, "PoPWebView2");
         Visibility = Visibility.Collapsed;
@@ -154,6 +161,11 @@ public sealed class PopBrowserPane : Border, IDisposable
 
     CoreWebView2? Active => (popup ?? browser).CoreWebView2;
 
+    // Only opaque identities, counters and host-owned lifecycle/error labels belong in this trace.
+    void Record(string kind, int surface = 1, string? metadata = null, Exception? exception = null, long? revision = null) =>
+        diagnostics?.Record(kind, $"pane-{paneId};surface-{surface};selection-{revision ?? session.Selection?.Revision ?? 0}" +
+            (metadata is null ? "" : ";" + metadata), exception);
+
     internal void ApplyTheme(string theme) => AppTheme.ApplyResources(this, theme);
 
     Button Button(string label, Action click)
@@ -191,6 +203,7 @@ public sealed class PopBrowserPane : Border, IDisposable
         ObjectDisposedException.ThrowIf(disposed, this);
         var navigate = !session.IsOpen || session.Selection?.Target != target;
         var captured = navigate ? session.Open(target) : session.Selection!;
+        Record("pop-pane-open", metadata: navigate ? "navigate" : "reuse");
         title.Text = "Proof of Presence - " + target.Label;
         title.ToolTip = title.Text;
         Visibility = Visibility.Visible;
@@ -206,22 +219,25 @@ public sealed class PopBrowserPane : Border, IDisposable
 
     async Task InitializeAsync()
     {
+        Record("pop-initialization-started");
         try
         {
             var options = new CoreWebView2EnvironmentOptions { AllowSingleSignOnUsingOSPrimaryAccount = true };
             environment = await CoreWebView2Environment.CreateAsync(null, userDataDirectory, options);
             await browser.EnsureCoreWebView2Async(environment);
-            Configure(browser, allowBlank: false);
+            Configure(browser, allowBlank: false, surface: 1);
+            Record("pop-initialization-completed");
         }
         catch (Exception ex)
         {
+            Record("pop-initialization-failed", exception: ex);
             navigation.Text = "Embedded Edge could not start. Use Open in Edge (external), or close and retry after checking the WebView2 runtime.";
             initialization = null;
-            throw new InvalidOperationException(navigation.Text + $" (0x{ex.HResult:X8})");
+            throw new InvalidOperationException(navigation.Text + $" (0x{ex.HResult:X8})", ex);
         }
     }
 
-    void Configure(WebView2 view, bool allowBlank)
+    void Configure(WebView2 view, bool allowBlank, int surface)
     {
         var core = view.CoreWebView2;
         // This surface never receives the dashboard's RPC, host objects or virtual-host mapping.
@@ -247,6 +263,8 @@ public sealed class PopBrowserPane : Border, IDisposable
         core.HistoryChanged += (_, _) => UpdateNavigation();
         core.NavigationCompleted += (_, e) =>
         {
+            Record("pop-navigation-completed", surface,
+                $"navigation-{e.NavigationId};success-{e.IsSuccess};http-{e.HttpStatusCode};error-{e.WebErrorStatus}");
             UpdateNavigation();
             if (ReferenceEquals(core, Active))
                 navigation.Text = e.IsSuccess && e.HttpStatusCode < 400
@@ -255,15 +273,20 @@ public sealed class PopBrowserPane : Border, IDisposable
         };
         core.NewWindowRequested += async (_, e) =>
         {
+            Record("pop-popup-requested", surface);
             e.Handled = true;
             using var deferral = e.GetDeferral();
             if (!session.IsOpen || !PopTarget.AllowsNavigation(e.Uri, allowBlank: true) || popup is not null)
             {
+                Record("pop-popup-blocked", surface, !session.IsOpen ? "pane-closed" :
+                    popup is not null ? "popup-exists" : "navigation-denied");
                 navigation.Text = "The website popup was blocked. Finish/close any existing sign-in popup, or use Open in Edge (external).";
                 return;
             }
             var captured = session.Selection;
             var child = popup = new WebView2();
+            var childSurface = popupSurface = ++nextSurface;
+            Record("pop-popup-initialization-started", childSurface);
             popupHost = new WindowsFormsHost { Child = child };
             browserArea.Children.Add(popupHost);
             try
@@ -271,17 +294,20 @@ public sealed class PopBrowserPane : Border, IDisposable
                 await child.EnsureCoreWebView2Async(environment);
                 if (!session.IsOpen || session.Selection != captured || popup != child)
                 {
+                    Record("pop-popup-initialization-abandoned", childSurface, revision: captured?.Revision);
                     if (popup == child) ClosePopup();
                     return;
                 }
-                Configure(child, allowBlank: true);
+                Configure(child, allowBlank: true, surface: childSurface);
                 e.NewWindow = child.CoreWebView2;
+                Record("pop-popup-initialization-completed", childSurface);
                 SurfaceCreated?.Invoke(child.CoreWebView2);
                 closePopup.Visibility = Visibility.Visible;
                 UpdateNavigation();
             }
             catch (Exception ex)
             {
+                Record("pop-popup-initialization-failed", childSurface, exception: ex, revision: captured?.Revision);
                 if (popup == child)
                 {
                     ClosePopup();
@@ -292,12 +318,26 @@ public sealed class PopBrowserPane : Border, IDisposable
         core.WindowCloseRequested += (_, _) =>
         {
             var captured = session.Selection;
+            Record("pop-website-close-requested", surface, revision: captured?.Revision);
             // Dispose only after the WebView callback returns, and never close a newer surface/selection.
             _ = Dispatcher.BeginInvoke(new Action(() =>
             {
-                if (disposed || session.Selection != captured) return;
-                if (view == popup) ClosePopup();
-                else if (view == browser && session.IsOpen) _ = GuardTaskAsync(CloseAsync);
+                if (disposed || session.Selection != captured)
+                {
+                    Record("pop-website-close-ignored", surface, disposed ? "pane-disposed" : "selection-changed", revision: captured?.Revision);
+                    return;
+                }
+                if (view == popup)
+                {
+                    Record("pop-website-close-applied", surface, "popup");
+                    ClosePopup();
+                }
+                else if (view == browser && session.IsOpen)
+                {
+                    Record("pop-website-close-applied", surface, "pane");
+                    _ = GuardTaskAsync(CloseAsync);
+                }
+                else Record("pop-website-close-ignored", surface, "surface-inactive", revision: captured?.Revision);
             }));
         };
         core.LaunchingExternalUriScheme += (_, e) =>
@@ -306,7 +346,11 @@ public sealed class PopBrowserPane : Border, IDisposable
             navigation.Text = "The website requested an external application. It was not opened automatically; use Open in Edge (external) if required.";
         };
         core.DownloadStarting += (_, e) => { e.Cancel = true; navigation.Text = "Downloads are disabled in this PoP pane."; };
-        core.ProcessFailed += (_, _) => navigation.Text = "The embedded website process failed. Reload or use Open in Edge (external).";
+        core.ProcessFailed += (_, e) =>
+        {
+            Record("pop-process-failed", surface, $"kind-{e.ProcessFailedKind};reason-{e.Reason};exit-{e.ExitCode}");
+            navigation.Text = "The embedded website process failed. Reload or use Open in Edge (external).";
+        };
         view.Enter += (_, _) => browserUsed = true;
         if (!allowBlank) SurfaceCreated?.Invoke(core);
         UpdateNavigation();
@@ -329,10 +373,12 @@ public sealed class PopBrowserPane : Border, IDisposable
     {
         if (popup is not null)
         {
+            Record("pop-popup-dispose-started", popupSurface);
             popup = null;
             browserArea.Children.Remove(popupHost!);
             popupHost!.Dispose();
             popupHost = null;
+            Record("pop-popup-dispose-completed", popupSurface);
         }
         closePopup.Visibility = Visibility.Collapsed;
         UpdateNavigation();
@@ -340,12 +386,14 @@ public sealed class PopBrowserPane : Border, IDisposable
 
     public async Task CloseAsync()
     {
+        Record("pop-pane-close-started");
         var captured = session.Close();
         ClosePopup();
         browser.CoreWebView2?.Stop();
         Visibility = Visibility.Collapsed;
         OpenChanged?.Invoke(false);
         browserUsed = false;
+        Record("pop-pane-closed");
         if (captured is not null && !session.IsChecking) await CheckAsync(captured);
     }
 
@@ -359,7 +407,15 @@ public sealed class PopBrowserPane : Border, IDisposable
     internal async Task CheckAsync(PopSelection? selection = null)
     {
         var captured = selection ?? session.Selection ?? throw new InvalidOperationException("Open a PR's PoP pane first.");
-        var result = await session.CheckAsync(captured);
+        Record("pop-policy-check-started", revision: captured.Revision);
+        PopPolicyResult result;
+        try { result = await session.CheckAsync(captured); }
+        catch (Exception ex)
+        {
+            Record("pop-policy-check-failed", exception: ex, revision: captured.Revision);
+            throw;
+        }
+        Record("pop-policy-check-completed", revision: captured.Revision);
         PolicyChecked?.Invoke(captured.Target, result);
     }
 
@@ -376,14 +432,21 @@ public sealed class PopBrowserPane : Border, IDisposable
     async Task GuardTaskAsync(Func<Task> action)
     {
         try { await action(); }
-        catch (Exception ex) { navigation.Text = ex.Message; Error?.Invoke(ex.Message); }
+        catch (Exception ex)
+        {
+            Record("pop-action-failed", exception: ex);
+            navigation.Text = ex.Message;
+            Error?.Invoke(ex.Message);
+        }
     }
 
     public void Dispose()
     {
         if (disposed) return;
+        Record("pop-pane-dispose-started");
         disposed = true;
         ClosePopup();
         browserHost.Dispose();
+        Record("pop-pane-dispose-completed");
     }
 }

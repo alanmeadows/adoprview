@@ -1,4 +1,5 @@
 using System.Windows;
+using System.Windows.Threading;
 
 namespace AdoPrView;
 
@@ -36,6 +37,16 @@ public sealed class Options
 
 public static class Program
 {
+    internal static void ReportDiagnosticFailure(Exception ex, Dispatcher dispatcher, Action<string> showWarning)
+    {
+        var message = $"ADO PR View could not persist its diagnostic log ({ex.GetType().Name}). " +
+            @"Startup/exit evidence may be unavailable. Check access and free space in %LOCALAPPDATA%\AdoPrView\Diagnostics.";
+        System.Diagnostics.Trace.TraceError(message);
+        Console.Error.WriteLine(message);
+        // Logging may run inside a WebView callback; never start a nested modal loop there.
+        _ = dispatcher.BeginInvoke(new Action(() => showWarning(message)));
+    }
+
     [STAThread]
     public static void Main(string[] args)
     {
@@ -44,14 +55,10 @@ public static class Program
             Environment.ExitCode = NativeFixSupervisor.Run(specification);
             return;
         }
+        var dispatcher = Dispatcher.CurrentDispatcher;
         var diagnostics = new AppDiagnostics(System.IO.Path.Combine(SettingsStore.Dir, "Diagnostics"), ex =>
-        {
-            var message = $"ADO PR View could not persist its diagnostic log ({ex.GetType().Name}). " +
-                @"Startup/exit evidence may be unavailable. Check access and free space in %LOCALAPPDATA%\AdoPrView\Diagnostics.";
-            System.Diagnostics.Trace.TraceError(message);
-            Console.Error.WriteLine(message);
-            MessageBox.Show(message, "ADO PR View diagnostics", MessageBoxButton.OK, MessageBoxImage.Warning);
-        });
+            ReportDiagnosticFailure(ex, dispatcher,
+                message => MessageBox.Show(message, "ADO PR View diagnostics", MessageBoxButton.OK, MessageBoxImage.Warning)));
         diagnostics.RegisterProcessHandlers();
         var opts = Options.Parse(args);
         System.Windows.Forms.Application.SetHighDpiMode(System.Windows.Forms.HighDpiMode.PerMonitorV2);

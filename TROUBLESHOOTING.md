@@ -226,6 +226,26 @@ an executable used by a recorded runner or silently change its captured path.
 Installing a missing tool alone does not establish old task ownership or safe
 resume. Preserve the old worktree, logs and Windows `CopilotRuns` records.
 
+## Dashboard disappears during PoP sign-in
+
+Try opening the dashboard from its tray icon. A hidden window is not proof of
+a crashed process. Keep the session's diagnostic files before exiting; do not
+delete its browser profile or sign-in state. Use **Open in Edge (external)**
+and **Check status** as the existing fallback.
+
+From the release after v0.1.4, the `pop-*` diagnostic events show opaque
+pane/surface/selection identities and the order of sign-in popup initialization,
+navigation results, website-close decisions and disposal. They share a session
+with `window-close-requested`, `window-visibility` and `close-kept-in-tray`.
+PoP events exclude URLs, authentication queries, page contents, cookies and
+exception messages. Review the rest of the log before sharing it.
+
+Synthetic redirect-return-close checks do not prove successful real tenant
+sign-in is fixed. A human still needs to complete that flow and confirm the
+dashboard stays visible and usable; record the local time and last action.
+Do not perform authentication, MFA, security-key prompts or approvals as an
+automated diagnostic test.
+
 ## Where the app writes things
 
 All under `%LOCALAPPDATA%\AdoPrView` unless noted.
