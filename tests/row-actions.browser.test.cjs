@@ -661,14 +661,16 @@ test('real row hit testing and action identity across refreshes', { timeout: 900
           .find(d=>d.querySelector('summary')?.textContent==='View attached context').querySelector('.explain-output');
         window.attachedSvg=window.attachedPreview.querySelector('svg');
         window.attachedSource=window.attachedPreview.querySelector('.explain-diagram-source');window.attachedSource.open=true;
+        window.attachedSummary=window.attachedSource.querySelector('summary');window.attachedSummary.focus();
         window.attachedText=window.attachedSource.querySelector('code').firstChild;
         window.getSelection().setBaseAndExtent(window.attachedText,0,window.attachedText,12);
         const packageSelect=document.querySelector('[data-key="${key}"] [data-assistance-section]');
         packageSelect.value='0';packageSelect.dispatchEvent(new Event('change',{bubbles:true}));renderRows();`);
       await frame();
       assert.equal(await evaluate(`window.attachedPreview.isConnected && window.attachedSvg===window.attachedPreview.querySelector('svg') &&
-        window.attachedSource.open && window.getSelection().anchorNode===window.attachedText`), true,
-      'Choosing an unchanged context package preserves preview SVG, source disclosure and selection');
+        window.attachedSource.open && window.getSelection().anchorNode===window.attachedText &&
+        document.activeElement===window.attachedSummary`), true,
+      'Choosing an unchanged context package preserves preview SVG, source disclosure, keyboard focus and selection');
       await evaluate(`{
         const explanation=S.explanations.get('${key}'),draft=assistanceDraft('${key}');draft.sectionIndex=null;
         window.importedCalls=0;window.importedGate=new Promise(resolve=>window.releaseImportedDiagram=resolve);
@@ -696,14 +698,15 @@ test('real row hit testing and action identity across refreshes', { timeout: 900
       })`);
       await evaluate(`window.importedSvg=window.importedPreview.querySelector('svg');
         window.importedSource=window.importedPreview.querySelector('.explain-diagram-source');window.importedSource.open=true;
+        window.importedSummary=window.importedSource.querySelector('summary');window.importedSummary.focus();
         window.importedText=window.importedSource.querySelector('code').firstChild;
         window.getSelection().setBaseAndExtent(window.importedText,0,window.importedText,12);
         updateInvestigation({...S.investigations.get('${key}'),sequence:3,message:'Context receipt refreshed'});renderRows();`);
       await frame();
       assert.equal(await evaluate(`window.importedPreview.isConnected && window.importedSvg===window.importedPreview.querySelector('svg') &&
         window.importedPreview.closest('details').open && window.importedSource.open &&
-        window.getSelection().anchorNode===window.importedText`), true,
-      'Investigation updates preserve imported preview SVG, both disclosures and selection');
+        window.getSelection().anchorNode===window.importedText && document.activeElement===window.importedSummary`), true,
+      'Investigation updates preserve imported preview SVG, both disclosures, keyboard focus and selection');
       assert.deepEqual(await calls(), [], 'Diagram rendering never calls the native bridge');
       await send('Network.setBlockedURLs', { urls: [] });
     });

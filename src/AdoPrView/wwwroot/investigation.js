@@ -272,7 +272,7 @@ function restoreExplanationOutputs(saved) {
     if (existing.el !== placeholder) placeholder.replaceWith(existing.el);
     existing.el.scrollTop = existing.top;
     existing.el.scrollLeft = existing.left;
-    if (saved.focus === existing.el) existing.el.focus({ preventScroll: true });
+    if (saved.focus === existing.el || existing.el.contains(saved.focus)) saved.focus.focus({ preventScroll: true });
   }
   restoreRunOutputSelection(saved.selection);
   renderExplanationDiagrams();
