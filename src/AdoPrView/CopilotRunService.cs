@@ -21,6 +21,7 @@ public sealed record CopilotRunRequest(
     public string? WslDistribution => Distro;
     public string? AdditionalInstructions { get; init; }
     public string? NativeCopilotPath { get; init; }
+    public string Backend { get; init; } = "windows-native";
 }
 
 public sealed record CopilotRunState(
@@ -86,8 +87,8 @@ public sealed partial class CopilotRunService : IAsyncDisposable
     public static string Notice(CopilotRunRequest request, string? backend = null)
     {
         var notice = request.PushToSource ? PushNotice : HeadlessNotice;
-        return backend == "legacy-wsl" ? notice.Replace("native Windows Copilot CLI",
-            "configured legacy WSL Copilot CLI", StringComparison.Ordinal) : notice;
+        return backend is "legacy-wsl" or "wsl" ? notice.Replace("native Windows Copilot CLI",
+            "configured WSL Copilot CLI", StringComparison.Ordinal) : notice;
     }
 
     static string ShellQuote(string value) => "'" + value.Replace("'", "'\\''") + "'";
@@ -142,7 +143,12 @@ public sealed partial class CopilotRunService : IAsyncDisposable
 
     public CopilotRunState Start(CopilotRunRequest request)
     {
-        Validate(request, nativeNewRuns);
+        ArgumentNullException.ThrowIfNull(request);
+        if (request.Backend is not ("windows-native" or "wsl"))
+            throw new InvalidOperationException("Choose Windows or WSL in Settings > Copilot Fix; no backend fallback is used.");
+        var native = nativeNewRuns && request.Backend == "windows-native";
+        var backend = native ? "windows-native" : request.Backend == "wsl" ? "wsl" : "legacy-wsl";
+        Validate(request, native);
         Entry entry;
         CopilotRunState initial;
         lock (gate)
@@ -151,9 +157,9 @@ public sealed partial class CopilotRunService : IAsyncDisposable
             if (activePrs.Contains(PrIdentity(request)))
                 throw new InvalidOperationException("A Copilot run for this PR is already active or its stop could not be confirmed.");
             var id = Guid.NewGuid().ToString("N");
-            entry = new(new(id, request, "preparing", Notice(request, nativeNewRuns ? "windows-native" : "legacy-wsl") + "\n", null, null,
+            entry = new(new(id, request, "preparing", Notice(request, backend) + "\n", null, null,
                 null, null, null, "not-created", DateTimeOffset.UtcNow, null)
-                { SessionId = Guid.NewGuid().ToString(), Backend = nativeNewRuns ? "windows-native" : "legacy-wsl" });
+                { SessionId = Guid.NewGuid().ToString(), Backend = backend });
             activePrs.Add(PrIdentity(request));
         }
         try
@@ -166,7 +172,7 @@ public sealed partial class CopilotRunService : IAsyncDisposable
                 initial = entry.State;
                 runs.Add(entry.State.RunId, entry);
                 // Schedule outside the caller's UI turn; even fake transports may complete synchronously.
-                entry.Completion = Task.Run(() => nativeNewRuns ? ExecuteNativeAsync(entry) : ExecuteAsync(entry));
+                entry.Completion = Task.Run(() => native ? ExecuteNativeAsync(entry) : ExecuteAsync(entry));
             }
         }
         catch
@@ -401,12 +407,15 @@ public sealed partial class CopilotRunService : IAsyncDisposable
                     throw new InvalidOperationException("PR identity and Windows paths cannot contain control characters.");
             if (string.IsNullOrWhiteSpace(r.Directory) || !Path.IsPathFullyQualified(r.Directory) ||
                 r.Directory.StartsWith(@"\\", StringComparison.Ordinal))
-                throw new InvalidOperationException("Configure an absolute local Windows repository directory for this PR. WSL paths are only supported for legacy saved runs.");
+                throw new InvalidOperationException("Configure an absolute local Windows repository directory in Settings > Copilot Fix for this PR; no WSL fallback is used.");
             return;
         }
         foreach (var value in new[] { r.PrKey, r.Organization, r.Project, r.Repository, r.SourceRef, r.WslPath, r.WslDistribution })
             if (value is not null && (value.Contains('\0') || value.Any(c => c is '\r' or '\n')))
                 throw new InvalidOperationException("PR identity and WSL settings cannot contain control characters.");
+        if (r.Backend == "wsl" && (string.IsNullOrWhiteSpace(r.WslPath) || !r.WslPath.StartsWith('/') ||
+            string.IsNullOrWhiteSpace(r.WslDistribution) || r.WslDistribution.StartsWith('-')))
+            throw new InvalidOperationException("WSL Fix requires an explicit installed distro and absolute Linux repository path in Settings > Copilot Fix; no directory or distro is inferred.");
         if (string.IsNullOrWhiteSpace(r.WslPath) && !Regex.IsMatch(r.Repository, @"\A[a-zA-Z0-9][a-zA-Z0-9._-]*\z"))
             throw new InvalidOperationException("Configure an explicit WSL path for this repository.");
         if (!string.IsNullOrWhiteSpace(r.WslPath) && !(r.WslPath.StartsWith('/') || r.WslPath == "~" || r.WslPath.StartsWith("~/", StringComparison.Ordinal)))
@@ -429,6 +438,8 @@ public sealed partial class CopilotRunService : IAsyncDisposable
                 [r.WslPath ?? "", r.Repository], token: token).ConfigureAwait(false);
             RequirePreflightSuccess(probe);
             env = ParseEnvironment(probe.StandardOutput, r);
+            if (r.Backend == "wsl" && env.Distribution != r.Distro)
+                throw new RunSetupException("WSL preflight did not return the explicitly selected distro. No task was launched and no default distro was substituted.");
             e.Environment = env;
             e.RunDirectory = env.Home + "/.local/state/ado-prview/runs/" + e.State.RunId;
             Update(e, s => s with { Distribution = env.Distribution, SourcePath = env.Root,
@@ -1315,6 +1326,29 @@ public sealed partial class CopilotRunService : IAsyncDisposable
 
 public sealed class WslCopilotRunTransport : ICopilotRunTransport
 {
+    internal static async Task<string[]> ListDistributionsAsync()
+    {
+        var info = new ProcessStartInfo(Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.Windows), "System32", "wsl.exe"))
+        {
+            UseShellExecute = false, CreateNoWindow = true,
+            RedirectStandardInput = true, RedirectStandardOutput = true, RedirectStandardError = true,
+            StandardOutputEncoding = Encoding.Unicode, StandardErrorEncoding = Encoding.Unicode
+        };
+        info.ArgumentList.Add("--list");
+        info.ArgumentList.Add("--quiet");
+        using var deadline = new CancellationTokenSource(TimeSpan.FromSeconds(15));
+        CopilotProcessResult result;
+        try { result = await ExecuteProcessAsync(info, null, null, null, deadline.Token).ConfigureAwait(false); }
+        catch (Win32Exception ex)
+        { throw new InvalidOperationException($"WSL distro discovery could not start (Windows error {ex.NativeErrorCode}). Install/enable WSL and a distro, or choose Windows Fix."); }
+        catch (OperationCanceledException)
+        { throw new InvalidOperationException("WSL distro discovery timed out. Check 'wsl --list --quiet' outside the app, or choose Windows Fix."); }
+        if (result.ExitCode != 0)
+            throw new InvalidOperationException($"WSL distro discovery failed (exit {result.ExitCode}). Check 'wsl --list --quiet' outside the app, or choose Windows Fix.");
+        return result.StandardOutput.Split(['\r', '\n'], StringSplitOptions.RemoveEmptyEntries)
+            .Select(s => s.Trim()).Where(s => s.Length > 0).Distinct(StringComparer.Ordinal).ToArray();
+    }
+
     public async Task<CopilotProcessResult> ExecuteAsync(CopilotProcessRequest request, Action<string>? stdout,
         Action<string>? stderr, CancellationToken cancellationToken)
     {

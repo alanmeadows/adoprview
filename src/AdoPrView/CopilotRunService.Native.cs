@@ -207,7 +207,9 @@ public sealed partial class CopilotRunService
         var branch = $"ado-prview/pr-{request.Id}-{e.State.RunId}";
         var specification = new NativeFixSupervisor.Specification(e.State.RunId, e.OwnershipToken, e.State.SessionId!,
             runDirectory, root, common, worktree, branch, commit, git, cli, remote, fetch, push, request.PushToSource)
-        { SupervisorBundleId = deployment.BundleId, SupervisorExecutable = deployment.Executable };
+        { SupervisorBundleId = deployment.BundleId, SupervisorExecutable = deployment.Executable,
+            SupervisorLauncher = "task-scheduler", SupervisorUserSid = NativeFixTaskBroker.CurrentSid(),
+            CliEnvironment = NativeFixEnvironment.Create() };
         NativeFixSupervisor.Write(Path.Combine(runDirectory, "ownership.json"), specification);
         e.Native = specification; e.RunDirectory = runDirectory;
         Update(e, s => s with { SourcePath = root, WorktreeStatus = "preparing", SupervisorDeployment = "stable:" + deployment.BundleId,
@@ -282,13 +284,14 @@ public sealed partial class CopilotRunService
             await File.WriteAllTextAsync(NativeFixSupervisor.FilePath(spec, "prompt"), prompt, new UTF8Encoding(false), lifetime.Token).ConfigureAwait(false);
             lifetime.Token.ThrowIfCancellationRequested();
             e.LaunchIntent = true;
+            Append(e, "Windows Fix registers one on-demand per-user Task Scheduler task using your current interactive token, without a password or administrator/service setup. Its immutable supervisor owns exact Stop and removes the task registration when it exits. No uncertain dispatch is retried.\n", false);
             Update(e, s => s with { MayBeRunning = true, LogPath = NativeFixSupervisor.FilePath(spec, "stdout.log") });
             try
             {
                 if (NativeLauncherForTests is { } launch) launch(spec);
                 else NativeFixSupervisor.Launch(spec);
             }
-            catch { e.TaskConfirmedStopped = true; throw; }
+            catch (NativeFixSupervisor.LaunchException) { e.TaskConfirmedStopped = true; throw; }
             Update(e, s => s with { Status = "running", WorktreeStatus = "in-use" });
             await FollowNativeAsync(e, lifetime.Token).ConfigureAwait(false);
         }
@@ -302,8 +305,8 @@ public sealed partial class CopilotRunService
         catch (Exception ex)
         {
             NativeFinish(e, e.LaunchIntent && !e.TaskConfirmedStopped ? "needs-attention" : "failed", null,
-                ex is RunSetupException or NativeFixSupervisor.OwnershipException ? ex.Message : ex is Win32Exception w
-                    ? $"Native Windows launch failed (Windows error {w.NativeErrorCode}). A host job may prohibit detached breakaway; no WSL fallback was attempted."
+                ex is RunSetupException or NativeFixSupervisor.OwnershipException or NativeFixSupervisor.LaunchException or NativeFixTaskBroker.DispatchException ? ex.Message : ex is Win32Exception w
+                    ? $"Native Windows preparation/supervision failed (Windows error {w.NativeErrorCode}); supervisor CreateProcess failure was not confirmed. Check the retained run and prerequisites; no WSL fallback was attempted."
                     : "Native Windows Fix preparation/supervision failed. Inspect the native prerequisites and retained run; no successful fix is claimed.");
         }
         finally
@@ -381,8 +384,13 @@ public sealed partial class CopilotRunService
             Append(e, supervisionError, true, history: true, token: token);
             var receipt = NativeFixSupervisor.Status(s);
             var active = NativeFixSupervisor.ActiveProcesses(s);
-            if (receipt is { DescendantsStopped: true, ExitCode: not null } && active is null or 0)
+            if (receipt is { DescendantsStopped: true, ExitCode: not null } && active is null or 0 &&
+                !NativeFixSupervisor.SupervisorAlive(receipt))
             {
+                receipt = NativeFixSupervisor.Status(s)
+                    ?? throw new RunSetupException("The native completion receipt disappeared after supervisor exit; work is retained.");
+                if (receipt is not { DescendantsStopped: true, ExitCode: not null })
+                    throw new RunSetupException("The native completion receipt changed after supervisor exit; work and its reservation are retained.");
                 e.TaskConfirmedStopped = true;
                 DrainNativeLog(e, stdout, false, token);
                 DrainNativeLog(e, stderr, true, token);

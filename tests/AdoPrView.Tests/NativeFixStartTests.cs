@@ -139,6 +139,104 @@ internal static class NativeFixStartTests
 
     internal static async Task Run(Func<string, Func<Task>, Task> test)
     {
+        if (Environment.GetEnvironmentVariable("ADOPRVIEW_TEST_NATIVE_SCHEDULER_PROBE") == "1")
+            await test("Native Fix Task Scheduler NEW start reconnects captured backend and exact Stop removes task without changing source", async () =>
+            {
+                await using var fixture = await LocalSource.Create();
+                var portablePath = Path.GetDirectoryName(Git) + ";" + Path.Combine(fixture.DirectoryPath, "portable tools");
+                Environment.SetEnvironmentVariable("PATH", portablePath);
+                string id;
+                NativeFixSupervisor.Specification specification;
+                await using (var service = fixture.Service())
+                {
+                    service.NativeLauncherForTests = null;
+                    if (Environment.GetEnvironmentVariable("ADOPRVIEW_TEST_NATIVE_SUPERVISOR_PAYLOAD") is { } payload)
+                        service.NativeSupervisorAppDirectoryForTests = Path.GetDirectoryName(payload);
+                    var run = service.Start(fixture.Request());
+                    id = run.RunId;
+                    await Until(() => File.Exists(Path.Combine(fixture.State, "native", id, "worktree", "fixture-child.pid")) ||
+                        service.Get(id)!.Status is "failed" or "needs-attention");
+                    Check(service.Get(id) is { Backend: "windows-native", MayBeRunning: true, Status: "running" },
+                        "Real native Scheduler start failed: " + service.Get(id)!.Error);
+                    specification = NativeFixSupervisor.Read<NativeFixSupervisor.Specification>(
+                        Path.Combine(fixture.State, "native", id, "ownership.json"));
+                    Check(specification.SupervisorLauncher == "task-scheduler" && NativeFixTaskBroker.Registered(specification),
+                        "New native run did not pin its Scheduler launch ownership");
+                    Check(specification.CliEnvironment!["PATH"] == portablePath &&
+                        File.ReadAllText(Path.Combine(specification.Worktree, "fixture-path.txt")) == portablePath &&
+                        specification.CliEnvironment.Keys.All(NativeFixEnvironment.IsAllowed),
+                        "Scheduled CLI lost dashboard-only tool paths or captured non-allowlisted variables");
+                    await fixture.AssertPrimaryUnchanged();
+                }
+                Check(NativeFixSupervisor.SupervisorAlive(NativeFixSupervisor.Status(specification)!),
+                    "Disposing the first dashboard killed its Scheduler supervisor");
+                await using var reopened = fixture.Service();
+                await reopened.RecoverAsync();
+                Check(reopened.Get(id) is { Backend: "windows-native", Status: "running", ResumeAttempts: 0 },
+                    "Native Scheduler recovery switched backend or relaunched a prompt");
+                var cancelled = await reopened.CancelAsync(id);
+                Check(cancelled is { Status: "cancelled", MayBeRunning: false, WorktreeRetained: true },
+                    "Reopened exact Stop did not preserve work and confirm inactivity");
+                await Until(() => !NativeFixTaskBroker.Registered(specification));
+                await fixture.AssertPrimaryUnchanged();
+            });
+        await test("Native Fix follower waits for supervisor cleanup and retains a late final receipt warning", async () =>
+        {
+            await using var fixture = await LocalSource.Create();
+            await using var service = fixture.Service();
+            System.Diagnostics.Process? supervisor = null;
+            NativeFixSupervisor.Specification? specification = null;
+            service.NativeLauncherForTests = owned =>
+            {
+                specification = owned;
+                var start = new System.Diagnostics.ProcessStartInfo(Exe) { UseShellExecute = false, CreateNoWindow = true };
+                start.ArgumentList.Add("--native-fix-delayed-cleanup");
+                start.ArgumentList.Add(NativeFixSupervisor.FilePath(owned, "ownership.json"));
+                supervisor = System.Diagnostics.Process.Start(start)!;
+            };
+            try
+            {
+                var run = service.Start(fixture.Request());
+                await Until(() => specification is not null && NativeFixSupervisor.Status(specification) is { ExitCode: 0 });
+                await Task.Delay(400);
+                Check(service.Get(run.RunId)!.IsActive && NativeFixSupervisor.SupervisorAlive(NativeFixSupervisor.Status(specification!)!),
+                    "Follower published completion while the supervisor was still cleaning up");
+                File.WriteAllText(NativeFixSupervisor.FilePath(specification!, "release-cleanup"), "");
+                await Until(() => service.Get(run.RunId)!.Status == "completed");
+                Check(service.Get(run.RunId)!.Error!.Contains("delayed Scheduler cleanup failed") &&
+                    service.Get(run.RunId)!.Output.Contains("delayed Scheduler cleanup failed"),
+                    "Follower lost the cleanup warning written after the early terminal receipt");
+            }
+            finally
+            {
+                if (specification is not null) File.WriteAllText(NativeFixSupervisor.FilePath(specification, "release-cleanup"), "");
+                if (supervisor is not null)
+                {
+                    await supervisor.WaitForExitAsync();
+                    supervisor.Dispose();
+                }
+            }
+        });
+        await test("Native Fix uncertain NEW launch result preserves reservation and exact Stop without duplicate dispatch", async () =>
+        {
+            await using var fixture = await LocalSource.Create();
+            await using var service = fixture.Service();
+            var launches = 0;
+            service.NativeLauncherForTests = s =>
+            {
+                launches++;
+                NativeFixSupervisor.Launch(s, nestedSyntheticFixture: true);
+                throw new NativeFixTaskBroker.DispatchException("Synthetic uncertain dispatch", new IOException("lost acknowledgement"));
+            };
+            var run = service.Start(fixture.Request());
+            await Until(() => service.Get(run.RunId)!.Status == "needs-attention");
+            Check(service.Get(run.RunId)!.MayBeRunning, "Uncertain dispatch was recorded as a definite no-child failure");
+            try { service.Start(fixture.Request()); throw new Exception("Uncertain launch allowed a duplicate start"); }
+            catch (InvalidOperationException) { }
+            var stopped = await service.CancelAsync(run.RunId);
+            Check(launches == 1 && stopped is { Status: "cancelled", MayBeRunning: false },
+                "Exact Stop failed after uncertain launch or dispatch was retried");
+        });
         await test("Native Fix NEW Start runs real local Git preparation, exact owned worktree and CLI without WSL", async () =>
         {
             await using var fixture = await LocalSource.Create();
@@ -280,7 +378,7 @@ internal static class NativeFixStartTests
             string id;
             await using (var service = fixture.Service())
             {
-                service.NativeLauncherForTests = _ => throw new System.ComponentModel.Win32Exception(5);
+                service.NativeLauncherForTests = _ => throw new NativeFixSupervisor.LaunchException(5, "Synthetic definite CreateProcess failure");
                 var started = service.Start(fixture.Request());
                 id = started.RunId;
                 await Until(() => service.Get(id)!.Status == "failed");

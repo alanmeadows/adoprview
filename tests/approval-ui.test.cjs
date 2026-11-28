@@ -193,7 +193,7 @@ test('Fix drawer saves additional instructions independently without changing ca
   assert.equal(hooks.S.runs.get(existing.runId), existing);
 });
 
-test('new Windows Fix settings save native checkouts while preserving legacy setup and label each actual run host', async () => {
+test('Fix backend settings preserve both checkouts and label each captured run host', async () => {
   const { hooks, pr, window, elements, document } = setup();
   hooks.S.settings.repos = [{ org: 'contoso', project: 'Sample', repo: 'sample-service' }];
   hooks.S.settings.wslDistro = 'Legacy-Ubuntu';
@@ -201,15 +201,22 @@ test('new Windows Fix settings save native checkouts while preserving legacy set
   hooks.S.settings.nativeRepoDirectories = { 'contoso/sample/sample-service': 'C:\\repos\\sample-service' };
   hooks.renderDrawer();
   const drawer = elements.get('#drawerBody').innerHTML;
-  assert.match(drawer, /Copilot on Windows/);
+  assert.match(drawer, /Copilot Fix/);
+  assert.match(drawer, /Windows \(default\)/);
+  assert.match(drawer, /WSL \(opt in\)/);
   assert.match(drawer, /data-native-repo="contoso\/sample\/sample-service"/);
   assert.match(drawer, /C:\\repos\\sample-service/);
-  assert.match(drawer, /Ask\/focused review read pinned ADO source directly/);
-  assert.doesNotMatch(drawer, /id="wslDistro"|data-wsl-repo|placeholder="~\/clones/);
+  assert.match(drawer, /Ask and focused reviews always use Windows independently/);
+  assert.match(drawer, /id="wslDistro"/);
+  assert.match(drawer, /data-wsl-repo/);
+  assert.match(drawer, /aria-label="WSL checkout for contoso \/ Sample \/ sample-service"/);
+  assert.doesNotMatch(drawer, /placeholder="~\/clones/);
   for (const id of ['refreshSeconds', 'mergeCheckMinutes', 'triageInstructions', 'additionalTriageInstructions',
     'mergeStrategy', 'notifications', 'sound', 'deleteSourceBranch', 'transitionWorkItems'])
     elements.set('#' + id, { value: '', checked: false });
-  document.querySelectorAll = selector => selector === '[data-native-repo]'
+  elements.set('#fixBackend', { value: 'windows-native' });
+  elements.set('#wslDistro', { value: 'Legacy-Ubuntu' });
+  elements.get('#drawerBody').querySelectorAll = selector => selector === '[data-native-repo]'
     ? [{ dataset: { nativeRepo: 'contoso/sample/sample-service' }, value: ' C:\\other\\checkout ' }] : [];
   let saved;
   window.MockHost.rpc = async (method, params) => {
@@ -230,6 +237,11 @@ test('new Windows Fix settings save native checkouts while preserving legacy set
   assert.match(hooks.renderDetail(pr), /Fix PR · Legacy Copilot in WSL/);
   assert.match(hooks.renderDetail(pr), /retained legacy log/);
   assert.equal(hooks.S.runs.get(legacy.runId), legacy);
+  hooks.S.runs.clear();
+  const opted = { ...legacy, runId: 'opted', backend: 'wsl' };
+  hooks.S.runs.set(opted.runId, opted);
+  assert.match(hooks.renderDetail(pr), /Fix PR · Copilot in WSL/);
+  assert.doesNotMatch(hooks.renderDetail(pr), /Legacy Copilot in WSL/);
 });
 
 test('Ask and focused review advertise authenticated native source without mandatory checkout or Linux tools', () => {

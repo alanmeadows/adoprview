@@ -82,6 +82,7 @@ public sealed class AppSettings
     public AutoCompleteOptions AutoComplete { get; set; } = new();
     public string? TriageInstructions { get; set; }
     public string? AdditionalTriageInstructions { get; set; }
+    public string FixBackend { get; set; } = "windows-native";
     public string? WslDistro { get; set; }
     public Dictionary<string, string> WslRepoDirectories { get; set; } = new(StringComparer.OrdinalIgnoreCase);
     public Dictionary<string, string> NativeRepoDirectories { get; set; } = new(StringComparer.OrdinalIgnoreCase);
@@ -93,6 +94,18 @@ public sealed class AppSettings
     public SpeechConnection? VideoSpeech { get; set; }
     // Fields written by other versions or tools survive every save.
     [JsonExtensionData] public Dictionary<string, JsonElement>? Extra { get; set; }
+
+    internal (string Backend, string? Distro, string Directory) FixTarget(RepoRef repo)
+    {
+        if (FixBackend is not ("windows-native" or "wsl"))
+            throw new ArgumentException("Choose Windows or WSL in Settings > Copilot Fix.");
+        var directories = FixBackend == "wsl" ? WslRepoDirectories : NativeRepoDirectories;
+        if (directories is null || !directories.TryGetValue(repo.Key, out var path) || string.IsNullOrWhiteSpace(path))
+            throw new ArgumentException($"Set the { (FixBackend == "wsl" ? "WSL" : "Windows") } repository path for {repo.Repo} in Settings > Copilot Fix.");
+        if (FixBackend == "wsl" && string.IsNullOrWhiteSpace(WslDistro))
+            throw new ArgumentException("Select an explicit installed WSL distro in Settings > Copilot Fix.");
+        return (FixBackend, FixBackend == "wsl" ? WslDistro!.Trim() : null, path.Trim());
+    }
 }
 
 public sealed class WindowPlacement

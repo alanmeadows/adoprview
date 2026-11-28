@@ -56,6 +56,25 @@ static class CopilotRunTests
     public static async Task Run(Func<string, Func<Task>, Task> test)
     {
         await NativeFixTests.Run(test);
+        await test("Copilot opted-in WSL captures explicit backend distro path and rejects missing targets before any transport call", async () =>
+        {
+            using var fake = new FakeTransport();
+            await using var service = new CopilotRunService(fake);
+            var request = Request() with { Backend = "wsl" };
+            foreach (var invalid in new[] { request with { Distro = null }, request with { Directory = null },
+                request with { Directory = "~/repo" }, request with { Backend = "automatic" } })
+                await ExpectError(() => service.StartAsync(invalid), invalid.Backend == "automatic" ? "Choose Windows or WSL" : "explicit");
+            Check(fake.Calls.IsEmpty, "Invalid WSL target invoked a transport or inferred a host");
+            var run = await service.StartAsync(request);
+            await fake.Started.Task.WaitAsync(TimeSpan.FromSeconds(5));
+            request = request with { Backend = "windows-native", Distro = "Changed", Directory = @"C:\changed" };
+            var active = service.Get(run.RunId)!;
+            Check(active.Backend == "wsl" && active.Request.Backend == "wsl" &&
+                active.Request.Distro == "Offline-Ubuntu" && active.Request.Directory == "/home/offline/clones/offline-repo" &&
+                fake.Calls.All(c => c.Distribution == "Offline-Ubuntu"), "Active WSL run changed its captured target");
+            fake.Finish(0);
+            await Wait(service, run.RunId, s => !s.IsActive);
+        });
         await test("Copilot native Stop notice retains returned warnings without inventing stop proof", () =>
         {
             var stopped = new CopilotRunState(new string('a', 32), Request(), "cancelled", "", 143, null,

@@ -82,13 +82,14 @@ test('Additional Fix fields are independently editable and restored in the real 
       }));
       for(const run of window.fixExisting)S.runs.set(run.runId,run);
       window.MockHost.rpc=async(method,p)=>{
+        if(method==='listWslDistros')return ['Fixture-Ubuntu','Fixture-Debian'];
         if(method!=='saveSettings')throw Error('Unexpected host call '+method);
         window.fixSaved.push(structuredClone(p.settings));
         return structuredClone(p.settings);
       };
     `);
     await click('#settingsBtn');
-    assert.equal(await evaluate(`!!document.querySelector('[data-native-repo]')&&!document.querySelector('[data-wsl-repo]')&&!document.querySelector('#wslDistro')`), true);
+    assert.equal(await evaluate(`!!document.querySelector('[data-native-repo]')&&document.querySelector('[data-fix-settings="wsl"]').hidden&&document.querySelector('#fixBackend').value==='windows-native'`), true);
     assert.equal(await evaluate(`getComputedStyle(document.querySelector('.native-repo label small')).display`), 'block');
     const nativeKey = await evaluate(`document.querySelector('[data-native-repo]').dataset.nativeRepo`);
     const nativeDirectory = 'C:\\synthetic\\checkout with spaces';
@@ -112,6 +113,31 @@ test('Additional Fix fields are independently editable and restored in the real 
     assert.equal(saved.nativeRepoDirectories[nativeKey], nativeDirectory);
     assert.equal(saved.wslDistro, 'Legacy-Ubuntu');
     assert.equal(saved.wslRepoDirectories['offline/project/repo'], '/legacy/source');
+    await evaluate(`
+      document.querySelector('#fixBackend').value='wsl';
+      document.querySelector('#fixBackend').dispatchEvent(new Event('change',{bubbles:true}));
+      new Promise(resolve=>setTimeout(resolve,100));
+    `);
+    assert.equal(await evaluate(`document.querySelector('[data-fix-settings="windows-native"]').hidden&&!document.querySelector('[data-fix-settings="wsl"]').hidden`), true);
+    assert.equal(await evaluate(`[...document.querySelectorAll('[data-wsl-repo]')].every(el=>{
+      const r=S.settings.repos.find(r=>repoKey(r)===el.dataset.wslRepo);
+      return el.getAttribute('aria-label')==='WSL checkout for '+r.org+' / '+r.project+' / '+r.repo;
+    })`), true);
+    await evaluate(`
+      document.querySelector('#wslDistro').value='Fixture-Debian';
+      document.querySelector('[data-wsl-repo]').value='/home/fixture/repo';
+    `);
+    await click('[data-dact="save"]');
+    const opted = await evaluate('window.fixSaved.pop()');
+    assert.equal(opted.fixBackend, 'wsl');
+    assert.equal(opted.wslDistro, 'Fixture-Debian');
+    assert.equal(opted.nativeRepoDirectories[nativeKey], nativeDirectory);
+    assert.equal(opted.wslRepoDirectories[nativeKey], '/home/fixture/repo');
+    assert.equal(opted.wslRepoDirectories['offline/project/repo'], '/legacy/source');
+    await evaluate(`
+      document.querySelector('#fixBackend').value='windows-native';
+      document.querySelector('#fixBackend').dispatchEvent(new Event('change',{bubbles:true}));
+    `);
     await evaluate('closeDrawer();S.settings=structuredClone(window.fixSaved[0]);');
     await click('#settingsBtn');
     assert.equal(await evaluate(`document.querySelector('[data-native-repo]').value`), nativeDirectory);
@@ -1707,7 +1733,7 @@ test('real row hit testing and action identity across refreshes', { timeout: 900
     const assertOneStatusScope = layout => {
       assert.equal(layout.scopes.length, 1, 'One Fix PR execution notice per expanded PR');
       assert.deepEqual([layout.scopes[0].inStatus, layout.scopes[0].inRun, layout.scopes[0].visible], [true, false, true]);
-      assert.match(layout.scopes[0].text, /By default, Fix PR asks Copilot on Windows to try to fix merge conflicts, failing checks and review feedback/);
+      assert.match(layout.scopes[0].text, /Fix PR asks Copilot to try to fix merge conflicts, failing checks and review feedback/);
     };
 
     await t.test('Fix PR plain-language summary and accessible permission details survive panel updates', async () => {

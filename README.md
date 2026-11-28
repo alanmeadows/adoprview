@@ -65,11 +65,12 @@ merge preview is current or complete, or that every policy is known or green.
 
 ![A blocked PR expanded with an inline Copilot run panel showing synthetic demo output and a Cancel run button](docs/images/copilot-fix-inline.png)
 
-The sparkle button on a row starts Copilot CLI on Windows to fix that PR in its own
+The sparkle button on a row starts Copilot CLI on Windows by default to fix that PR in its own
 isolated worktree. Its output streams into the PR's expanded row, where you can
 follow or cancel it. The output in this picture is synthetic demo data. Fix is
-optional and needs a mapped Windows Git checkout and authenticated Windows
-Copilot CLI; it runs with broad
+optional. **Settings > Copilot Fix** offers an explicit Windows/WSL choice;
+the selected backend needs its own repository path and authenticated full CLI.
+WSL is opt-in and also requires an explicit installed distro. It runs with broad
 permissions and the worktree is not a sandbox. Read
 [Inline Copilot Fix](docs/usage.md#inline-copilot-fix) before using it.
 
@@ -114,7 +115,7 @@ The agent does the configuration. You may still need to:
 - answer a question about which repositories, watched authors or Windows Fix checkout
   to use, only if it cannot work that out;
 - sign in to Windows Copilot CLI, only if you want inline Copilot Fix;
-- keep legacy WSL runs' original environment for recovery; new work needs no WSL;
+- keep existing runs' original environment for recovery; WSL is needed only if opted in;
 - sign in to the Windows GitHub CLI (`gh auth login`) with a Copilot-enabled
   account, only if you want Explain, PR questions or TikTok This PR;
 - do the actual reviewing, approving, Proof of Presence and other PR decisions.
